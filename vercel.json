@@ -1,8 +1,17 @@
 {
   "rewrites": [
     {
-      "source": "/api/(.*)",
-      "destination": "/api/$1"
+      "source": "/api/scan",
+      "destination": "/api/scan"
+    }
+  ],
+  "routes": [
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/api/scan",
+      "dest": "/api/scan"
     }
   ]
 }

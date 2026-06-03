@@ -205,6 +205,25 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+
+        # Serve the HTML page for non-API routes
+        if "/api/scan" not in self.path:
+            import os
+            html_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "public", "index.html")
+            try:
+                with open(html_path, "r") as f:
+                    html = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(html.encode())
+            except FileNotFoundError:
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"index.html not found")
+            return
+
         tickers_raw = params.get("tickers", [""])[0]
 
         if not tickers_raw:

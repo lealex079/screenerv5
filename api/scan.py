@@ -242,7 +242,7 @@ def scan_ticker(ticker):
     }
 
 
-INDEX_HTML = open("/var/task/public/index.html").read()
+INDEX_HTML = ""
 
 
 class handler(BaseHTTPRequestHandler):

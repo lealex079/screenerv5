@@ -8,19 +8,28 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-from scipy.stats import norm as _norm
+def _ncdf(x):
+    """Standard normal CDF via numpy — no scipy needed."""
+    return 0.5 * (1.0 + np.sign(x) * np.sqrt(1 - np.exp(-2 * x**2 / np.pi)) if False else
+                  float(0.5 * (1 + np.math.erf(x / np.sqrt(2)))) if hasattr(np, 'math') else
+                  float(0.5 * (1 + __import__('math').erf(x / __import__('math').sqrt(2)))))
+
+def _ncdf(x):
+    import math
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2)))
 
 def bs_delta(spot, strike, dte_days, iv, r=0.045, is_put=True):
-    """Black-Scholes delta. r defaults to ~current 3-month T-bill rate."""
+    """Black-Scholes delta using math.erf — no scipy needed."""
+    import math
     try:
         if iv <= 0 or dte_days <= 0 or spot <= 0 or strike <= 0:
             return None
         T = dte_days / 365.0
-        d1 = (np.log(spot / strike) + (r + 0.5 * iv ** 2) * T) / (iv * np.sqrt(T))
+        d1 = (math.log(spot / strike) + (r + 0.5 * iv ** 2) * T) / (iv * math.sqrt(T))
         if is_put:
-            return round(_norm.cdf(d1) - 1, 3)  # negative for puts
+            return round(_ncdf(d1) - 1, 3)
         else:
-            return round(_norm.cdf(d1), 3)  # positive for calls
+            return round(_ncdf(d1), 3)
     except Exception:
         return None
 

@@ -83,6 +83,79 @@ SECTOR_METRICS = {
 }
 
 
+def fetch_options(ticker):
+    """Fetch options chain server-side to avoid CORS. Returns puts+calls for best 27-45 DTE expiry."""
+    import urllib.request
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    base_url = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker}"
+    req = urllib.request.Request(base_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+    except Exception as e:
+        return {"error": str(e)}
+
+    result = data.get("optionChain", {}).get("result", [{}])[0]
+    if not result:
+        return {"error": "No data returned"}
+
+    spot = result.get("quote", {}).get("regularMarketPrice", 0)
+    all_exps = result.get("expirationDates", [])
+
+    import time
+    now = time.time()
+    valid_exps = [ts for ts in all_exps if 27 <= round((ts - now) / 86400) <= 45]
+    if not valid_exps:
+        return {"error": "No expirations in 27-45 DTE window"}
+
+    exp_ts = valid_exps[0]
+    exp_url = f"{base_url}?date={exp_ts}"
+    req2 = urllib.request.Request(exp_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req2, timeout=10) as r:
+            exp_data = json.loads(r.read().decode())
+    except Exception as e:
+        return {"error": str(e)}
+
+    exp_result = exp_data.get("optionChain", {}).get("result", [{}])[0]
+    if not exp_result:
+        return {"error": "No expiry data"}
+
+    opts = exp_result.get("options", [{}])[0]
+    dte = round((exp_ts - now) / 86400)
+    import datetime
+    exp_str = datetime.datetime.utcfromtimestamp(exp_ts).strftime("%b %-d, %Y")
+
+    def clean(contracts):
+        out = []
+        for c in contracts:
+            delta = abs(c.get("delta") or 0)
+            if delta < 0.01 or delta > 0.30:
+                continue
+            out.append({
+                "contractSymbol": c.get("contractSymbol", ""),
+                "strike": c.get("strike", 0),
+                "bid": c.get("bid", 0),
+                "ask": c.get("ask", 0),
+                "delta": round(delta, 3),
+                "impliedVolatility": round(c.get("impliedVolatility", 0), 4),
+                "openInterest": c.get("openInterest", 0),
+            })
+        return out
+
+    return {
+        "spot": spot,
+        "dte": dte,
+        "expStr": exp_str,
+        "expTs": exp_ts,
+        "puts": clean(opts.get("puts", [])),
+        "calls": clean(opts.get("calls", [])),
+    }
+
+
 def scan_ticker(ticker):
     raw = yf.download(ticker, start="2020-01-01", auto_adjust=True, progress=False)
     if isinstance(raw.columns, pd.MultiIndex):
@@ -502,27 +575,12 @@ async function loadOptions(ticker, crashScore, btnEl) {
   const tablesEl = document.getElementById('opts-tables-' + ticker);
   if (loadingEl) { loadingEl.style.display = 'block'; loadingEl.textContent = 'Fetching chain...'; }
   try {
-    const r1 = await fetch('https://query1.finance.yahoo.com/v7/finance/options/' + ticker, {headers:{'Accept':'application/json'}});
-    if (!r1.ok) throw new Error('HTTP ' + r1.status);
-    const d1 = await r1.json();
-    const result1 = d1?.optionChain?.result?.[0];
-    if (!result1) throw new Error('No data returned');
-    const allExps = result1.expirationDates || [];
-    const validExps = allExps.filter(ts => { const dte=Math.round((ts*1000-Date.now())/86400000); return dte>=27&&dte<=45; });
-    if (!validExps.length) { if(loadingEl) loadingEl.textContent='No expirations in 27-45 DTE window.'; btnEl.disabled=false; btnEl.textContent='Retry'; return; }
-    const expTs = validExps[0];
-    const r2 = await fetch('https://query1.finance.yahoo.com/v7/finance/options/'+ticker+'?date='+expTs, {headers:{'Accept':'application/json'}});
-    if (!r2.ok) throw new Error('HTTP ' + r2.status);
-    const d2 = await r2.json();
-    const result2 = d2?.optionChain?.result?.[0];
-    if (!result2) throw new Error('No expiry data');
-    const puts = result2.options?.[0]?.puts || [];
-    const calls = result2.options?.[0]?.calls || [];
-    const spot = result2.quote?.regularMarketPrice || 0;
-    const dte = Math.round((expTs*1000-Date.now())/86400000);
-    const expStr = new Date(expTs*1000).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    const res = await fetch('/api/scan?options=' + encodeURIComponent(ticker));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
     if (loadingEl) loadingEl.style.display='none';
-    if (tablesEl) tablesEl.innerHTML = renderOptionsTables(puts, calls, spot, dte, expStr, crashScore);
+    if (tablesEl) tablesEl.innerHTML = renderOptionsTables(data.puts, data.calls, data.spot, data.dte, data.expStr, crashScore);
     btnEl.style.display='none';
   } catch(e) {
     if (loadingEl) { loadingEl.style.display='block'; loadingEl.textContent='Error: '+e.message+'. Try again.'; }
@@ -638,12 +696,26 @@ class handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         tickers_raw = params.get("tickers", [""])[0]
+        options_ticker = params.get("options", [""])[0].strip().upper()
 
-        if not tickers_raw:
+        if not tickers_raw and not options_ticker:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(INDEX_HTML.encode())
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        if options_ticker:
+            try:
+                result = fetch_options(options_ticker)
+            except Exception as e:
+                result = {"error": str(e)}
+            self.wfile.write(json.dumps(result).encode())
             return
 
         tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()][:5]
@@ -655,8 +727,4 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 results.append({"ticker": ticker, "error": str(e)})
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
         self.wfile.write(json.dumps({"results": results}).encode())

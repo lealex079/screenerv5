@@ -810,15 +810,23 @@ function formatForClaude(d) {
   // Include options chain if already loaded
   const optsData = optionsCache[d.ticker];
   if (optsData) {
-    const fmtRow = (c, isCall) => {
-      const be = isCall ? (c.strike + c.bid).toFixed(2) : (c.strike - c.bid).toFixed(2);
-      const annYld = optsData.dte > 0 ? ((c.bid / c.strike) * (365 / optsData.dte) * 100).toFixed(1) : '0.0';
-      const target = isCall
-        ? optsData.calls.reduce((b,x)=>Math.abs(x.delta-0.20)<Math.abs(b.delta-0.20)?x:b, optsData.calls[0])
-        : optsData.puts.reduce((b,x)=>Math.abs(x.delta-0.20)<Math.abs(b.delta-0.20)?x:b, optsData.puts[0]);
-      const dot = target && c.contractSymbol === target.contractSymbol ? ' *' : '';
-      return '  $'+c.strike.toFixed(0)+dot+'\\t$'+c.bid.toFixed(2)+'\\t'+c.delta.toFixed(2)+'\\t'+(c.impliedVolatility*100).toFixed(0)+'%\\t'+c.openInterest+'\\t$'+be+'\\t'+annYld+'%';
+    const fmtRow = (c, isCall, targetSym) => {
+      const strike=parseFloat(c.strike)||0;
+      const bid=parseFloat(c.bid)||0;
+      const ask=parseFloat(c.ask)||0;
+      const delta=parseFloat(c.delta)||0;
+      const theta=c.theta!=null?'$'+parseFloat(c.theta).toFixed(3):'N/A';
+      const iv=(parseFloat(c.impliedVolatility)||0)*100;
+      const oi=parseInt(c.openInterest)||0;
+      const vol=parseInt(c.volume)||0;
+      const be = isCall ? (strike+bid).toFixed(2) : (strike-bid).toFixed(2);
+      const annYld = optsData.dte > 0 ? ((bid/strike)*(365/optsData.dte)*100).toFixed(1) : '0.0';
+      const probExp = ((1-delta)*100).toFixed(0)+'%';
+      const dot = c.contractSymbol === targetSym ? ' *' : '';
+      return '  $'+strike.toFixed(0)+dot+'\\t$'+bid.toFixed(2)+'\\t$'+ask.toFixed(2)+'\\t'+delta.toFixed(2)+'\\t'+theta+'\\t'+iv.toFixed(0)+'%\\t'+oi+'\\t'+vol+'\\t$'+be+'\\t'+annYld+'%\\t'+probExp;
     };
+    const putTarget = optsData.puts.length ? optsData.puts.reduce((b,x)=>Math.abs(x.delta-0.20)<Math.abs(b.delta-0.20)?x:b, optsData.puts[0]).contractSymbol : '';
+    const callTarget = optsData.calls.length ? optsData.calls.reduce((b,x)=>Math.abs(x.delta-0.20)<Math.abs(b.delta-0.20)?x:b, optsData.calls[0]).contractSymbol : '';
     lines.push('');
     lines.push('OPTIONS — '+optsData.expStr+' ('+optsData.dte+'d) | Spot $'+optsData.spot.toFixed(2));
     lines.push('SELL PUTS (* = ~20 delta target)');

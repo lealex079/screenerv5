@@ -8,6 +8,23 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+from scipy.stats import norm as _norm
+
+def bs_delta(spot, strike, dte_days, iv, r=0.045, is_put=True):
+    """Black-Scholes delta. r defaults to ~current 3-month T-bill rate."""
+    try:
+        if iv <= 0 or dte_days <= 0 or spot <= 0 or strike <= 0:
+            return None
+        T = dte_days / 365.0
+        d1 = (np.log(spot / strike) + (r + 0.5 * iv ** 2) * T) / (iv * np.sqrt(T))
+        if is_put:
+            return round(_norm.cdf(d1) - 1, 3)  # negative for puts
+        else:
+            return round(_norm.cdf(d1), 3)  # positive for calls
+    except Exception:
+        return None
+
+
 def compute_rsi(series, window=14):
     delta = series.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/window, adjust=False).mean()
@@ -41,6 +58,13 @@ def compute_indicators(df):
     df["high_52w"] = close.rolling(252).max()
     df["low_52w"] = close.rolling(252).min()
     df["drawdown"] = (close - df["high_52w"]) / df["high_52w"]
+    # MA momentum: rate of change of the MA itself over 1d, 5d, 21d
+    df["ma50_roc_1d"]  = df["ma50"].pct_change(1) * 100
+    df["ma50_roc_5d"]  = df["ma50"].pct_change(5) * 100
+    df["ma50_roc_21d"] = df["ma50"].pct_change(21) * 100
+    df["ma200_roc_1d"]  = df["ma200"].pct_change(1) * 100
+    df["ma200_roc_5d"]  = df["ma200"].pct_change(5) * 100
+    df["ma200_roc_21d"] = df["ma200"].pct_change(21) * 100
     mfm = ((close - df["Low"]) - (df["High"] - close)) / (df["High"] - df["Low"]).replace(0, np.nan)
     mfv = mfm * volume
     df["cmf_20"] = mfv.rolling(20).sum() / volume.rolling(20).sum()
@@ -135,27 +159,29 @@ def fetch_options(ticker):
     def clean(df, is_put):
         out = []
         for _, row in df.iterrows():
-            # yfinance returns delta as negative for puts — use abs
-            raw_delta = row.get("delta") if hasattr(row, "get") else getattr(row, "delta", None)
-            if raw_delta is None or (hasattr(raw_delta, "__float__") and np.isnan(float(raw_delta))):
-                continue
-            delta = abs(float(raw_delta))
-            if delta < 0.01 or delta > 0.30:
-                continue
-            bid = float(row.get("bid") if hasattr(row, "get") else getattr(row, "bid", 0) or 0)
-            ask = float(row.get("ask") if hasattr(row, "get") else getattr(row, "ask", 0) or 0)
-            strike = float(row.get("strike") if hasattr(row, "get") else getattr(row, "strike", 0) or 0)
-            iv_raw = row.get("impliedVolatility") if hasattr(row, "get") else getattr(row, "impliedVolatility", 0)
+            strike = float(getattr(row, "strike", 0) or 0)
+            bid = float(getattr(row, "bid", 0) or 0)
+            ask = float(getattr(row, "ask", 0) or 0)
+            iv_raw = getattr(row, "impliedVolatility", 0)
             iv = float(iv_raw) if iv_raw and not np.isnan(float(iv_raw)) else 0
-            oi_raw = row.get("openInterest") if hasattr(row, "get") else getattr(row, "openInterest", 0)
+            oi_raw = getattr(row, "openInterest", 0)
             oi = int(oi_raw) if oi_raw and not np.isnan(float(oi_raw)) else 0
-            sym = row.get("contractSymbol") if hasattr(row, "get") else getattr(row, "contractSymbol", "")
+            sym = str(getattr(row, "contractSymbol", ""))
+
+            # Always compute BS delta — don't rely on yfinance returning it
+            delta = bs_delta(spot, strike, best_dte, iv, is_put=is_put)
+            if delta is None:
+                continue
+            delta_abs = abs(delta)
+            if delta_abs < 0.01 or delta_abs > 0.35:
+                continue
+
             out.append({
-                "contractSymbol": str(sym),
+                "contractSymbol": sym,
                 "strike": strike,
                 "bid": bid,
                 "ask": ask,
-                "delta": round(delta, 3),
+                "delta": round(delta_abs, 3),
                 "impliedVolatility": round(iv, 4),
                 "openInterest": oi,
             })
@@ -163,40 +189,6 @@ def fetch_options(ticker):
 
     puts = clean(chain.puts, True)
     calls = clean(chain.calls, False)
-
-    # If delta is missing from yfinance (common), filter by strike proximity to spot instead
-    if not puts and not calls:
-        def clean_no_delta(df, is_put):
-            out = []
-            for _, row in df.iterrows():
-                strike = float(getattr(row, "strike", 0) or 0)
-                if spot <= 0:
-                    continue
-                moneyness = strike / spot
-                # ~20 delta puts are ~15-20% OTM, calls ~15-20% OTM
-                if is_put and not (0.75 <= moneyness <= 0.95):
-                    continue
-                if not is_put and not (1.05 <= moneyness <= 1.25):
-                    continue
-                bid = float(getattr(row, "bid", 0) or 0)
-                ask = float(getattr(row, "ask", 0) or 0)
-                iv_raw = getattr(row, "impliedVolatility", 0)
-                iv = float(iv_raw) if iv_raw and not np.isnan(float(iv_raw)) else 0
-                oi_raw = getattr(row, "openInterest", 0)
-                oi = int(oi_raw) if oi_raw and not np.isnan(float(oi_raw)) else 0
-                sym = getattr(row, "contractSymbol", "")
-                out.append({
-                    "contractSymbol": str(sym),
-                    "strike": strike,
-                    "bid": bid,
-                    "ask": ask,
-                    "delta": None,
-                    "impliedVolatility": round(iv, 4),
-                    "openInterest": oi,
-                })
-            return out
-        puts = clean_no_delta(chain.puts, True)
-        calls = clean_no_delta(chain.calls, False)
 
     return {
         "spot": spot,
@@ -332,6 +324,12 @@ def scan_ticker(ticker):
         "rev_growth": round(rev_growth * 100, 1) if rev_growth else None,
         "ma50": round(float(last["ma50"]), 2) if pd.notna(last["ma50"]) else None,
         "ma200": round(float(last["ma200"]), 2) if pd.notna(last["ma200"]) else None,
+        "ma50_roc_1d":  round(float(last["ma50_roc_1d"]), 3) if pd.notna(last["ma50_roc_1d"]) else None,
+        "ma50_roc_5d":  round(float(last["ma50_roc_5d"]), 3) if pd.notna(last["ma50_roc_5d"]) else None,
+        "ma50_roc_21d": round(float(last["ma50_roc_21d"]), 3) if pd.notna(last["ma50_roc_21d"]) else None,
+        "ma200_roc_1d":  round(float(last["ma200_roc_1d"]), 3) if pd.notna(last["ma200_roc_1d"]) else None,
+        "ma200_roc_5d":  round(float(last["ma200_roc_5d"]), 3) if pd.notna(last["ma200_roc_5d"]) else None,
+        "ma200_roc_21d": round(float(last["ma200_roc_21d"]), 3) if pd.notna(last["ma200_roc_21d"]) else None,
         "high_52w": round(float(last["high_52w"]), 2) if pd.notna(last["high_52w"]) else None,
         "low_52w": round(float(last["low_52w"]), 2) if pd.notna(last["low_52w"]) else None,
         "rally_1d": round(float(last["rally_1d"]) * 100, 2) if pd.notna(last["rally_1d"]) else None,
@@ -428,6 +426,11 @@ INDEX_HTML = """<!DOCTYPE html>
   .opts-table tr:last-child td { border-bottom: none; }
   .opts-expiry { font-size: 10px; color: #475569; margin-top: 4px; }
   .opts-loading { font-size: 12px; color: #475569; padding: 8px 0; }
+  .ma-momentum { margin-bottom: 10px; display: flex; flex-direction: column; gap: 5px; }
+  .ma-row { display: flex; align-items: center; gap: 10px; font-size: 12px; background: #0f1419; border-radius: 6px; padding: 6px 10px; }
+  .ma-label { color: #475569; font-size: 11px; min-width: 80px; }
+  .ma-roc { display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 44px; }
+  .ma-roc-label { font-size: 10px; color: #334155; text-transform: uppercase; letter-spacing: 0.3px; }
   .copy-row { display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 0.5px solid #1e2a35; }
   .copy-btn { background: #1e2a35; color: #94a3b8; border: 0.5px solid #2a3a4e; padding: 6px 12px; border-radius: 6px; font-size: 11px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
   .copy-btn:hover { background: #2a3a4e; color: #e2e8f0; }
@@ -541,6 +544,12 @@ function renderCard(d) {
     const c=d.price>val?'c-green':'c-red';
     return '<div class="price-level-box"><div class="pl-label">'+label+'</div><div class="pl-value '+c+'">$'+val.toFixed(2)+'</div></div>';
   }
+  function maRoc(label, val) {
+    if (val===null||val===undefined) return '<span class="ma-roc"><span class="ma-roc-label">'+label+'</span><span class="c-dim">—</span></span>';
+    const c=val>0?'c-green':val<0?'c-red':'c-muted';
+    const sign=val>0?'+':'';
+    return '<span class="ma-roc"><span class="ma-roc-label">'+label+'</span><span class="'+c+'">'+sign+val.toFixed(2)+'%</span></span>';
+  }
 
   const pegColor = d.peg===null?'':d.peg<1?'c-green':d.peg>2?'c-red':'';
   const roicColor = d.roic===null?'':d.roic>15?'c-green':d.roic<8?'c-red':'';
@@ -563,6 +572,16 @@ function renderCard(d) {
       maBox('200 MA', d.ma200) +
       '<div class="price-level-box"><div class="pl-label">52w High</div><div class="pl-value c-muted">$'+(d.high_52w?d.high_52w.toFixed(2):'N/A')+'</div></div>' +
       '<div class="price-level-box"><div class="pl-label">52w Low</div><div class="pl-value c-muted">$'+(d.low_52w?d.low_52w.toFixed(2):'N/A')+'</div></div>' +
+    '</div>' +
+    '<div class="ma-momentum">' +
+      '<div class="ma-row">' +
+        '<span class="ma-label">50 MA slope</span>' +
+        maRoc('1D', d.ma50_roc_1d) + maRoc('1W', d.ma50_roc_5d) + maRoc('1M', d.ma50_roc_21d) +
+      '</div>' +
+      '<div class="ma-row">' +
+        '<span class="ma-label">200 MA slope</span>' +
+        maRoc('1D', d.ma200_roc_1d) + maRoc('1W', d.ma200_roc_5d) + maRoc('1M', d.ma200_roc_21d) +
+      '</div>' +
     '</div>' +
     '<div class="returns-row">' +
       retBox('Daily', d.rally_1d) +
@@ -642,13 +661,11 @@ async function loadOptions(ticker, crashScore, btnEl) {
 function renderOptionsTables(puts, calls, spot, dte, expStr, crashScore) {
   function findTarget(contracts) {
     if (!contracts.length) return null;
-    const withDelta = contracts.filter(c => c.delta !== null);
-    if (!withDelta.length) return contracts[Math.floor(contracts.length / 2)];
-    return withDelta.reduce((b,c)=>Math.abs(c.delta-0.20)<Math.abs(b.delta-0.20)?c:b, withDelta[0]);
+    return contracts.reduce((b,c)=>Math.abs(c.delta-0.20)<Math.abs(b.delta-0.20)?c:b, contracts[0]);
   }
   function buildTable(contracts, isCall, target) {
     const sorted = contracts.slice().sort((a,b)=>isCall?a.strike-b.strike:b.strike-a.strike);
-    if (!sorted.length) return '<div class="c-dim" style="font-size:12px;padding:8px 0">No contracts available</div>';
+    if (!sorted.length) return '<div class="c-dim" style="font-size:12px;padding:8px 0">No contracts in 0.01-0.35 delta range</div>';
     let rows='';
     sorted.forEach(c=>{
       const strike=c.strike||0, bid=c.bid||0;
@@ -670,10 +687,9 @@ function renderOptionsTables(puts, calls, spot, dte, expStr, crashScore) {
   }
   const tp=findTarget(puts), tc=findTarget(calls);
   const putHdr=crashScore>=60?'<div class="options-sub-title c-amber">Sell puts \u2014 caution (CrashScore '+crashScore.toFixed(0)+')</div>':'<div class="options-sub-title">Sell puts</div>';
-  const deltaNote = puts.length && puts[0].delta===null ? '<div class="opts-expiry" style="color:#475569">Delta unavailable \u2014 showing ~15-20% OTM strikes</div>' : '';
   return '<div class="options-tables">' +
-    '<div>'+putHdr+buildTable(puts,false,tp)+deltaNote+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
-    '<div><div class="options-sub-title">Sell calls</div>'+buildTable(calls,true,tc)+deltaNote+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
+    '<div>'+putHdr+buildTable(puts,false,tp)+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
+    '<div><div class="options-sub-title">Sell calls</div>'+buildTable(calls,true,tc)+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
   '</div>';
 }
 

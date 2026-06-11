@@ -718,28 +718,35 @@ function renderOptionsTables(puts, calls, spot, dte, expStr, crashScore) {
     if (!sorted.length) return '<div class="c-dim" style="font-size:12px;padding:8px 0">No contracts in 0.01-0.35 delta range</div>';
     let rows='';
     sorted.forEach(c=>{
-      const strike=c.strike||0, bid=c.bid||0, ask=c.ask||0;
-      const deltaStr=c.delta!==null?c.delta.toFixed(2):'—';
-      const thetaStr=c.theta!=null?'$'+c.theta.toFixed(3):'—';
-      const iv=c.impliedVolatility||0, oi=c.openInterest||0, vol=c.volume||0;
+      const strike=parseFloat(c.strike)||0;
+      const bid=parseFloat(c.bid)||0;
+      const ask=parseFloat(c.ask)||0;
+      const delta=parseFloat(c.delta)||0;
+      const theta=c.theta!=null?parseFloat(c.theta):null;
+      const iv=parseFloat(c.impliedVolatility)||0;
+      const oi=parseInt(c.openInterest)||0;
+      const vol=parseInt(c.volume)||0;
       const be=isCall?strike+bid:strike-bid;
       const annYield=dte>0&&strike>0?((bid/strike)*(365/dte)*100):0;
-      const spread=ask>bid?(ask-bid).toFixed(2):null;
+      const probExp=((1-delta)*100).toFixed(0)+'%';
+      const spread=ask>bid?(ask-bid):0;
+      const askColor=spread>0&&spread>bid*0.5?'c-amber':'';
+      const thetaStr=theta!=null?'$'+theta.toFixed(3):'—';
       const isTarget=target&&c.contractSymbol===target.contractSymbol;
-      const askColor=spread&&parseFloat(spread)>bid*0.5?'c-amber':'';
       rows+='<tr class="'+(isTarget?'target-row':'')+'">' +
         '<td>$'+strike.toFixed(0)+(isTarget?' \u25cf':'')+'</td>' +
         '<td>$'+bid.toFixed(2)+'</td>' +
-        '<td class="'+askColor+'">$'+ask.toFixed(2)+'</td>' +
-        '<td>'+deltaStr+'</td>' +
+        '<td class="'+askColor+'">'+(ask>0?'$'+ask.toFixed(2):'—')+'</td>' +
+        '<td>'+delta.toFixed(2)+'</td>' +
         '<td>'+thetaStr+'</td>' +
         '<td>'+(iv*100).toFixed(0)+'%</td>' +
         '<td>'+oi.toLocaleString()+'</td>' +
         '<td>'+(vol>0?vol.toLocaleString():'—')+'</td>' +
         '<td>$'+be.toFixed(2)+'</td>' +
-        '<td>'+annYield.toFixed(1)+'%</td></tr>';
+        '<td>'+annYield.toFixed(1)+'%</td>' +
+        '<td>'+probExp+'</td></tr>';
     });
-    return '<div class="opts-table-wrap"><table class="opts-table"><thead><tr><th>Strike</th><th>Bid</th><th>Ask</th><th>Delta</th><th>Theta/d</th><th>IV</th><th>OI</th><th>Vol</th><th>B/E</th><th>Ann yld</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    return '<div class="opts-table-wrap"><table class="opts-table"><thead><tr><th>Strike</th><th>Bid</th><th>Ask</th><th>Delta</th><th>Theta/d</th><th>IV</th><th>OI</th><th>Vol</th><th>B/E</th><th>Ann yld</th><th>Prob exp</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   }
   const tp=findTarget(puts), tc=findTarget(calls);
   const putHdr=crashScore>=60?'<div class="options-sub-title c-amber">Sell puts \u2014 caution (CrashScore '+crashScore.toFixed(0)+')</div>':'<div class="options-sub-title">Sell puts</div>';
@@ -815,11 +822,11 @@ function formatForClaude(d) {
     lines.push('');
     lines.push('OPTIONS — '+optsData.expStr+' ('+optsData.dte+'d) | Spot $'+optsData.spot.toFixed(2));
     lines.push('SELL PUTS (* = ~20 delta target)');
-    lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld');
+    lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld\\tProb Exp');
     const sortedPuts = optsData.puts.slice().sort((a,b)=>b.strike-a.strike);
     sortedPuts.forEach(c => lines.push(fmtRow(c, false)));
     lines.push('SELL CALLS (* = ~20 delta target)');
-    lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld');
+    lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld\\tProb Exp');
     const sortedCalls = optsData.calls.slice().sort((a,b)=>a.strike-b.strike);
     sortedCalls.forEach(c => lines.push(fmtRow(c, true)));
   }

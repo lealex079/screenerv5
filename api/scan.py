@@ -206,6 +206,8 @@ def fetch_options(ticker):
             delta_abs = abs(delta)
             if delta_abs < 0.01 or delta_abs > 0.35:
                 continue
+            if delta_abs < 0.08:  # trim deep OTM noise
+                continue
             if delta_abs > 0.38:  # trim high-delta end
                 continue
             if bid < 0.10:  # no tradeable bid
@@ -458,7 +460,8 @@ INDEX_HTML = """<!DOCTYPE html>
   .options-load-btn:hover { background: #2a3a4e; color: #e2e8f0; }
   .options-warn { background: #1c1215; border: 0.5px solid #3b1520; border-radius: 6px; padding: 10px 14px; font-size: 12px; color: #f87171; }
   .options-warn-amber { background: #1c1508; border: 0.5px solid #3b2c10; border-radius: 6px; padding: 10px 14px; font-size: 12px; color: #f59e0b; }
-  .options-tables { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .options-tables { display: flex; flex-direction: column; gap: 20px; }
+  .opts-table-wrap { overflow-x: auto; }
   .options-sub-title { font-size: 11px; color: #64748b; margin-bottom: 6px; }
   .opts-table { width: 100%; border-collapse: collapse; font-size: 11px; }
   .opts-table th { color: #475569; font-weight: 400; text-align: right; padding: 4px 6px; border-bottom: 0.5px solid #1e2a35; white-space: nowrap; }
@@ -736,7 +739,7 @@ function renderOptionsTables(puts, calls, spot, dte, expStr, crashScore) {
         '<td>$'+be.toFixed(2)+'</td>' +
         '<td>'+annYield.toFixed(1)+'%</td></tr>';
     });
-    return '<table class="opts-table"><thead><tr><th>Strike</th><th>Bid</th><th>Ask</th><th>Delta</th><th>Theta/d</th><th>IV</th><th>OI</th><th>Vol</th><th>B/E</th><th>Ann yld</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    return '<div class="opts-table-wrap"><table class="opts-table"><thead><tr><th>Strike</th><th>Bid</th><th>Ask</th><th>Delta</th><th>Theta/d</th><th>IV</th><th>OI</th><th>Vol</th><th>B/E</th><th>Ann yld</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   }
   const tp=findTarget(puts), tc=findTarget(calls);
   const putHdr=crashScore>=60?'<div class="options-sub-title c-amber">Sell puts \u2014 caution (CrashScore '+crashScore.toFixed(0)+')</div>':'<div class="options-sub-title">Sell puts</div>';
@@ -812,11 +815,11 @@ function formatForClaude(d) {
     lines.push('');
     lines.push('OPTIONS — '+optsData.expStr+' ('+optsData.dte+'d) | Spot $'+optsData.spot.toFixed(2));
     lines.push('SELL PUTS (* = ~20 delta target)');
-    lines.push('  Strike\\tBid\\tDelta\\tIV\\tOI\\tB/E\\tAnn Yld');
+    lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld');
     const sortedPuts = optsData.puts.slice().sort((a,b)=>b.strike-a.strike);
     sortedPuts.forEach(c => lines.push(fmtRow(c, false)));
     lines.push('SELL CALLS (* = ~20 delta target)');
-    lines.push('  Strike\\tBid\\tDelta\\tIV\\tOI\\tB/E\\tAnn Yld');
+    lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld');
     const sortedCalls = optsData.calls.slice().sort((a,b)=>a.strike-b.strike);
     sortedCalls.forEach(c => lines.push(fmtRow(c, true)));
   }

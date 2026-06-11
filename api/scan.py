@@ -214,6 +214,10 @@ def fetch_options(ticker):
                 continue
             if oi < 5:  # illiquid
                 continue
+            # Soft yield floor — filters noise like $0.25 bid on far OTM strikes
+            ann_yield = (bid / strike) * (365 / best_dte) * 100 if strike > 0 and best_dte > 0 else 0
+            if ann_yield < 3.0:
+                continue
             # Theta via Black-Scholes (per-day, always negative — shown as positive for sellers)
             theta = bs_theta(spot, strike, best_dte, iv, is_put=is_put)
 
@@ -654,7 +658,7 @@ function renderCard(d) {
         fr('CMF', d.cmf, 3, '', v=>v>0.05?'c-green':v<-0.05?'c-red':'', true) +
         fr('OBV 20d', d.obv_roc, 1, '%', v=>v>5?'c-green':v<-5?'c-red':'', true) +
         fr('Vol rank', d.vol_rank, 0, 'th', ()=>'', false) +
-        '<span class="detail-key">MA dist</span><span class="'+(d.ma_distance>=0?'c-green':'c-red')+'">'+(d.ma_distance>=0?'+':'')+d.ma_distance.toFixed(1)+'%</span>' +
+        '<span class="detail-key">200 MA dist</span><span class="'+(d.ma_distance>=0?'c-green':'c-red')+'">'+(d.ma_distance>=0?'+':'')+d.ma_distance.toFixed(1)+'%</span>' +
       '</div></div>' +
     '</div>' +
     renderOptionsSection(d) +
@@ -794,7 +798,7 @@ function formatForClaude(d) {
   lines.push('LAYER 2: TREND (OLS-validated, two-way clustered SEs)');
   lines.push('  rvol_10d (35%):        '+d.rvol_10d.toFixed(1)+'% ann.');
   lines.push('  vol_rank (25%):        '+d.vol_rank.toFixed(0)+'th pct');
-  lines.push('  ma_distance (20%):     '+pct(d.ma_distance,1));
+  lines.push('  200 ma_distance (20%): '+pct(d.ma_distance,1));
   lines.push('  vol_compression (20%): '+d.vol_compression.toFixed(2));
   lines.push('');
   lines.push('LAYER 3: CRASH RISK (logit-validated, rally_5d z=2.84)');
@@ -832,11 +836,11 @@ function formatForClaude(d) {
     lines.push('SELL PUTS (* = ~20 delta target)');
     lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld\\tProb Exp');
     const sortedPuts = optsData.puts.slice().sort((a,b)=>b.strike-a.strike);
-    sortedPuts.forEach(c => lines.push(fmtRow(c, false)));
+    sortedPuts.forEach(c => lines.push(fmtRow(c, false, putTarget)));
     lines.push('SELL CALLS (* = ~20 delta target)');
     lines.push('  Strike\\tBid\\tAsk\\tDelta\\tTheta/d\\tIV\\tOI\\tVol\\tB/E\\tAnn Yld\\tProb Exp');
     const sortedCalls = optsData.calls.slice().sort((a,b)=>a.strike-b.strike);
-    sortedCalls.forEach(c => lines.push(fmtRow(c, true)));
+    sortedCalls.forEach(c => lines.push(fmtRow(c, true, callTarget)));
   }
 
   return lines.join('\\n');

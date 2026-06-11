@@ -117,86 +117,29 @@ SECTOR_METRICS = {
 
 
 def fetch_options(ticker):
-    """Fetch options chain from Tastytrade API using env var credentials."""
-    import os, urllib.request, urllib.error, datetime, time
+    """Fetch options chain via yfinance + Black-Scholes delta."""
+    import datetime
 
-    username = os.environ.get("TASTYTRADE_USER", "")
-    password = os.environ.get("TASTYTRADE_PASS", "")
-    if not username or not password:
-        return {"error": "Tastytrade credentials not configured in environment variables"}
+    yt = yf.Ticker(ticker)
 
-    BASE = "https://api.tastyworks.com"
-
-    def tt_request(path, token=None, method="GET", body=None):
-        url = BASE + path
-        data = json.dumps(body).encode() if body else None
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if token:
-            headers["Authorization"] = token
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            raise Exception(f"HTTP {e.code}: {e.reason}")
-        except Exception as e:
-            raise Exception(str(e))
-
-    # 1. Authenticate
     try:
-        auth = tt_request("/sessions", method="POST", body={
-            "login": username,
-            "password": password,
-            "remember-me": False
-        })
-        token = auth["data"]["session-token"]
+        expirations = yt.options
     except Exception as e:
-        return {"error": f"Tastytrade auth failed: {e}"}
+        return {"error": f"Could not fetch expirations: {e}"}
 
-    # 2. Get account number (needed for some endpoints)
-    try:
-        accounts = tt_request("/customers/me/accounts", token=token)
-        account_number = accounts["data"]["items"][0]["account"]["account-number"]
-    except Exception:
-        account_number = None
+    if not expirations:
+        return {"error": "No options expirations available"}
 
-    # 3. Get spot price
-    try:
-        quote_resp = tt_request(f"/market-data/quotes/{ticker}", token=token)
-        spot = float(quote_resp["data"]["quote"]["last"] or
-                     quote_resp["data"]["quote"]["ask"] or 0)
-    except Exception:
-        # Fall back to yfinance for spot
-        try:
-            spot = float(yf.Ticker(ticker).info.get("regularMarketPrice", 0))
-        except Exception:
-            spot = 0
-
-    # 4. Get option chain expirations
-    try:
-        chain_resp = tt_request(
-            f"/option-chains/{ticker}/nested",
-            token=token
-        )
-        expirations = chain_resp["data"]["items"]
-    except Exception as e:
-        return {"error": f"Could not fetch option chain: {e}"}
-
-    # 5. Find best expiry in 27-45 DTE window
     today = datetime.date.today()
     best_exp = None
     best_dte = None
-    best_strikes = []
-
-    for exp_item in expirations:
-        exp_str = exp_item.get("expiration-date", "")
+    for exp_str in expirations:
         try:
             exp_date = datetime.date.fromisoformat(exp_str)
             dte = (exp_date - today).days
             if 27 <= dte <= 45:
                 best_exp = exp_str
                 best_dte = dte
-                best_strikes = exp_item.get("strikes", [])
                 break
         except Exception:
             continue
@@ -204,92 +147,53 @@ def fetch_options(ticker):
     if not best_exp:
         return {"error": "No expirations in 27-45 DTE window"}
 
-    exp_label = datetime.date.fromisoformat(best_exp).strftime("%b %-d, %Y")
-
-    # 6. Collect option symbols for the strikes we care about
-    # Filter to strikes within reasonable range of spot for ~20 delta
-    put_symbols = []
-    call_symbols = []
-    for strike_item in best_strikes:
-        strike_price = float(strike_item.get("strike-price", 0))
-        if spot <= 0:
-            continue
-        moneyness = strike_price / spot
-        if 0.70 <= moneyness <= 0.98:  # put range: 2-30% OTM
-            sym = strike_item.get("put", "")
-            if sym:
-                put_symbols.append((strike_price, sym))
-        if 1.02 <= moneyness <= 1.30:  # call range: 2-30% OTM
-            sym = strike_item.get("call", "")
-            if sym:
-                call_symbols.append((strike_price, sym))
-
-    # 7. Fetch quotes for all symbols in one request
-    all_symbols = [s for _, s in put_symbols] + [s for _, s in call_symbols]
-    if not all_symbols:
-        return {"error": "No option symbols found in range"}
+    try:
+        chain = yt.option_chain(best_exp)
+    except Exception as e:
+        return {"error": f"Could not fetch chain: {e}"}
 
     try:
-        symbols_param = ",".join(url_quote(s) for s in all_symbols)
-        quotes_resp = tt_request(
-            f"/market-data/options?symbols[]={'&symbols[]='.join(url_quote(s) for s in all_symbols)}",
-            token=token
-        )
-        quotes_by_symbol = {}
-        for item in quotes_resp.get("data", {}).get("items", []):
-            sym = item.get("symbol", "")
-            quotes_by_symbol[sym] = item
+        spot = float(yt.info.get("regularMarketPrice") or yt.info.get("currentPrice") or 0)
     except Exception:
-        quotes_by_symbol = {}
+        spot = 0
 
-    # 8. Build put and call arrays with greeks
-    def build_contracts(symbol_list, is_put):
+    import datetime as dt
+    exp_label = datetime.date.fromisoformat(best_exp).strftime("%b %-d, %Y")
+
+    def clean(df, is_put):
         out = []
-        for strike_price, sym in symbol_list:
-            q = quotes_by_symbol.get(sym, {})
-            bid = float(q.get("bid", 0) or 0)
-            ask = float(q.get("ask", 0) or 0)
-            iv = float(q.get("implied-volatility", 0) or 0)
-            oi = int(q.get("open-interest", 0) or 0)
-
-            # Use Tastytrade delta if available, otherwise compute BS
-            raw_delta = q.get("delta")
-            if raw_delta is not None:
-                try:
-                    delta = abs(float(raw_delta))
-                except Exception:
-                    delta = None
-            else:
-                delta = None
-
-            if delta is None and iv > 0:
-                d = bs_delta(spot, strike_price, best_dte, iv, is_put=is_put)
-                delta = abs(d) if d is not None else None
-
-            if delta is None or delta < 0.01 or delta > 0.35:
+        for _, row in df.iterrows():
+            strike = float(getattr(row, "strike", 0) or 0)
+            bid = float(getattr(row, "bid", 0) or 0)
+            ask = float(getattr(row, "ask", 0) or 0)
+            iv_raw = getattr(row, "impliedVolatility", 0)
+            iv = float(iv_raw) if iv_raw and not np.isnan(float(iv_raw)) else 0
+            oi_raw = getattr(row, "openInterest", 0)
+            oi = int(oi_raw) if oi_raw and not np.isnan(float(oi_raw)) else 0
+            sym = str(getattr(row, "contractSymbol", ""))
+            delta = bs_delta(spot, strike, best_dte, iv, is_put=is_put)
+            if delta is None:
                 continue
-
+            delta_abs = abs(delta)
+            if delta_abs < 0.01 or delta_abs > 0.35:
+                continue
             out.append({
                 "contractSymbol": sym,
-                "strike": strike_price,
+                "strike": strike,
                 "bid": bid,
                 "ask": ask,
-                "delta": round(delta, 3),
+                "delta": round(delta_abs, 3),
                 "impliedVolatility": round(iv, 4),
                 "openInterest": oi,
             })
         return out
 
-    puts = build_contracts(put_symbols, True)
-    calls = build_contracts(call_symbols, False)
-
     return {
         "spot": spot,
         "dte": best_dte,
         "expStr": exp_label,
-        "puts": puts,
-        "calls": calls,
-        "source": "tastytrade",
+        "puts": clean(chain.puts, True),
+        "calls": clean(chain.calls, False),
     }
 
 

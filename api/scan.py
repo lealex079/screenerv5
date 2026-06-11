@@ -177,11 +177,11 @@ def fetch_options(ticker):
             delta_abs = abs(delta)
             if delta_abs < 0.01 or delta_abs > 0.35:
                 continue
-            if bid < 0.10:  # filter negligible bid
-                continue
-            if oi < 5:  # filter illiquid strikes
-                continue
             if delta_abs > 0.32:  # trim high-delta end
+                continue
+            # Filter by minimum annualized yield on bid (scales with strike price)
+            ann_yield = (bid / strike) * (365 / best_dte) * 100 if strike > 0 and best_dte > 0 else 0
+            if ann_yield < 4.0:
                 continue
             out.append({
                 "contractSymbol": sym,
@@ -642,6 +642,8 @@ function renderOptionsSection(d) {
   '</div>';
 }
 
+const optionsCache = {};
+
 async function loadOptions(ticker, crashScore, btnEl) {
   btnEl.disabled = true;
   btnEl.textContent = 'Loading...';
@@ -653,6 +655,7 @@ async function loadOptions(ticker, crashScore, btnEl) {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
+    optionsCache[ticker] = data;
     if (loadingEl) loadingEl.style.display='none';
     if (tablesEl) tablesEl.innerHTML = renderOptionsTables(data.puts, data.calls, data.spot, data.dte, data.expStr, crashScore);
     btnEl.style.display='none';
@@ -747,6 +750,31 @@ function formatForClaude(d) {
   lines.push('  CMF (20d):  '+(d.cmf>=0?'+':'')+d.cmf.toFixed(3)+' ('+cmfRead+')');
   lines.push('  OBV 20d:    '+pct(d.obv_roc,1)+' ('+obvRead+')');
   lines.push('  RSI:        '+d.rsi.toFixed(1));
+
+  // Include options chain if already loaded
+  const optsData = optionsCache[d.ticker];
+  if (optsData) {
+    const fmtRow = (c, isCall) => {
+      const be = isCall ? (c.strike + c.bid).toFixed(2) : (c.strike - c.bid).toFixed(2);
+      const annYld = optsData.dte > 0 ? ((c.bid / c.strike) * (365 / optsData.dte) * 100).toFixed(1) : '0.0';
+      const target = isCall
+        ? optsData.calls.reduce((b,x)=>Math.abs(x.delta-0.20)<Math.abs(b.delta-0.20)?x:b, optsData.calls[0])
+        : optsData.puts.reduce((b,x)=>Math.abs(x.delta-0.20)<Math.abs(b.delta-0.20)?x:b, optsData.puts[0]);
+      const dot = target && c.contractSymbol === target.contractSymbol ? ' *' : '';
+      return '  $'+c.strike.toFixed(0)+dot+'\\t$'+c.bid.toFixed(2)+'\\t'+c.delta.toFixed(2)+'\\t'+(c.impliedVolatility*100).toFixed(0)+'%\\t'+c.openInterest+'\\t$'+be+'\\t'+annYld+'%';
+    };
+    lines.push('');
+    lines.push('OPTIONS — '+optsData.expStr+' ('+optsData.dte+'d) | Spot $'+optsData.spot.toFixed(2));
+    lines.push('SELL PUTS (* = ~20 delta target)');
+    lines.push('  Strike\\tBid\\tDelta\\tIV\\tOI\\tB/E\\tAnn Yld');
+    const sortedPuts = optsData.puts.slice().sort((a,b)=>b.strike-a.strike);
+    sortedPuts.forEach(c => lines.push(fmtRow(c, false)));
+    lines.push('SELL CALLS (* = ~20 delta target)');
+    lines.push('  Strike\\tBid\\tDelta\\tIV\\tOI\\tB/E\\tAnn Yld');
+    const sortedCalls = optsData.calls.slice().sort((a,b)=>a.strike-b.strike);
+    sortedCalls.forEach(c => lines.push(fmtRow(c, true)));
+  }
+
   return lines.join('\\n');
 }
 

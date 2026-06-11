@@ -177,6 +177,10 @@ def fetch_options(ticker):
             delta_abs = abs(delta)
             if delta_abs < 0.01 or delta_abs > 0.35:
                 continue
+            if bid <= 0.05:  # filter zero/negligible bid
+                continue
+            if oi < 3:  # filter illiquid strikes
+                continue
             out.append({
                 "contractSymbol": sym,
                 "strike": strike,

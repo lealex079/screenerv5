@@ -34,6 +34,35 @@ def bs_delta(spot, strike, dte_days, iv, r=0.045, is_put=True):
         return None
 
 
+def bs_theta(spot, strike, dte_days, iv, r=0.045, is_put=True):
+    """Black-Scholes theta (dollar per day). Returned as positive — sellers receive this."""
+    import math
+    try:
+        if iv <= 0 or dte_days <= 0 or spot <= 0 or strike <= 0:
+            return None
+        T = dte_days / 365.0
+        d1 = (math.log(spot / strike) + (r + 0.5 * iv ** 2) * T) / (iv * math.sqrt(T))
+        d2 = d1 - iv * math.sqrt(T)
+        pdf_d1 = math.exp(-0.5 * d1 ** 2) / math.sqrt(2 * math.pi)
+        theta_call = (-(spot * pdf_d1 * iv) / (2 * math.sqrt(T))
+                      - r * strike * math.exp(-r * T) * _ncdf(d2))
+        if is_put:
+            theta = theta_call + r * strike * math.exp(-r * T)
+        else:
+            theta = theta_call
+        return round(theta / 365, 4)  # per calendar day
+    except Exception:
+        return None
+
+
+
+    delta = series.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/window, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/window, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
 def compute_rsi(series, window=14):
     delta = series.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/window, adjust=False).mean()
@@ -177,20 +206,31 @@ def fetch_options(ticker):
             delta_abs = abs(delta)
             if delta_abs < 0.01 or delta_abs > 0.35:
                 continue
-            if delta_abs > 0.32:  # trim high-delta end
+            if delta_abs > 0.38:  # trim high-delta end
                 continue
-            # Filter by minimum annualized yield on bid (scales with strike price)
-            ann_yield = (bid / strike) * (365 / best_dte) * 100 if strike > 0 and best_dte > 0 else 0
-            if ann_yield < 4.0:
+            if bid < 0.10:  # no tradeable bid
                 continue
+            if oi < 5:  # illiquid
+                continue
+            # Theta via Black-Scholes (per-day, always negative — shown as positive for sellers)
+            theta = bs_theta(spot, strike, best_dte, iv, is_put=is_put)
+
+            vol_raw = getattr(row, "volume", 0)
+            try:
+                vol = int(vol_raw) if vol_raw and not np.isnan(float(vol_raw)) else 0
+            except Exception:
+                vol = 0
+
             out.append({
                 "contractSymbol": sym,
                 "strike": strike,
                 "bid": bid,
                 "ask": ask,
                 "delta": round(delta_abs, 3),
+                "theta": round(abs(theta), 4) if theta is not None else None,
                 "impliedVolatility": round(iv, 4),
                 "openInterest": oi,
+                "volume": vol,
             })
         return out
 
@@ -675,22 +715,28 @@ function renderOptionsTables(puts, calls, spot, dte, expStr, crashScore) {
     if (!sorted.length) return '<div class="c-dim" style="font-size:12px;padding:8px 0">No contracts in 0.01-0.35 delta range</div>';
     let rows='';
     sorted.forEach(c=>{
-      const strike=c.strike||0, bid=c.bid||0;
+      const strike=c.strike||0, bid=c.bid||0, ask=c.ask||0;
       const deltaStr=c.delta!==null?c.delta.toFixed(2):'—';
-      const iv=c.impliedVolatility||0, oi=c.openInterest||0;
+      const thetaStr=c.theta!=null?'$'+c.theta.toFixed(3):'—';
+      const iv=c.impliedVolatility||0, oi=c.openInterest||0, vol=c.volume||0;
       const be=isCall?strike+bid:strike-bid;
       const annYield=dte>0&&strike>0?((bid/strike)*(365/dte)*100):0;
+      const spread=ask>bid?(ask-bid).toFixed(2):null;
       const isTarget=target&&c.contractSymbol===target.contractSymbol;
+      const askColor=spread&&parseFloat(spread)>bid*0.5?'c-amber':'';
       rows+='<tr class="'+(isTarget?'target-row':'')+'">' +
         '<td>$'+strike.toFixed(0)+(isTarget?' \u25cf':'')+'</td>' +
         '<td>$'+bid.toFixed(2)+'</td>' +
+        '<td class="'+askColor+'">$'+ask.toFixed(2)+'</td>' +
         '<td>'+deltaStr+'</td>' +
+        '<td>'+thetaStr+'</td>' +
         '<td>'+(iv*100).toFixed(0)+'%</td>' +
         '<td>'+oi.toLocaleString()+'</td>' +
+        '<td>'+(vol>0?vol.toLocaleString():'—')+'</td>' +
         '<td>$'+be.toFixed(2)+'</td>' +
         '<td>'+annYield.toFixed(1)+'%</td></tr>';
     });
-    return '<table class="opts-table"><thead><tr><th>Strike</th><th>Bid</th><th>Delta</th><th>IV</th><th>OI</th><th>B/E</th><th>Ann yld</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    return '<table class="opts-table"><thead><tr><th>Strike</th><th>Bid</th><th>Ask</th><th>Delta</th><th>Theta/d</th><th>IV</th><th>OI</th><th>Vol</th><th>B/E</th><th>Ann yld</th></tr></thead><tbody>'+rows+'</tbody></table>';
   }
   const tp=findTarget(puts), tc=findTarget(calls);
   const putHdr=crashScore>=60?'<div class="options-sub-title c-amber">Sell puts \u2014 caution (CrashScore '+crashScore.toFixed(0)+')</div>':'<div class="options-sub-title">Sell puts</div>';

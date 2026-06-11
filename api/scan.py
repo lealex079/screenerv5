@@ -177,9 +177,11 @@ def fetch_options(ticker):
             delta_abs = abs(delta)
             if delta_abs < 0.01 or delta_abs > 0.35:
                 continue
-            if bid <= 0.05:  # filter zero/negligible bid
+            if bid < 0.10:  # filter negligible bid
                 continue
-            if oi < 3:  # filter illiquid strikes
+            if oi < 5:  # filter illiquid strikes
+                continue
+            if delta_abs > 0.32:  # trim high-delta end
                 continue
             out.append({
                 "contractSymbol": sym,
@@ -709,6 +711,9 @@ function formatForClaude(d) {
   lines.push('52w High: $'+(d.high_52w||'N/A')+'   52w Low: $'+(d.low_52w||'N/A'));
   lines.push('50 MA: $'+(d.ma50||'N/A')+'   200 MA: $'+(d.ma200||'N/A'));
   lines.push('Returns — Daily: '+pct(d.rally_1d,2)+'   Weekly: '+pct(d.rally_5d,2)+'   Monthly: '+pct(d.rally_21d,2));
+  const roc = (v) => v===null||v===undefined ? 'N/A' : (v>=0?'+':'')+v.toFixed(3)+'%';
+  lines.push('50 MA slope  — 1D: '+roc(d.ma50_roc_1d)+'   1W: '+roc(d.ma50_roc_5d)+'   1M: '+roc(d.ma50_roc_21d));
+  lines.push('200 MA slope — 1D: '+roc(d.ma200_roc_1d)+'   1W: '+roc(d.ma200_roc_5d)+'   1M: '+roc(d.ma200_roc_21d));
   lines.push('');
   lines.push('VALIDATED SCORES');
   lines.push('  TrendScore:  '+d.trend_score.toFixed(0)+'/100'+(d.trend_score>=70?'  [STRONG]':d.trend_score<30?'  [WEAK]':''));

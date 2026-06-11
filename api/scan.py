@@ -84,75 +84,126 @@ SECTOR_METRICS = {
 
 
 def fetch_options(ticker):
-    """Fetch options chain server-side to avoid CORS. Returns puts+calls for best 27-45 DTE expiry."""
-    import urllib.request
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Accept": "application/json",
-    }
-    base_url = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker}"
-    req = urllib.request.Request(base_url, headers=headers)
+    """Fetch options chain via yfinance (handles Yahoo auth internally)."""
+    import datetime, time
+
+    yt = yf.Ticker(ticker)
+
+    # Get available expirations
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
+        expirations = yt.options
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Could not fetch expirations: {e}"}
 
-    result = data.get("optionChain", {}).get("result", [{}])[0]
-    if not result:
-        return {"error": "No data returned"}
+    if not expirations:
+        return {"error": "No options expirations available"}
 
-    spot = result.get("quote", {}).get("regularMarketPrice", 0)
-    all_exps = result.get("expirationDates", [])
+    # Find best expiry in 27-45 DTE window
+    now = datetime.date.today()
+    best_exp = None
+    best_dte = None
+    for exp_str in expirations:
+        try:
+            exp_date = datetime.date.fromisoformat(exp_str)
+            dte = (exp_date - now).days
+            if 27 <= dte <= 45:
+                best_exp = exp_str
+                best_dte = dte
+                break
+        except Exception:
+            continue
 
-    import time
-    now = time.time()
-    valid_exps = [ts for ts in all_exps if 27 <= round((ts - now) / 86400) <= 45]
-    if not valid_exps:
+    if not best_exp:
         return {"error": "No expirations in 27-45 DTE window"}
 
-    exp_ts = valid_exps[0]
-    exp_url = f"{base_url}?date={exp_ts}"
-    req2 = urllib.request.Request(exp_url, headers=headers)
+    # Fetch the chain
     try:
-        with urllib.request.urlopen(req2, timeout=10) as r:
-            exp_data = json.loads(r.read().decode())
+        chain = yt.option_chain(best_exp)
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Could not fetch chain: {e}"}
 
-    exp_result = exp_data.get("optionChain", {}).get("result", [{}])[0]
-    if not exp_result:
-        return {"error": "No expiry data"}
+    # Get spot price
+    try:
+        spot = yt.info.get("regularMarketPrice") or yt.info.get("currentPrice") or 0
+    except Exception:
+        spot = 0
 
-    opts = exp_result.get("options", [{}])[0]
-    dte = round((exp_ts - now) / 86400)
-    import datetime
-    exp_str = datetime.datetime.utcfromtimestamp(exp_ts).strftime("%b %-d, %Y")
+    # Format expiry string
+    exp_date_obj = datetime.date.fromisoformat(best_exp)
+    exp_label = exp_date_obj.strftime("%b %-d, %Y")
 
-    def clean(contracts):
+    def clean(df, is_put):
         out = []
-        for c in contracts:
-            delta = abs(c.get("delta") or 0)
+        for _, row in df.iterrows():
+            # yfinance returns delta as negative for puts — use abs
+            raw_delta = row.get("delta") if hasattr(row, "get") else getattr(row, "delta", None)
+            if raw_delta is None or (hasattr(raw_delta, "__float__") and np.isnan(float(raw_delta))):
+                continue
+            delta = abs(float(raw_delta))
             if delta < 0.01 or delta > 0.30:
                 continue
+            bid = float(row.get("bid") if hasattr(row, "get") else getattr(row, "bid", 0) or 0)
+            ask = float(row.get("ask") if hasattr(row, "get") else getattr(row, "ask", 0) or 0)
+            strike = float(row.get("strike") if hasattr(row, "get") else getattr(row, "strike", 0) or 0)
+            iv_raw = row.get("impliedVolatility") if hasattr(row, "get") else getattr(row, "impliedVolatility", 0)
+            iv = float(iv_raw) if iv_raw and not np.isnan(float(iv_raw)) else 0
+            oi_raw = row.get("openInterest") if hasattr(row, "get") else getattr(row, "openInterest", 0)
+            oi = int(oi_raw) if oi_raw and not np.isnan(float(oi_raw)) else 0
+            sym = row.get("contractSymbol") if hasattr(row, "get") else getattr(row, "contractSymbol", "")
             out.append({
-                "contractSymbol": c.get("contractSymbol", ""),
-                "strike": c.get("strike", 0),
-                "bid": c.get("bid", 0),
-                "ask": c.get("ask", 0),
+                "contractSymbol": str(sym),
+                "strike": strike,
+                "bid": bid,
+                "ask": ask,
                 "delta": round(delta, 3),
-                "impliedVolatility": round(c.get("impliedVolatility", 0), 4),
-                "openInterest": c.get("openInterest", 0),
+                "impliedVolatility": round(iv, 4),
+                "openInterest": oi,
             })
         return out
 
+    puts = clean(chain.puts, True)
+    calls = clean(chain.calls, False)
+
+    # If delta is missing from yfinance (common), filter by strike proximity to spot instead
+    if not puts and not calls:
+        def clean_no_delta(df, is_put):
+            out = []
+            for _, row in df.iterrows():
+                strike = float(getattr(row, "strike", 0) or 0)
+                if spot <= 0:
+                    continue
+                moneyness = strike / spot
+                # ~20 delta puts are ~15-20% OTM, calls ~15-20% OTM
+                if is_put and not (0.75 <= moneyness <= 0.95):
+                    continue
+                if not is_put and not (1.05 <= moneyness <= 1.25):
+                    continue
+                bid = float(getattr(row, "bid", 0) or 0)
+                ask = float(getattr(row, "ask", 0) or 0)
+                iv_raw = getattr(row, "impliedVolatility", 0)
+                iv = float(iv_raw) if iv_raw and not np.isnan(float(iv_raw)) else 0
+                oi_raw = getattr(row, "openInterest", 0)
+                oi = int(oi_raw) if oi_raw and not np.isnan(float(oi_raw)) else 0
+                sym = getattr(row, "contractSymbol", "")
+                out.append({
+                    "contractSymbol": str(sym),
+                    "strike": strike,
+                    "bid": bid,
+                    "ask": ask,
+                    "delta": None,
+                    "impliedVolatility": round(iv, 4),
+                    "openInterest": oi,
+                })
+            return out
+        puts = clean_no_delta(chain.puts, True)
+        calls = clean_no_delta(chain.calls, False)
+
     return {
         "spot": spot,
-        "dte": dte,
-        "expStr": exp_str,
-        "expTs": exp_ts,
-        "puts": clean(opts.get("puts", [])),
-        "calls": clean(opts.get("calls", [])),
+        "dte": best_dte,
+        "expStr": exp_label,
+        "puts": puts,
+        "calls": calls,
     }
 
 
@@ -589,26 +640,27 @@ async function loadOptions(ticker, crashScore, btnEl) {
 }
 
 function renderOptionsTables(puts, calls, spot, dte, expStr, crashScore) {
-  function filter(contracts) {
-    return contracts.filter(c=>{const d=Math.abs(c.delta||0);return d>0.01&&d<=0.30;});
-  }
   function findTarget(contracts) {
     if (!contracts.length) return null;
-    return contracts.reduce((b,c)=>Math.abs(Math.abs(c.delta||0)-0.20)<Math.abs(Math.abs(b.delta||0)-0.20)?c:b, contracts[0]);
+    const withDelta = contracts.filter(c => c.delta !== null);
+    if (!withDelta.length) return contracts[Math.floor(contracts.length / 2)];
+    return withDelta.reduce((b,c)=>Math.abs(c.delta-0.20)<Math.abs(b.delta-0.20)?c:b, withDelta[0]);
   }
   function buildTable(contracts, isCall, target) {
-    const sorted = contracts.sort((a,b)=>isCall?a.strike-b.strike:b.strike-a.strike);
-    if (!sorted.length) return '<div class="c-dim" style="font-size:12px;padding:8px 0">No contracts at \u22640.30 delta</div>';
+    const sorted = contracts.slice().sort((a,b)=>isCall?a.strike-b.strike:b.strike-a.strike);
+    if (!sorted.length) return '<div class="c-dim" style="font-size:12px;padding:8px 0">No contracts available</div>';
     let rows='';
     sorted.forEach(c=>{
-      const strike=c.strike||0, bid=c.bid||0, delta=Math.abs(c.delta||0), iv=c.impliedVolatility||0, oi=c.openInterest||0;
+      const strike=c.strike||0, bid=c.bid||0;
+      const deltaStr=c.delta!==null?c.delta.toFixed(2):'—';
+      const iv=c.impliedVolatility||0, oi=c.openInterest||0;
       const be=isCall?strike+bid:strike-bid;
-      const annYield=dte>0?((bid/strike)*(365/dte)*100):0;
+      const annYield=dte>0&&strike>0?((bid/strike)*(365/dte)*100):0;
       const isTarget=target&&c.contractSymbol===target.contractSymbol;
       rows+='<tr class="'+(isTarget?'target-row':'')+'">' +
         '<td>$'+strike.toFixed(0)+(isTarget?' \u25cf':'')+'</td>' +
         '<td>$'+bid.toFixed(2)+'</td>' +
-        '<td>'+delta.toFixed(2)+'</td>' +
+        '<td>'+deltaStr+'</td>' +
         '<td>'+(iv*100).toFixed(0)+'%</td>' +
         '<td>'+oi.toLocaleString()+'</td>' +
         '<td>$'+be.toFixed(2)+'</td>' +
@@ -616,12 +668,12 @@ function renderOptionsTables(puts, calls, spot, dte, expStr, crashScore) {
     });
     return '<table class="opts-table"><thead><tr><th>Strike</th><th>Bid</th><th>Delta</th><th>IV</th><th>OI</th><th>B/E</th><th>Ann yld</th></tr></thead><tbody>'+rows+'</tbody></table>';
   }
-  const fp=filter(puts), fc=filter(calls);
-  const tp=findTarget(fp), tc=findTarget(fc);
+  const tp=findTarget(puts), tc=findTarget(calls);
   const putHdr=crashScore>=60?'<div class="options-sub-title c-amber">Sell puts \u2014 caution (CrashScore '+crashScore.toFixed(0)+')</div>':'<div class="options-sub-title">Sell puts</div>';
+  const deltaNote = puts.length && puts[0].delta===null ? '<div class="opts-expiry" style="color:#475569">Delta unavailable \u2014 showing ~15-20% OTM strikes</div>' : '';
   return '<div class="options-tables">' +
-    '<div>'+putHdr+buildTable(fp,false,tp)+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
-    '<div><div class="options-sub-title">Sell calls</div>'+buildTable(fc,true,tc)+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
+    '<div>'+putHdr+buildTable(puts,false,tp)+deltaNote+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
+    '<div><div class="options-sub-title">Sell calls</div>'+buildTable(calls,true,tc)+deltaNote+'<div class="opts-expiry">\u25cf = ~20\u0394 target &middot; '+expStr+' ('+dte+'d)</div></div>' +
   '</div>';
 }
 

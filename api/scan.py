@@ -1079,6 +1079,42 @@ function renderChart(ticker, data) {
   new ResizeObserver(() => { try { chart.applyOptions({ width: chartEl.clientWidth }); } catch(e){} }).observe(chartEl);
 }
 
+function renderOptionsSection(d) {
+  const crash = d.crash_score;
+  if (crash >= 75) {
+    return '<div class="options-section"><div class="options-header"><div class="options-title">Options</div></div>' +
+      '<div class="options-warn">CrashScore ' + crash.toFixed(0) + ' \u2014 put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
+  }
+  const warn = crash >= 60 ?
+    '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore ' + crash.toFixed(0) + ' \u2014 puts caution (60-74). Call selling against existing positions acceptable.</div>' : '';
+  return '<div class="options-section">' +
+    '<div class="options-header">' +
+      '<div class="options-title">Options \u2014 27-45 DTE, all expirations, ~20\u0394 optimal marked</div>' +
+      '<button class="options-load-btn" onclick="loadOptions(\'' + d.ticker + '\', ' + crash + ', this)">Load chain</button>' +
+    '</div>' +
+    warn +
+    '<div id="opts-' + d.ticker + '"></div>' +
+  '</div>';
+}
+
+async function loadOptions(ticker, crashScore, btnEl) {
+  btnEl.disabled = true; btnEl.textContent = 'Loading...';
+  const el = document.getElementById('opts-' + ticker);
+  el.innerHTML = '<div class="c-dim" style="font-size:12px;padding:8px 0">Fetching chain...</div>';
+  try {
+    const res = await fetch('/api/scan?options=' + encodeURIComponent(ticker));
+    const data = await res.json();
+    if (data.error) { el.innerHTML = '<div class="options-warn">' + data.error + '</div>'; btnEl.disabled = false; btnEl.textContent = 'Retry'; return; }
+    optionsCache[ticker] = data;
+    el.innerHTML = buildOptionsTabs(data, crashScore, ticker);
+    btnEl.style.display = 'none';
+    activateTab(ticker, 'puts', 0);
+  } catch(e) {
+    el.innerHTML = '<div class="options-warn">Error: ' + e.message + '</div>';
+    btnEl.disabled = false; btnEl.textContent = 'Retry';
+  }
+}
+
 function drawVolumeProfile(canvas, data, chart) {
   const bins = data.vp_bins || [];
   if (!bins.length) return;

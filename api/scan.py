@@ -593,7 +593,7 @@ def scan_ticker(ticker):
 
 # ── HTML frontend ─────────────────────────────────────────────────────────────
 
-INDEX_HTML = open("/var/task/public/index.html").read() if False else r"""<!DOCTYPE html>
+INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">

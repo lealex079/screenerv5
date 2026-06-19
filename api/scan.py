@@ -945,41 +945,31 @@ function renderMTFInline(d) {
   const price = d.price;
   const tfs = [['4h','4h'],['1d','1D'],['1wk','1W'],['1mo','1M']];
 
-  function maCell(tfData, maKey, distKey, label) {
-    if (!tfData || !tfData[maKey]) return '<span class="detail-key">'+label+'</span><span class="c-dim">N/A</span>';
-    const val = tfData[maKey];
-    const dist = tfData[distKey];
-    const above = price > val;
-    const c = above ? 'c-green' : 'c-red';
-    const distStr = dist != null ? ' <span style="font-size:10px;color:#475569">('+(dist>=0?'+':'')+dist.toFixed(2)+')</span>' : '';
-    return '<span class="detail-key">'+label+'</span><span class="'+c+'">$'+val.toFixed(2)+distStr+'</span>';
+  function maSpan(ma, dist) {
+    if (!ma) return '<span class="c-dim">N/A</span>';
+    const c = price > ma ? 'c-green' : 'c-red';
+    const sign = dist >= 0 ? '+' : '';
+    const distHtml = dist != null ? ' <span style="font-size:10px;color:#475569">(' + sign + dist.toFixed(2) + ')</span>' : '';
+    return '<span class="' + c + '">$' + ma.toFixed(2) + distHtml + '</span>';
   }
 
   let rows = '';
-  tfs.forEach(([key, label]) => {
+  tfs.forEach(function(pair) {
+    const key = pair[0], label = pair[1];
     const tf = mtf[key] || {};
     rows += '<div class="mtf-inline-row">' +
-      '<span class="mtf-inline-tf">'+label+'</span>' +
-      '<span class="mtf-inline-pair">' +
-        '<span class="detail-key" style="font-size:10px">50</span>' +
-        (tf.ma50 ? '<span class="'+(price>tf.ma50?'c-green':'c-red')+'" style="font-size:11px">$'+tf.ma50.toFixed(2)+
-          (tf.ma50_dist!=null?'<span style="font-size:10px;color:#475569"> ('+(tf.ma50_dist>=0?'+':'')+tf.ma50_dist.toFixed(2)+')</span>':'')+'</span>'
-          : '<span class="c-dim" style="font-size:11px">N/A</span>') +
-      '</span>' +
-      '<span class="mtf-inline-pair">' +
-        '<span class="detail-key" style="font-size:10px">200</span>' +
-        (tf.ma200 ? '<span class="'+(price>tf.ma200?'c-green':'c-red')+'" style="font-size:11px">$'+tf.ma200.toFixed(2)+
-          (tf.ma200_dist!=null?'<span style="font-size:10px;color:#475569"> ('+(tf.ma200_dist>=0?'+':'')+tf.ma200_dist.toFixed(2)+')</span>':'')+'</span>'
-          : '<span class="c-dim" style="font-size:11px">N/A</span>') +
-      '</span>' +
+      '<span class="mtf-inline-tf">' + label + '</span>' +
+      '<span class="mtf-inline-pair"><span class="detail-key" style="font-size:10px">50 MA</span>' + maSpan(tf.ma50, tf.ma50_dist) + '</span>' +
+      '<span class="mtf-inline-pair"><span class="detail-key" style="font-size:10px">200 MA</span>' + maSpan(tf.ma200, tf.ma200_dist) + '</span>' +
     '</div>';
   });
 
   return '<div class="mtf-inline-section">' +
     '<div class="detail-title" style="margin-bottom:6px">Moving Averages — Multi-Timeframe</div>' +
-    '<div class="mtf-inline-grid">'+rows+'</div>' +
+    '<div class="mtf-inline-grid">' + rows + '</div>' +
   '</div>';
 }
+
 
 
 function renderMTFSection(ticker) {

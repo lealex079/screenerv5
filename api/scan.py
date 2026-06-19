@@ -402,6 +402,124 @@ def fetch_options(ticker):
 
 # ── Main ticker scan ──────────────────────────────────────────────────────────
 
+def compute_avwap(df, anchor_date):
+    """
+    Anchored VWAP from a specific date with ±1σ and ±2σ bands.
+    Uses typical price = (H+L+C)/3, volume-weighted.
+    """
+    subset = df[df.index >= anchor_date].copy()
+    if len(subset) < 2:
+        return None
+    tp = (subset['High'] + subset['Low'] + subset['Close']) / 3
+    vtp = tp * subset['Volume']
+    cum_vtp = vtp.cumsum()
+    cum_vol = subset['Volume'].cumsum()
+    avwap = cum_vtp / cum_vol.replace(0, np.nan)
+    # Weighted standard deviation
+    variance = ((tp - avwap) ** 2 * subset['Volume']).cumsum() / cum_vol.replace(0, np.nan)
+    std = variance.apply(lambda x: x**0.5 if x >= 0 else 0)
+    val = float(avwap.iloc[-1])
+    s = float(std.iloc[-1])
+    return {
+        'avwap': round(val, 2),
+        's1_up': round(val + s, 2),
+        's1_dn': round(val - s, 2),
+        's2_up': round(val + 2*s, 2),
+        's2_dn': round(val - 2*s, 2),
+        'std': round(s, 2),
+    }
+
+
+def find_confluence_levels(price, avwap_dict, mtf, high_52w, low_52w):
+    """
+    Find confluence zones where multiple independent levels cluster within 2%.
+    Sources: AVWAPs (±1σ, ±2σ), MTF MAs, 52w high/low, round numbers.
+    Returns list of confluence zones sorted by distance from current price.
+    """
+    # Collect all candidate levels with their source labels
+    candidates = []
+
+    # AVWAP levels
+    for anchor_name, av in avwap_dict.items():
+        if av is None:
+            continue
+        label_map = {
+            '52w_high': '52wH AVWAP',
+            'ytd':      'YTD AVWAP',
+            'ytd_low':  'YTD Low AVWAP',
+        }
+        base = label_map.get(anchor_name, anchor_name + ' AVWAP')
+        candidates.append((av['avwap'],  base))
+        candidates.append((av['s1_up'],  base + ' +1σ'))
+        candidates.append((av['s1_dn'],  base + ' -1σ'))
+        candidates.append((av['s2_up'],  base + ' +2σ'))
+        candidates.append((av['s2_dn'],  base + ' -2σ'))
+
+    # MTF MA levels
+    tf_labels = {'4h': '4h', '1d': '1D', '1wk': '1W', '1mo': '1M'}
+    for tf_key, tf_label in tf_labels.items():
+        tf = mtf.get(tf_key, {})
+        if tf.get('ma50'):
+            candidates.append((tf['ma50'],  f'{tf_label} 50 MA'))
+        if tf.get('ma200'):
+            candidates.append((tf['ma200'], f'{tf_label} 200 MA'))
+
+    # 52w high and low
+    if high_52w:
+        candidates.append((high_52w, '52w High'))
+    if low_52w:
+        candidates.append((low_52w, '52w Low'))
+
+    # Round numbers: $25 increments above $100, $10 below
+    increment = 25 if price > 100 else 10
+    lo = int(price * 0.5 / increment) * increment
+    hi = int(price * 1.6 / increment) * increment + increment
+    for rn in range(lo, hi + increment, increment):
+        if rn > 0:
+            candidates.append((float(rn), f'${rn} round'))
+
+    # Cluster candidates within 2% of each other
+    candidates = [(p, l) for p, l in candidates if p and p > 0]
+    candidates.sort(key=lambda x: x[0])
+
+    clusters = []
+    used = [False] * len(candidates)
+    threshold = 0.02  # 2%
+
+    for i, (p, l) in enumerate(candidates):
+        if used[i]:
+            continue
+        cluster_prices = [p]
+        cluster_labels = [l]
+        for j in range(i+1, len(candidates)):
+            if used[j]:
+                continue
+            if abs(candidates[j][0] - p) / p <= threshold:
+                cluster_prices.append(candidates[j][0])
+                cluster_labels.append(candidates[j][1])
+                used[j] = True
+        used[i] = True
+
+        if len(cluster_labels) >= 2:  # Only report confluences (2+ sources)
+            mid = sum(cluster_prices) / len(cluster_prices)
+            dist_pct = (mid - price) / price * 100
+            role = 'resistance' if mid > price else 'support'
+            strength = len(cluster_labels)  # More sources = stronger
+            clusters.append({
+                'price': round(mid, 2),
+                'price_lo': round(min(cluster_prices), 2),
+                'price_hi': round(max(cluster_prices), 2),
+                'sources': cluster_labels,
+                'strength': strength,
+                'dist_pct': round(dist_pct, 1),
+                'role': role,
+            })
+
+    # Sort by strength (desc) then distance from price (asc)
+    clusters.sort(key=lambda x: (-x['strength'], abs(x['dist_pct'])))
+    return clusters[:8]  # Top 8 confluences
+
+
 def scan_ticker(ticker):
     raw = yf.download(ticker, start="2020-01-01", auto_adjust=True, progress=False)
     if isinstance(raw.columns, pd.MultiIndex):
@@ -517,6 +635,42 @@ def scan_ticker(ticker):
     except Exception:
         mtf = {}
 
+    # Compute Anchored VWAPs from key dates using already-downloaded raw data
+    avwap_dict = {}
+    try:
+        import datetime as _dt
+        # 52w high anchor
+        high_idx = df["high_52w"].idxmax() if not df["high_52w"].empty else None
+        # Use actual 52w high date from price series
+        raw_close = raw["Close"] if "Close" in raw.columns else raw.iloc[:, 0]
+        high_date = raw_close.rolling(252).apply(lambda x: x.index[x.argmax()], raw=False)
+        # Simpler: find the date of the 52w high directly
+        lookback = raw.tail(252)
+        if isinstance(lookback.columns, pd.MultiIndex):
+            lookback.columns = lookback.columns.get_level_values(0)
+        high52_date = lookback["Close"].idxmax()
+        low52_date  = lookback["Close"].idxmin()
+        ytd_date    = pd.Timestamp(f"{pd.Timestamp.now().year}-01-01")
+
+        avwap_dict['52w_high'] = compute_avwap(raw, high52_date)
+        avwap_dict['ytd']      = compute_avwap(raw, ytd_date)
+        avwap_dict['ytd_low']  = compute_avwap(raw, low52_date)
+    except Exception as e:
+        avwap_dict = {}
+
+    # Find confluence levels
+    confluences = []
+    try:
+        confluences = find_confluence_levels(
+            price_now,
+            avwap_dict,
+            mtf,
+            safe(last["high_52w"], 2),
+            safe(last["low_52w"], 2),
+        )
+    except Exception:
+        confluences = []
+
     return {
         "ticker": ticker.upper(),
         "price": safe(last["Close"], 2),
@@ -559,6 +713,8 @@ def scan_ticker(ticker):
         "drawdown": safe(last["drawdown"] * 100, 1),
         "cmf": round(cmf, 3),
         "obv_roc": round(obv_roc, 1),
+        "avwap": avwap_dict,
+        "confluences": confluences,
     }
 
 
@@ -623,6 +779,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .section-divider { border: none; border-top: 0.5px solid #1e2a35; margin: 14px 0; }
   /* Volume profile inline */
   .vp-inline-section { margin: 10px 0 14px; }
+  /* AVWAP + Confluence */
+  .avwap-section { margin: 10px 0 14px; }
+  .confluence-section { margin: 10px 0 14px; }
+  .strength-dots { display: flex; gap: 2px; align-items: center; }
+  .strength-dot { width: 5px; height: 5px; border-radius: 50%; background: #22c55e; }
+  .strength-dot.dim { background: #1e2a35; }
   /* MTF inline */
   .mtf-inline-section { margin: 10px 0 14px; }
   .mtf-inline-grid { display: flex; flex-direction: column; gap: 4px; }
@@ -833,6 +995,8 @@ function renderCard(d) {
       '</div></div>' +
     '</div>' +
     renderMTFInline(d) +
+    renderAVWAP(d) +
+    renderConfluences(d) +
     renderVPSection(d.ticker) +
 
     '<hr class="section-divider">' +
@@ -891,6 +1055,99 @@ function renderHVNTable(vp) {
     '<table class="opts-table"><thead><tr><th style="text-align:left">Price</th><th style="text-align:left">From Current</th><th style="text-align:left">Vol %</th><th style="text-align:left">Role</th></tr></thead>' +
     '<tbody>'+rows+lvnRows+'</tbody></table></div>';
 }
+
+function renderAVWAP(d) {
+  const av = d.avwap || {};
+  const price = d.price;
+  if (!Object.keys(av).length) return '';
+
+  const anchors = [
+    ['52w_high', '52wH AVWAP'],
+    ['ytd',      'YTD AVWAP'],
+    ['ytd_low',  'YTD Low AVWAP'],
+  ];
+
+  function bandRow(val, label, isAvwap) {
+    if (!val) return '';
+    const above = price > val;
+    const c = above ? 'c-green' : 'c-red';
+    const dist = ((val - price) / price * 100);
+    const distStr = (dist >= 0 ? '+' : '') + dist.toFixed(1) + '%';
+    const fw = isAvwap ? 'font-weight:500' : '';
+    return '<tr>' +
+      '<td style="color:#64748b;font-size:10px;' + fw + '">' + label + '</td>' +
+      '<td class="' + c + '" style="' + fw + '">$' + val.toFixed(2) + '</td>' +
+      '<td class="c-muted" style="font-size:10px">' + distStr + '</td>' +
+      '<td class="c-muted" style="font-size:10px">' + (above ? 'above' : 'below') + '</td>' +
+    '</tr>';
+  }
+
+  let rows = '';
+  anchors.forEach(function(pair) {
+    const key = pair[0], label = pair[1];
+    const a = av[key];
+    if (!a) return;
+    rows += bandRow(a.avwap,  label,        true);
+    rows += bandRow(a.s1_up,  label + ' +1σ', false);
+    rows += bandRow(a.s1_dn,  label + ' -1σ', false);
+    rows += bandRow(a.s2_up,  label + ' +2σ', false);
+    rows += bandRow(a.s2_dn,  label + ' -2σ', false);
+  });
+
+  if (!rows) return '';
+
+  return '<div class="avwap-section">' +
+    '<div class="detail-title" style="margin-bottom:6px">Anchored VWAP — Institutional Cost Basis</div>' +
+    '<table class="opts-table">' +
+      '<thead><tr>' +
+        '<th style="text-align:left">Level</th>' +
+        '<th style="text-align:left">Price</th>' +
+        '<th style="text-align:left">Distance</th>' +
+        '<th style="text-align:left">vs Current</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>' +
+  '</div>';
+}
+
+function renderConfluences(d) {
+  const conf = d.confluences || [];
+  if (!conf.length) return '';
+  const price = d.price;
+
+  const rows = conf.map(function(c) {
+    const role = c.role === 'support' ? 'c-green' : 'c-red';
+    const zoneStr = c.price_lo === c.price_hi
+      ? '$' + c.price.toFixed(2)
+      : '$' + c.price_lo.toFixed(2) + '–$' + c.price_hi.toFixed(2);
+    const srcStr = c.sources.join(', ');
+    const dots = Array(5).fill(0).map(function(_, i) {
+      return '<span class="strength-dot' + (i < c.strength ? '' : ' dim') + '"></span>';
+    }).join('');
+    return '<tr>' +
+      '<td class="' + role + '" style="font-size:11px">' + zoneStr + '</td>' +
+      '<td class="c-muted" style="font-size:10px">' + (c.dist_pct >= 0 ? '+' : '') + c.dist_pct + '%</td>' +
+      '<td class="' + role + '" style="font-size:10px">' + c.role + '</td>' +
+      '<td><div class="strength-dots">' + dots + '</div></td>' +
+      '<td class="c-dim" style="font-size:10px;max-width:200px;white-space:normal">' + srcStr + '</td>' +
+    '</tr>';
+  }).join('');
+
+  return '<div class="confluence-section">' +
+    '<div class="detail-title" style="margin-bottom:6px">Confluence Levels — Multi-Source S/R</div>' +
+    '<table class="opts-table">' +
+      '<thead><tr>' +
+        '<th style="text-align:left">Zone</th>' +
+        '<th style="text-align:left">Distance</th>' +
+        '<th style="text-align:left">Role</th>' +
+        '<th style="text-align:left">Strength</th>' +
+        '<th style="text-align:left">Sources</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>' +
+  '</div>';
+}
+
 
 function renderVPSection(ticker) {
   return '<div class="vp-inline-section" id="vp-section-' + ticker + '">' +
@@ -1093,6 +1350,48 @@ function formatForClaude(d) {
     });
   }
 
+  // Anchored VWAP
+  const av = d.avwap || {};
+  const avAnchors = [['52w_high','52wH AVWAP'],['ytd','YTD AVWAP'],['ytd_low','YTD Low AVWAP']];
+  if (Object.keys(av).length) {
+    L.push('');
+    L.push('ANCHORED VWAP (institutional cost basis)');
+    avAnchors.forEach(function(pair) {
+      const key = pair[0], label = pair[1];
+      const a = av[key];
+      if (!a) return;
+      function avLine(val, lbl) {
+        if (!val) return;
+        const above = d.price > val;
+        const dist = ((val - d.price)/d.price*100);
+        L.push('  ' + lbl.padEnd(22) + ' $' + val.toFixed(2) +
+          '  (' + (above?'above':'below') + ', ' + (dist>=0?'+':'') + dist.toFixed(1) + '%)');
+      }
+      avLine(a.avwap,  label);
+      avLine(a.s1_up,  label + ' +1σ');
+      avLine(a.s1_dn,  label + ' -1σ');
+      avLine(a.s2_up,  label + ' +2σ');
+      avLine(a.s2_dn,  label + ' -2σ');
+    });
+  }
+
+  // Confluence levels
+  const conf = d.confluences || [];
+  if (conf.length) {
+    L.push('');
+    L.push('CONFLUENCE LEVELS (multi-source S/R — use for entries/targets)');
+    L.push('  Zone               Distance  Role        Strength  Sources');
+    conf.forEach(function(c) {
+      const zone = c.price_lo === c.price_hi
+        ? ('$' + c.price.toFixed(2)).padEnd(18)
+        : ('$' + c.price_lo.toFixed(2) + '-$' + c.price_hi.toFixed(2)).padEnd(18);
+      const dist = ((c.dist_pct >= 0 ? '+' : '') + c.dist_pct + '%').padEnd(9);
+      const role = c.role.padEnd(11);
+      const str = (c.strength + '/5 sources').padEnd(9);
+      L.push('  ' + zone + ' ' + dist + ' ' + role + ' ' + str + ' ' + c.sources.join(', '));
+    });
+  }
+
   // Volume profile — now embedded in scan result
   const vp = d.vp;
   if (vp && vp.poc) {
@@ -1247,385 +1546,3 @@ class handler(BaseHTTPRequestHandler):
                 results.append({"ticker": ticker, "error": str(e)})
 
         self.wfile.write(json.dumps({"results": results}).encode())# ── Multi-timeframe MA fetch ──────────────────────────────────────────────────
-
-def fetch_mtf_inline(ticker, price):
-    """
-    Fetch 50 MA and 200 MA for 4h, 1d, 1wk, 1mo — just the last value.
-    Returns dollar values and dollar distance from current price.
-    Fast: no chart bars, just the last row of each timeframe.
-    """
-    configs = [
-        ("4h",  "4h",  "730d"),
-        ("1d",  "1d",  "max"),
-        ("1wk", "1wk", "max"),
-        ("1mo", "1mo", "max"),
-    ]
-    result = {}
-    for label, interval, period in configs:
-        try:
-            df = yf.download(ticker, period=period, interval=interval,
-                             auto_adjust=True, progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            n = len(df)
-            if n < 2:
-                result[label] = {"ma50": None, "ma200": None}
-                continue
-            close = df["Close"]
-            ma50 = float(close.rolling(min(50, n)).mean().iloc[-1])
-            ma200 = float(close.rolling(min(200, n)).mean().iloc[-1]) if n >= 10 else None
-            ma50 = round(ma50, 2) if not math.isnan(ma50) else None
-            ma200 = round(ma200, 2) if ma200 and not math.isnan(ma200) else None
-            result[label] = {
-                "ma50": ma50,
-                "ma200": ma200,
-                "ma50_dist": round(price - ma50, 2) if ma50 else None,
-                "ma200_dist": round(price - ma200, 2) if ma200 else None,
-            }
-        except Exception:
-            result[label] = {"ma50": None, "ma200": None}
-    return result
-
-    configs = [
-        ("4h",   "4h",   "730d",  50,  200),
-        ("1d",   "1d",   "max",   50,  200),
-        ("1wk",  "1wk",  "max",   50,  200),
-        ("1mo",  "1mo",  "max",   50,  200),
-    ]
-    for label, interval, period, fast, slow in configs:
-        try:
-            df = yf.download(ticker, period=period, interval=interval,
-                             auto_adjust=True, progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            if len(df) < 2:
-                results[label] = {"ma50": None, "ma200": None, "bars": 0}
-                continue
-            close = df["Close"]
-            n = len(df)
-            ma50_val = float(close.rolling(min(fast, n)).mean().iloc[-1]) if n >= 2 else None
-            ma200_val = float(close.rolling(min(slow, n)).mean().iloc[-1]) if n >= slow else None
-            price = float(close.iloc[-1])
-            entry = {
-                "ma50": round(ma50_val, 2) if ma50_val and not math.isnan(ma50_val) else None,
-                "ma200": round(ma200_val, 2) if ma200_val and not math.isnan(ma200_val) else None,
-                "price": round(price, 2),
-                "bars": n,
-            }
-            # Attach OHLCV bars for the active timeframe
-            if label == active_tf:
-                chart_bars = []
-                for dt, row in df.iterrows():
-                    try:
-                        ts = int(dt.timestamp() * 1000)
-                        ma50_b = float(close.rolling(min(fast, n)).mean().loc[dt]) if not math.isnan(float(close.rolling(min(fast, n)).mean().loc[dt])) else None
-                        ma200_b = float(close.rolling(min(slow, n)).mean().loc[dt]) if n >= slow and not math.isnan(float(close.rolling(min(slow, n)).mean().loc[dt])) else None
-                        chart_bars.append({
-                            "t": ts,
-                            "o": round(float(row["Open"]), 4),
-                            "h": round(float(row["High"]), 4),
-                            "l": round(float(row["Low"]), 4),
-                            "c": round(float(row["Close"]), 4),
-                            "v": int(row["Volume"]),
-                            "ma50": round(ma50_b, 4) if ma50_b else None,
-                            "ma200": round(ma200_b, 4) if ma200_b else None,
-                        })
-                    except Exception:
-                        continue
-                entry["chart_bars"] = chart_bars
-            results[label] = entry
-        except Exception as e:
-            results[label] = {"ma50": None, "ma200": None, "error": str(e)}
-    return results
-
-
-# ── Volume profile for S/R ────────────────────────────────────────────────────
-
-def fetch_options(ticker):
-    """Fetch full options chain for all expirations in 27-45 DTE window."""
-    import datetime
-
-    yt = yf.Ticker(ticker)
-    try:
-        expirations = yt.options
-    except Exception as e:
-        return {"error": f"Could not fetch expirations: {e}"}
-    if not expirations:
-        return {"error": "No options expirations available"}
-
-    today = datetime.date.today()
-
-    # Collect all expirations in the 27-45 DTE window
-    valid_exps = []
-    for exp_str in expirations:
-        try:
-            exp_date = datetime.date.fromisoformat(exp_str)
-            dte = (exp_date - today).days
-            if 27 <= dte <= 45:
-                valid_exps.append((exp_str, dte))
-        except Exception:
-            continue
-
-    if not valid_exps:
-        return {"error": "No expirations in 27-45 DTE window"}
-
-    try:
-        spot = float(yt.info.get("regularMarketPrice") or yt.info.get("currentPrice") or 0)
-    except Exception:
-        spot = 0
-
-    def clean_contract(row, dte_days, is_put):
-        try:
-            strike = float(getattr(row, "strike", 0) or 0)
-            bid = float(getattr(row, "bid", 0) or 0)
-            ask = float(getattr(row, "ask", 0) or 0)
-            iv_raw = getattr(row, "impliedVolatility", 0)
-            iv = float(iv_raw) if iv_raw and not np.isnan(float(iv_raw)) else 0
-            oi_raw = getattr(row, "openInterest", 0)
-            oi = int(oi_raw) if oi_raw and not np.isnan(float(oi_raw)) else 0
-            vol_raw = getattr(row, "volume", 0)
-            vol = int(vol_raw) if vol_raw and not np.isnan(float(vol_raw)) else 0
-            sym = str(getattr(row, "contractSymbol", ""))
-
-            if bid < 0.05 or oi < 1 or iv <= 0:
-                return None
-
-            delta = bs_delta(spot, strike, dte_days, iv, is_put=is_put)
-            if delta is None:
-                return None
-            delta_abs = abs(delta)
-
-            # Mark as "optimal" if closest to 0.20 delta
-            theta = bs_theta(spot, strike, dte_days, iv, is_put=is_put)
-            ann_yield = (bid / strike) * (365 / dte_days) * 100 if strike > 0 and dte_days > 0 else 0
-            be = (strike - bid) if is_put else (strike + bid)
-
-            return {
-                "contractSymbol": sym,
-                "strike": strike,
-                "bid": round(bid, 2),
-                "ask": round(ask, 2),
-                "delta": round(delta_abs, 3),
-                "theta": round(theta, 4) if theta is not None else None,
-                "impliedVolatility": round(iv, 4),
-                "openInterest": oi,
-                "volume": vol,
-                "annYield": round(ann_yield, 1),
-                "breakeven": round(be, 2),
-            }
-        except Exception:
-            return None
-
-    all_puts = []
-    all_calls = []
-    expirations_meta = []
-
-    for exp_str, dte in valid_exps:
-        try:
-            chain = yt.option_chain(exp_str)
-            exp_date = datetime.date.fromisoformat(exp_str)
-            exp_label = exp_date.strftime("%b %-d, %Y")
-
-            exp_puts = []
-            exp_calls = []
-
-            for _, row in chain.puts.iterrows():
-                c = clean_contract(row, dte, True)
-                if c:
-                    c["expiration"] = exp_label
-                    c["dte"] = dte
-                    exp_puts.append(c)
-
-            for _, row in chain.calls.iterrows():
-                c = clean_contract(row, dte, False)
-                if c:
-                    c["expiration"] = exp_label
-                    c["dte"] = dte
-                    exp_calls.append(c)
-
-            # Mark optimal contract (closest to 20 delta) for each expiration
-            if exp_puts:
-                best = min(exp_puts, key=lambda x: abs(x["delta"] - 0.20))
-                best["optimal"] = True
-            if exp_calls:
-                best = min(exp_calls, key=lambda x: abs(x["delta"] - 0.20))
-                best["optimal"] = True
-
-            all_puts.extend(exp_puts)
-            all_calls.extend(exp_calls)
-            expirations_meta.append({"exp": exp_label, "dte": dte, "puts": len(exp_puts), "calls": len(exp_calls)})
-
-        except Exception:
-            continue
-
-    return {
-        "spot": spot,
-        "expirations": expirations_meta,
-        "puts": all_puts,
-        "calls": all_calls,
-    }
-
-
-# ── Main ticker scan ──────────────────────────────────────────────────────────
-
-def scan_ticker(ticker):
-    raw = yf.download(ticker, start="2020-01-01", auto_adjust=True, progress=False)
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
-    if len(raw) < 250:
-        return {"error": f"Insufficient data for {ticker}"}
-
-    df = compute_indicators(raw.copy())
-    df = df.dropna(subset=["ma200", "rsi", "vol_rank"])
-    if len(df) == 0:
-        return {"error": f"No valid data for {ticker}"}
-
-    pr = pd.DataFrame(index=df.index)
-    pr["rvol_10d"] = pct_rank(df["rvol_10d"])
-    pr["vol_rank"] = 1 - pct_rank(df["vol_rank"])
-    pr["ma_distance"] = pct_rank(df["ma_distance"])
-    pr["vol_compression"] = pct_rank(df["vol_compression"])
-    pr["rally_5d"] = pct_rank(df["rally_5d"])
-    pr["rally_20d"] = pct_rank(df["rally_20d"])
-
-    trend = ((0.35*pr["rvol_10d"] + 0.25*pr["vol_rank"] + 0.20*pr["ma_distance"] + 0.20*pr["vol_compression"]) * 100).round(1)
-    crash = ((0.50*pr["rally_5d"] + 0.30*pr["rally_20d"] + 0.20*pr["vol_compression"]) * 100).round(1)
-
-    t = float(trend.iloc[-1])
-    c = float(crash.iloc[-1])
-    last = df.iloc[-1]
-
-    if t >= 70 and c >= 70:
-        regime = "Blow-off top risk"
-    elif t >= 70 and c < 40:
-        regime = "Strong trend"
-    elif c >= 60:
-        regime = "Elevated crash risk"
-    elif t >= 60:
-        regime = "Trending"
-    elif t < 30 and c < 30:
-        regime = "No signal"
-    else:
-        regime = "Neutral"
-
-    try:
-        yt = yf.Ticker(ticker)
-        info = yt.info or {}
-        inc_q = yt.quarterly_income_stmt
-        bal_q = yt.quarterly_balance_sheet
-        cf_q = yt.quarterly_cashflow
-    except Exception:
-        info = {}
-        inc_q = bal_q = cf_q = pd.DataFrame()
-
-    sector = info.get("sector", "Unknown")
-    industry = info.get("industry", "Unknown")
-    mcap = info.get("marketCap")
-    revenue = get_ttm(inc_q, "Total Revenue")
-    net_inc = get_ttm(inc_q, "Net Income")
-    ebit = get_ttm(inc_q, "EBIT") or get_ttm(inc_q, "Operating Income")
-    gross_p = get_ttm(inc_q, "Gross Profit")
-    equity = get_ttm(bal_q, "Stockholders Equity", True) or get_ttm(bal_q, "Common Stock Equity", True)
-    debt = get_ttm(bal_q, "Total Debt", True)
-    cash = get_ttm(bal_q, "Cash And Cash Equivalents", True) or get_ttm(bal_q, "Cash Cash Equivalents", True)
-    op_cf = get_ttm(cf_q, "Operating Cash Flow") or get_ttm(cf_q, "Cash Flow From Continuing Operating")
-    capex = get_ttm(cf_q, "Capital Expenditure")
-    tax_prov = get_ttm(inc_q, "Tax Provision")
-
-    ev = (mcap + debt - cash) if mcap and debt is not None and cash is not None else None
-    pe = sdiv(mcap, net_inc, True)
-    pb = sdiv(mcap, equity, True)
-    ps = sdiv(mcap, revenue, True)
-    ev_ebit = sdiv(ev, ebit, True)
-    gm = sdiv(gross_p, revenue)
-    fcf = (op_cf + capex) if op_cf is not None and capex is not None else None
-    fcf_yield = sdiv(fcf, mcap)
-
-    peg = info.get("trailingPegRatio") or info.get("pegRatio")
-    if peg is not None:
-        try:
-            peg = round(float(peg), 2)
-        except Exception:
-            peg = None
-
-    roic = None
-    if ebit is not None and equity is not None and debt is not None and cash is not None and ebit > 0:
-        if tax_prov is not None and net_inc is not None and (net_inc + tax_prov) != 0:
-            tax_rate = max(0.0, min(tax_prov / (net_inc + tax_prov), 0.5))
-        else:
-            tax_rate = 0.21
-        nopat = ebit * (1 - tax_rate)
-        invested_capital = debt + equity - cash
-        if invested_capital > 0:
-            roic = round((nopat / invested_capital) * 100, 1)
-
-    rev_growth = None
-    if inc_q is not None and not inc_q.empty:
-        rm = [i for i in inc_q.index if "total revenue" in str(i).lower()]
-        if rm:
-            rv = inc_q.loc[rm[0]].dropna()
-            if len(rv) >= 5 and float(rv.iloc[4]) != 0:
-                rev_growth = float(rv.iloc[0]) / float(rv.iloc[4]) - 1
-
-    metrics_used = SECTOR_METRICS.get(sector, ["pe", "pb", "ps", "ev_ebit"])
-    cmf = float(last["cmf_20"]) if pd.notna(last["cmf_20"]) else 0
-    obv_roc = float(last["obv_roc_20"]) if pd.notna(last["obv_roc_20"]) else 0
-
-    def safe(v, decimals=2):
-        if v is None or (isinstance(v, float) and math.isnan(v)):
-            return None
-        return round(float(v), decimals)
-
-    # Fetch MTF MAs inline (4 lightweight calls, no chart bars)
-    price_now = safe(last["Close"], 2) or 0
-    try:
-        mtf = fetch_mtf_inline(ticker, price_now)
-    except Exception:
-        mtf = {}
-
-    return {
-        "ticker": ticker.upper(),
-        "price": safe(last["Close"], 2),
-        "mtf": mtf,
-        "sector": sector,
-        "industry": industry,
-        "market_cap": mcap,
-        "trend_score": t,
-        "crash_score": c,
-        "regime": regime,
-        "metrics_used": metrics_used,
-        "pe": round(pe, 1) if pe else None,
-        "pb": round(pb, 1) if pb else None,
-        "ps": round(ps, 1) if ps else None,
-        "ev_ebit": round(ev_ebit, 1) if ev_ebit else None,
-        "peg": peg,
-        "roic": roic,
-        "gross_margin": round(gm * 100, 1) if gm else None,
-        "fcf_yield": round(fcf_yield * 100, 1) if fcf_yield else None,
-        "rev_growth": round(rev_growth * 100, 1) if rev_growth else None,
-        "ma50": safe(last["ma50"], 2),
-        "ma200": safe(last["ma200"], 2),
-        "ma50_roc_1d": safe(last["ma50_roc_1d"], 3),
-        "ma50_roc_5d": safe(last["ma50_roc_5d"], 3),
-        "ma50_roc_21d": safe(last["ma50_roc_21d"], 3),
-        "ma200_roc_1d": safe(last["ma200_roc_1d"], 3),
-        "ma200_roc_5d": safe(last["ma200_roc_5d"], 3),
-        "ma200_roc_21d": safe(last["ma200_roc_21d"], 3),
-        "high_52w": safe(last["high_52w"], 2),
-        "low_52w": safe(last["low_52w"], 2),
-        "rally_1d": safe(last["rally_1d"] * 100, 2),
-        "rally_5d": safe(last["rally_5d"] * 100, 2),
-        "rally_20d": safe(last["rally_20d"] * 100, 2),
-        "rally_21d": safe(last["rally_21d"] * 100, 2),
-        "ma_distance": safe(last["ma_distance"] * 100, 1),
-        "rsi": safe(last["rsi"], 1),
-        "rvol_10d": safe(last["rvol_10d"] * 100, 1),
-        "vol_rank": safe(last["vol_rank"] * 100, 0),
-        "vol_compression": safe(last["vol_compression"], 2),
-        "drawdown": safe(last["drawdown"] * 100, 1),
-        "cmf": round(cmf, 3),
-        "obv_roc": round(obv_roc, 1),
-    }
-
-
-# ── HTML frontend ─────────────────────────────────────────────────────────────

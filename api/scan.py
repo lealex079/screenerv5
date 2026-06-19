@@ -1183,20 +1183,29 @@ function drawVolumeProfile(canvas, data, chart) {
 
 function renderOptionsSection(d) {
   const crash = d.crash_score;
+  const tk = d.ticker;
   if (crash >= 75) {
     return '<div class="options-section"><div class="options-header"><div class="options-title">Options</div></div>' +
-      '<div class="options-warn">CrashScore '+crash.toFixed(0)+' — put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
+      '<div class="options-warn">CrashScore ' + crash.toFixed(0) + ' — put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
   }
-  const warn = crash >= 60 ?
-    '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore '+crash.toFixed(0)+' — puts caution (60-74). Call selling against existing positions acceptable.</div>' : '';
+  const warn = crash >= 60
+    ? '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore ' + crash.toFixed(0) + ' — puts caution (60-74). Call selling against existing positions acceptable.</div>'
+    : '';
   return '<div class="options-section">' +
     '<div class="options-header">' +
       '<div class="options-title">Options — 27-45 DTE, all expirations, ~20Δ optimal marked</div>' +
-      '<button class="options-load-btn" onclick="loadOptions(''+d.ticker+'', '+crash+', this)">Load chain</button>' +
+      '<button class="options-load-btn" data-ticker="' + tk + '" data-crash="' + crash + '" onclick="loadOptionsBtn(this)">Load chain</button>' +
     '</div>' +
     warn +
-    '<div id="opts-'+d.ticker+'"></div>' +
+    '<div id="opts-' + tk + '"></div>' +
   '</div>';
+}
+
+
+function loadOptionsBtn(btnEl) {
+  const ticker = btnEl.getAttribute('data-ticker');
+  const crash = parseFloat(btnEl.getAttribute('data-crash'));
+  loadOptions(ticker, crash, btnEl);
 }
 
 async function loadOptions(ticker, crashScore, btnEl) {

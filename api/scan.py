@@ -118,6 +118,45 @@ SECTOR_METRICS = {
 
 # ── Multi-timeframe MA fetch ──────────────────────────────────────────────────
 
+def fetch_mtf_inline(ticker, price):
+    """
+    Fetch 50 MA and 200 MA for 4h, 1d, 1wk, 1mo — just the last value.
+    Returns dollar values and dollar distance from current price.
+    Fast: no chart bars, just the last row of each timeframe.
+    """
+    configs = [
+        ("4h",  "4h",  "730d"),
+        ("1d",  "1d",  "max"),
+        ("1wk", "1wk", "max"),
+        ("1mo", "1mo", "max"),
+    ]
+    result = {}
+    for label, interval, period in configs:
+        try:
+            df = yf.download(ticker, period=period, interval=interval,
+                             auto_adjust=True, progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            n = len(df)
+            if n < 2:
+                result[label] = {"ma50": None, "ma200": None}
+                continue
+            close = df["Close"]
+            ma50 = float(close.rolling(min(50, n)).mean().iloc[-1])
+            ma200 = float(close.rolling(min(200, n)).mean().iloc[-1]) if n >= 10 else None
+            ma50 = round(ma50, 2) if not math.isnan(ma50) else None
+            ma200 = round(ma200, 2) if ma200 and not math.isnan(ma200) else None
+            result[label] = {
+                "ma50": ma50,
+                "ma200": ma200,
+                "ma50_dist": round(price - ma50, 2) if ma50 else None,
+                "ma200_dist": round(price - ma200, 2) if ma200 else None,
+            }
+        except Exception:
+            result[label] = {"ma50": None, "ma200": None}
+    return result
+
+
 def fetch_mtf_mas(ticker, active_tf="1d"):
     """
     Fetch 50 MA and 200 MA on 4h, 1d, 1wk, 1mo timeframes.
@@ -547,9 +586,17 @@ def scan_ticker(ticker):
             return None
         return round(float(v), decimals)
 
+    # Fetch MTF MAs inline (4 lightweight calls, no chart bars)
+    price_now = safe(last["Close"], 2) or 0
+    try:
+        mtf = fetch_mtf_inline(ticker, price_now)
+    except Exception:
+        mtf = {}
+
     return {
         "ticker": ticker.upper(),
         "price": safe(last["Close"], 2),
+        "mtf": mtf,
         "sector": sector,
         "industry": industry,
         "market_cap": mcap,
@@ -650,7 +697,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
   .detail-key { color: #64748b; white-space: nowrap; }
   .section-divider { border: none; border-top: 0.5px solid #1e2a35; margin: 14px 0; }
-  /* MTF MA table */
+  /* MTF inline */
+  .mtf-inline-section { margin: 10px 0 14px; }
+  .mtf-inline-grid { display: flex; flex-direction: column; gap: 4px; }
+  .mtf-inline-row { display: flex; align-items: center; gap: 16px; background: #0f1419; border-radius: 6px; padding: 5px 10px; }
+  .mtf-inline-tf { font-size: 11px; font-weight: 500; color: #64748b; min-width: 28px; }
+  .mtf-inline-pair { display: flex; align-items: center; gap: 5px; flex: 1; }
+  /* MTF MA table (legacy, kept for loadMTF) */
   .mtf-section { margin-bottom: 12px; }
   .mtf-title { font-size: 11px; color: #475569; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
   .mtf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -871,9 +924,7 @@ function renderCard(d) {
         '<span class="detail-key">200 MA dist</span><span class="'+(d.ma_distance>=0?'c-green':'c-red')+'">'+(d.ma_distance>=0?'+':'')+d.ma_distance.toFixed(1)+'%</span>' +
       '</div></div>' +
     '</div>' +
-
-    '<hr class="section-divider">' +
-    renderMTFSection(d.ticker) +
+    renderMTFInline(d) +
 
     '<hr class="section-divider">' +
     renderChartSection(d.ticker) +
@@ -888,6 +939,48 @@ function renderCard(d) {
 }
 
 // ── MTF MAs ───────────────────────────────────────────────────────────────────
+
+function renderMTFInline(d) {
+  const mtf = d.mtf || {};
+  const price = d.price;
+  const tfs = [['4h','4h'],['1d','1D'],['1wk','1W'],['1mo','1M']];
+
+  function maCell(tfData, maKey, distKey, label) {
+    if (!tfData || !tfData[maKey]) return '<span class="detail-key">'+label+'</span><span class="c-dim">N/A</span>';
+    const val = tfData[maKey];
+    const dist = tfData[distKey];
+    const above = price > val;
+    const c = above ? 'c-green' : 'c-red';
+    const distStr = dist != null ? ' <span style="font-size:10px;color:#475569">('+(dist>=0?'+':'')+dist.toFixed(2)+')</span>' : '';
+    return '<span class="detail-key">'+label+'</span><span class="'+c+'">$'+val.toFixed(2)+distStr+'</span>';
+  }
+
+  let rows = '';
+  tfs.forEach(([key, label]) => {
+    const tf = mtf[key] || {};
+    rows += '<div class="mtf-inline-row">' +
+      '<span class="mtf-inline-tf">'+label+'</span>' +
+      '<span class="mtf-inline-pair">' +
+        '<span class="detail-key" style="font-size:10px">50</span>' +
+        (tf.ma50 ? '<span class="'+(price>tf.ma50?'c-green':'c-red')+'" style="font-size:11px">$'+tf.ma50.toFixed(2)+
+          (tf.ma50_dist!=null?'<span style="font-size:10px;color:#475569"> ('+(tf.ma50_dist>=0?'+':'')+tf.ma50_dist.toFixed(2)+')</span>':'')+'</span>'
+          : '<span class="c-dim" style="font-size:11px">N/A</span>') +
+      '</span>' +
+      '<span class="mtf-inline-pair">' +
+        '<span class="detail-key" style="font-size:10px">200</span>' +
+        (tf.ma200 ? '<span class="'+(price>tf.ma200?'c-green':'c-red')+'" style="font-size:11px">$'+tf.ma200.toFixed(2)+
+          (tf.ma200_dist!=null?'<span style="font-size:10px;color:#475569"> ('+(tf.ma200_dist>=0?'+':'')+tf.ma200_dist.toFixed(2)+')</span>':'')+'</span>'
+          : '<span class="c-dim" style="font-size:11px">N/A</span>') +
+      '</span>' +
+    '</div>';
+  });
+
+  return '<div class="mtf-inline-section">' +
+    '<div class="detail-title" style="margin-bottom:6px">Moving Averages — Multi-Timeframe</div>' +
+    '<div class="mtf-inline-grid">'+rows+'</div>' +
+  '</div>';
+}
+
 
 function renderMTFSection(ticker) {
   return '<div class="mtf-section">' +
@@ -1079,42 +1172,6 @@ function renderChart(ticker, data) {
   new ResizeObserver(() => { try { chart.applyOptions({ width: chartEl.clientWidth }); } catch(e){} }).observe(chartEl);
 }
 
-function renderOptionsSection(d) {
-  const crash = d.crash_score;
-  if (crash >= 75) {
-    return '<div class="options-section"><div class="options-header"><div class="options-title">Options</div></div>' +
-      '<div class="options-warn">CrashScore ' + crash.toFixed(0) + ' \u2014 put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
-  }
-  const warn = crash >= 60 ?
-    '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore ' + crash.toFixed(0) + ' \u2014 puts caution (60-74). Call selling against existing positions acceptable.</div>' : '';
-  return '<div class="options-section">' +
-    '<div class="options-header">' +
-      '<div class="options-title">Options \u2014 27-45 DTE, all expirations, ~20\u0394 optimal marked</div>' +
-      '<button class="options-load-btn" onclick="loadOptions(\'' + d.ticker + '\', ' + crash + ', this)">Load chain</button>' +
-    '</div>' +
-    warn +
-    '<div id="opts-' + d.ticker + '"></div>' +
-  '</div>';
-}
-
-async function loadOptions(ticker, crashScore, btnEl) {
-  btnEl.disabled = true; btnEl.textContent = 'Loading...';
-  const el = document.getElementById('opts-' + ticker);
-  el.innerHTML = '<div class="c-dim" style="font-size:12px;padding:8px 0">Fetching chain...</div>';
-  try {
-    const res = await fetch('/api/scan?options=' + encodeURIComponent(ticker));
-    const data = await res.json();
-    if (data.error) { el.innerHTML = '<div class="options-warn">' + data.error + '</div>'; btnEl.disabled = false; btnEl.textContent = 'Retry'; return; }
-    optionsCache[ticker] = data;
-    el.innerHTML = buildOptionsTabs(data, crashScore, ticker);
-    btnEl.style.display = 'none';
-    activateTab(ticker, 'puts', 0);
-  } catch(e) {
-    el.innerHTML = '<div class="options-warn">Error: ' + e.message + '</div>';
-    btnEl.disabled = false; btnEl.textContent = 'Retry';
-  }
-}
-
 function drawVolumeProfile(canvas, data, chart) {
   const bins = data.vp_bins || [];
   if (!bins.length) return;
@@ -1133,6 +1190,43 @@ function drawVolumeProfile(canvas, data, chart) {
     } catch(e) {}
   });
 }
+
+function renderOptionsSection(d) {
+  const crash = d.crash_score;
+  if (crash >= 75) {
+    return '<div class="options-section"><div class="options-header"><div class="options-title">Options</div></div>' +
+      '<div class="options-warn">CrashScore '+crash.toFixed(0)+' — put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
+  }
+  const warn = crash >= 60 ?
+    '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore '+crash.toFixed(0)+' — puts caution (60-74). Call selling against existing positions acceptable.</div>' : '';
+  return '<div class="options-section">' +
+    '<div class="options-header">' +
+      '<div class="options-title">Options — 27-45 DTE, all expirations, ~20Δ optimal marked</div>' +
+      '<button class="options-load-btn" onclick="loadOptions(''+d.ticker+'', '+crash+', this)">Load chain</button>' +
+    '</div>' +
+    warn +
+    '<div id="opts-'+d.ticker+'"></div>' +
+  '</div>';
+}
+
+async function loadOptions(ticker, crashScore, btnEl) {
+  btnEl.disabled = true; btnEl.textContent = 'Loading...';
+  const el = document.getElementById('opts-' + ticker);
+  el.innerHTML = '<div class="c-dim" style="font-size:12px;padding:8px 0">Fetching chain...</div>';
+  try {
+    const res = await fetch('/api/scan?options=' + encodeURIComponent(ticker));
+    const data = await res.json();
+    if (data.error) { el.innerHTML = '<div class="options-warn">'+data.error+'</div>'; btnEl.disabled=false; btnEl.textContent='Retry'; return; }
+    optionsCache[ticker] = data;
+    el.innerHTML = buildOptionsTabs(data, crashScore, ticker);
+    btnEl.style.display = 'none';
+    activateTab(ticker, 'puts', 0);
+  } catch(e) {
+    el.innerHTML = '<div class="options-warn">Error: '+e.message+'</div>';
+    btnEl.disabled=false; btnEl.textContent='Retry';
+  }
+}
+
 
 function buildOptionsTabs(data, crashScore, ticker) {
   const exps = data.expirations || [];
@@ -1223,16 +1317,21 @@ function formatForClaude(d) {
   L.push('50 MA slope  — 1D: '+roc(d.ma50_roc_1d)+'   1W: '+roc(d.ma50_roc_5d)+'   1M: '+roc(d.ma50_roc_21d));
   L.push('200 MA slope — 1D: '+roc(d.ma200_roc_1d)+'   1W: '+roc(d.ma200_roc_5d)+'   1M: '+roc(d.ma200_roc_21d));
 
-  // MTF MAs if loaded
-  const mtf = mtfCache[d.ticker];
-  if (mtf) {
+  // MTF MAs — now embedded in scan result
+  const mtf = d.mtf || {};
+  if (Object.keys(mtf).length) {
     L.push('');
-    L.push('MULTI-TIMEFRAME MOVING AVERAGES');
-    [['4h','4h'],['1d','1d'],['1wk','1wk'],['1mo','1mo']].forEach(([key, label]) => {
+    L.push('MULTI-TIMEFRAME MOVING AVERAGES (price $'+d.price.toFixed(2)+')');
+    L.push('  TF    50 MA          dist $    200 MA         dist $');
+    [['4h','4h'],['1d','1D'],['1wk','1W'],['1mo','1M']].forEach(([key, label]) => {
       const tf = mtf[key] || {};
-      const ma50s = tf.ma50 ? '$'+tf.ma50.toFixed(2)+' ('+(d.price>tf.ma50?'above':'below')+')' : 'N/A';
-      const ma200s = tf.ma200 ? '$'+tf.ma200.toFixed(2)+' ('+(d.price>tf.ma200?'above':'below')+')' : 'N/A';
-      L.push('  '+label.padEnd(5)+' 50 MA: '+ma50s+'   200 MA: '+ma200s);
+      const ma50s = tf.ma50 ? '$'+tf.ma50.toFixed(2) : 'N/A';
+      const ma50d = tf.ma50_dist != null ? (tf.ma50_dist>=0?'+':'')+tf.ma50_dist.toFixed(2) : 'N/A';
+      const ma200s = tf.ma200 ? '$'+tf.ma200.toFixed(2) : 'N/A';
+      const ma200d = tf.ma200_dist != null ? (tf.ma200_dist>=0?'+':'')+tf.ma200_dist.toFixed(2) : 'N/A';
+      const abv50 = tf.ma50 ? (d.price>tf.ma50?' (above)':' (below)') : '';
+      const abv200 = tf.ma200 ? (d.price>tf.ma200?' (above)':' (below)') : '';
+      L.push('  '+label.padEnd(5)+' '+ma50s.padEnd(14)+abv50.padEnd(9)+' $'+ma50d.padEnd(9)+'  '+ma200s.padEnd(14)+abv200.padEnd(9)+' $'+ma200d);
     });
   }
 

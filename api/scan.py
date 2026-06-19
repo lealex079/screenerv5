@@ -407,6 +407,17 @@ def compute_avwap(df, anchor_date):
     Anchored VWAP from a specific date with ±1σ and ±2σ bands.
     Uses typical price = (H+L+C)/3, volume-weighted.
     """
+    try:
+        # Normalize anchor_date to same timezone as df index
+        idx = df.index
+        if hasattr(idx, 'tz') and idx.tz is not None:
+            if hasattr(anchor_date, 'tz_localize'):
+                anchor_date = anchor_date.tz_localize(idx.tz) if anchor_date.tzinfo is None else anchor_date.tz_convert(idx.tz)
+        else:
+            if hasattr(anchor_date, 'tz_localize') and anchor_date.tzinfo is not None:
+                anchor_date = anchor_date.tz_localize(None)
+    except Exception:
+        pass
     subset = df[df.index >= anchor_date].copy()
     if len(subset) < 2:
         return None
@@ -635,27 +646,29 @@ def scan_ticker(ticker):
     except Exception:
         mtf = {}
 
-    # Compute Anchored VWAPs from key dates using already-downloaded raw data
+    # Compute Anchored VWAPs from key dates
     avwap_dict = {}
     try:
-        import datetime as _dt
-        # 52w high anchor
-        high_idx = df["high_52w"].idxmax() if not df["high_52w"].empty else None
-        # Use actual 52w high date from price series
-        raw_close = raw["Close"] if "Close" in raw.columns else raw.iloc[:, 0]
-        high_date = raw_close.rolling(252).apply(lambda x: x.index[x.argmax()], raw=False)
-        # Simpler: find the date of the 52w high directly
-        lookback = raw.tail(252)
-        if isinstance(lookback.columns, pd.MultiIndex):
-            lookback.columns = lookback.columns.get_level_values(0)
-        high52_date = lookback["Close"].idxmax()
-        low52_date  = lookback["Close"].idxmin()
+        # Build a clean single-level close series from raw
+        _raw = raw.copy()
+        if isinstance(_raw.columns, pd.MultiIndex):
+            _raw.columns = _raw.columns.get_level_values(0)
+        _close = _raw["Close"].squeeze()
+        # Strip timezone so comparisons work consistently
+        if hasattr(_close.index, 'tz') and _close.index.tz is not None:
+            _close.index = _close.index.tz_localize(None)
+        if hasattr(_raw.index, 'tz') and _raw.index.tz is not None:
+            _raw.index = _raw.index.tz_localize(None)
+
+        _lookback = _close.tail(252)
+        high52_date = _lookback.idxmax()
+        low52_date  = _lookback.idxmin()
         ytd_date    = pd.Timestamp(f"{pd.Timestamp.now().year}-01-01")
 
-        avwap_dict['52w_high'] = compute_avwap(raw, high52_date)
-        avwap_dict['ytd']      = compute_avwap(raw, ytd_date)
-        avwap_dict['ytd_low']  = compute_avwap(raw, low52_date)
-    except Exception as e:
+        avwap_dict['52w_high'] = compute_avwap(_raw, high52_date)
+        avwap_dict['ytd']      = compute_avwap(_raw, ytd_date)
+        avwap_dict['ytd_low']  = compute_avwap(_raw, low52_date)
+    except Exception:
         avwap_dict = {}
 
     # Find confluence levels

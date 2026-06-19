@@ -517,6 +517,12 @@ def scan_ticker(ticker):
     except Exception:
         mtf = {}
 
+    # Fetch volume profile inline (6y lookback)
+    try:
+        vp = fetch_volume_profile(ticker)
+    except Exception:
+        vp = {}
+
     return {
         "ticker": ticker.upper(),
         "price": safe(last["Close"], 2),
@@ -559,6 +565,7 @@ def scan_ticker(ticker):
         "drawdown": safe(last["drawdown"] * 100, 1),
         "cmf": round(cmf, 3),
         "obv_roc": round(obv_roc, 1),
+        "vp": vp,
     }
 
 
@@ -621,6 +628,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
   .detail-key { color: #64748b; white-space: nowrap; }
   .section-divider { border: none; border-top: 0.5px solid #1e2a35; margin: 14px 0; }
+  /* Volume profile inline */
+  .vp-inline-section { margin: 10px 0 14px; }
   /* MTF inline */
   .mtf-inline-section { margin: 10px 0 14px; }
   .mtf-inline-grid { display: flex; flex-direction: column; gap: 4px; }
@@ -829,6 +838,7 @@ function renderCard(d) {
       '</div></div>' +
     '</div>' +
     renderMTFInline(d) +
+    renderVPInline(d) +
 
     '<hr class="section-divider">' +
     renderOptionsSection(d) +
@@ -885,7 +895,42 @@ function renderHVNTable(vp) {
   return '<div style="margin-top:10px"><div class="detail-title" style="margin-bottom:6px">Volume Nodes — HVN = S/R, LVN = price moves through fast</div>' +
     '<table class="opts-table"><thead><tr><th style="text-align:left">Price</th><th style="text-align:left">From Current</th><th style="text-align:left">Vol %</th><th style="text-align:left">Role</th></tr></thead>' +
     '<tbody>'+rows+lvnRows+'</tbody></table></div>';
-}function renderOptionsSection(d) {
+}
+
+function renderVPInline(d) {
+  const vp = d.vp;
+  if (!vp || !vp.poc) return '';
+  const curr = d.price;
+
+  function distStr(price) {
+    const pct = ((price - curr) / curr * 100);
+    return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
+  }
+
+  const hvnRows = (vp.hvn_nodes || []).map(n => {
+    const role = n.role === 'support' ? 'c-green' : 'c-red';
+    return '<tr><td class="' + role + '">$' + n.price.toFixed(2) + '</td><td class="c-muted">' + distStr(n.price) + '</td><td class="c-muted">' + n.vol_pct.toFixed(0) + '%</td><td class="' + role + '">' + n.role + '</td></tr>';
+  }).join('');
+
+  const lvnRows = (vp.lvn_nodes || []).map(n => {
+    return '<tr><td class="c-amber">$' + n.price.toFixed(2) + '</td><td class="c-muted">' + distStr(n.price) + '</td><td class="c-muted">' + n.vol_pct.toFixed(0) + '%</td><td class="c-amber">low-vol</td></tr>';
+  }).join('');
+
+  return '<div class="vp-inline-section">' +
+    '<div class="detail-title" style="margin-bottom:6px">Volume Profile (6y) — ' +
+      '<span style="color:#a78bfa">POC $' + vp.poc + '</span>' +
+      ' · <span style="color:#6b8cba">VAH $' + vp.vah + '</span>' +
+      ' · <span style="color:#6b8cba">VAL $' + vp.val + '</span>' +
+    '</div>' +
+    '<table class="opts-table">' +
+      '<thead><tr><th style="text-align:left">Price</th><th style="text-align:left">From Current</th><th style="text-align:left">Vol %</th><th style="text-align:left">Role</th></tr></thead>' +
+      '<tbody>' + hvnRows + lvnRows + '</tbody>' +
+    '</table>' +
+  '</div>';
+}
+
+
+function renderOptionsSection(d) {
   const crash = d.crash_score;
   const tk = d.ticker;
   if (crash >= 75) {
@@ -1037,9 +1082,9 @@ function formatForClaude(d) {
     });
   }
 
-  // Volume profile + S/R nodes if loaded
-  const vp = chartCache[d.ticker];
-  if (vp) {
+  // Volume profile — now embedded in scan result
+  const vp = d.vp;
+  if (vp && vp.poc) {
     L.push('');
     L.push('VOLUME PROFILE (6-year lookback, 2020 to present)');
     L.push('  POC: $'+vp.poc+'   VAH: $'+vp.vah+'   VAL: $'+vp.val);

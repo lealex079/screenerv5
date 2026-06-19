@@ -517,12 +517,6 @@ def scan_ticker(ticker):
     except Exception:
         mtf = {}
 
-    # Fetch volume profile inline (6y lookback)
-    try:
-        vp = fetch_volume_profile(ticker)
-    except Exception:
-        vp = {}
-
     return {
         "ticker": ticker.upper(),
         "price": safe(last["Close"], 2),
@@ -565,7 +559,6 @@ def scan_ticker(ticker):
         "drawdown": safe(last["drawdown"] * 100, 1),
         "cmf": round(cmf, 3),
         "obv_roc": round(obv_roc, 1),
-        "vp": vp,
     }
 
 
@@ -746,6 +739,8 @@ async function runScan() {
     if (data.error) { resultsDiv.innerHTML = '<div class="error-msg">' + data.error + '</div>'; return; }
     scanResults = data.results.filter(d => !d.error);
     resultsDiv.innerHTML = data.results.map(renderCard).join('');
+    // Auto-load VP for each ticker after cards render
+    scanResults.forEach(d => setTimeout(() => loadVP(d.ticker), 100));
     if (scanResults.length > 1) {
       copyAllContainer.innerHTML = '<div class="copy-all-row"><button class="copy-btn" onclick="copyAll(this)">Copy all for Claude</button></div>';
     }
@@ -838,7 +833,7 @@ function renderCard(d) {
       '</div></div>' +
     '</div>' +
     renderMTFInline(d) +
-    renderVPInline(d) +
+    renderVPSection(d.ticker) +
 
     '<hr class="section-divider">' +
     renderOptionsSection(d) +
@@ -897,37 +892,53 @@ function renderHVNTable(vp) {
     '<tbody>'+rows+lvnRows+'</tbody></table></div>';
 }
 
-function renderVPInline(d) {
-  const vp = d.vp;
-  if (!vp || !vp.poc) return '';
-  const curr = d.price;
+function renderVPSection(ticker) {
+  return '<div class="vp-inline-section" id="vp-section-' + ticker + '">' +
+    '<div class="detail-title" style="margin-bottom:6px">Volume Profile (6y)</div>' +
+    '<div id="vp-content-' + ticker + '" style="font-size:12px;color:#475569">Loading...</div>' +
+  '</div>';
+}
 
+async function loadVP(ticker) {
+  const el = document.getElementById('vp-content-' + ticker);
+  if (!el) return;
+  try {
+    const res = await fetch('/api/scan?vp=' + encodeURIComponent(ticker));
+    const vp = await res.json();
+    if (vp.error) { el.innerHTML = '<span class="c-red">' + vp.error + '</span>'; return; }
+    // Store for Copy for Claude
+    const d = scanResults.find(r => r.ticker === ticker);
+    if (d) d.vp = vp;
+    el.innerHTML = renderVPContent(vp, d ? d.price : 0);
+  } catch(e) {
+    el.innerHTML = '<span class="c-red">Error: ' + e.message + '</span>';
+  }
+}
+
+function renderVPContent(vp, curr) {
   function distStr(price) {
     const pct = ((price - curr) / curr * 100);
     return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
   }
-
   const hvnRows = (vp.hvn_nodes || []).map(n => {
     const role = n.role === 'support' ? 'c-green' : 'c-red';
     return '<tr><td class="' + role + '">$' + n.price.toFixed(2) + '</td><td class="c-muted">' + distStr(n.price) + '</td><td class="c-muted">' + n.vol_pct.toFixed(0) + '%</td><td class="' + role + '">' + n.role + '</td></tr>';
   }).join('');
-
   const lvnRows = (vp.lvn_nodes || []).map(n => {
     return '<tr><td class="c-amber">$' + n.price.toFixed(2) + '</td><td class="c-muted">' + distStr(n.price) + '</td><td class="c-muted">' + n.vol_pct.toFixed(0) + '%</td><td class="c-amber">low-vol</td></tr>';
   }).join('');
-
-  return '<div class="vp-inline-section">' +
-    '<div class="detail-title" style="margin-bottom:6px">Volume Profile (6y) — ' +
-      '<span style="color:#a78bfa">POC $' + vp.poc + '</span>' +
-      ' · <span style="color:#6b8cba">VAH $' + vp.vah + '</span>' +
-      ' · <span style="color:#6b8cba">VAL $' + vp.val + '</span>' +
-    '</div>' +
-    '<table class="opts-table">' +
-      '<thead><tr><th style="text-align:left">Price</th><th style="text-align:left">From Current</th><th style="text-align:left">Vol %</th><th style="text-align:left">Role</th></tr></thead>' +
-      '<tbody>' + hvnRows + lvnRows + '</tbody>' +
-    '</table>' +
+  const header = '<div style="font-size:11px;margin-bottom:6px">' +
+    '<span style="color:#a78bfa">POC $' + vp.poc + '</span> &middot; ' +
+    '<span style="color:#6b8cba">VAH $' + vp.vah + '</span> &middot; ' +
+    '<span style="color:#6b8cba">VAL $' + vp.val + '</span>' +
   '</div>';
+  const table = '<table class="opts-table">' +
+    '<thead><tr><th style="text-align:left">Price</th><th style="text-align:left">From Current</th><th style="text-align:left">Vol %</th><th style="text-align:left">Role</th></tr></thead>' +
+    '<tbody>' + hvnRows + lvnRows + '</tbody>' +
+  '</table>';
+  return header + table;
 }
+
 
 
 function renderOptionsSection(d) {

@@ -119,6 +119,11 @@ SECTOR_METRICS = {
 # ── Multi-timeframe MA fetch ──────────────────────────────────────────────────
 
 def fetch_mtf_inline(ticker, price):
+    """
+    Fetch 50 MA and 200 MA for 4h, 1d, 1wk, 1mo — just the last value.
+    Returns dollar values and dollar distance from current price.
+    Fast: no chart bars, just the last row of each timeframe.
+    """
     configs = [
         ("4h",  "4h",  "730d"),
         ("1d",  "1d",  "max"),
@@ -153,7 +158,14 @@ def fetch_mtf_inline(ticker, price):
 
 
 def fetch_volume_profile(ticker, tf="1d"):
+    """
+    Compute a volume profile from full available daily history (IPO to present).
+    Returns OHLCV bars for the requested TF + POC/VAH/VAL + top HVN nodes for S/R.
+    tf: timeframe for chart bars ("1d", "1wk", "1mo") - MAs handled by fetch_mtf_mas.
+    """
     try:
+        # Volume profile uses 6-year lookback (2020 to present)
+        # Full history inflates nodes at old low-price levels, making them useless for S/R
         df = yf.download(ticker, period="6y", interval="1d",
                          auto_adjust=True, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -166,6 +178,7 @@ def fetch_volume_profile(ticker, tf="1d"):
         low = df["Low"]
         volume = df["Volume"]
 
+        # Build volume profile histogram (100 bins)
         price_min = float(low.min())
         price_max = float(high.max())
         n_bins = 100
@@ -184,9 +197,11 @@ def fetch_volume_profile(ticker, tf="1d"):
             if n > 0:
                 vol_profile[in_range] += vol / n
 
+        # POC = highest volume bin
         poc_idx = int(np.argmax(vol_profile))
         poc = round(float(bin_mids[poc_idx]), 2)
 
+        # Value area (68% of total volume)
         total_vol = vol_profile.sum()
         target = total_vol * 0.68
         lo_idx = hi_idx = poc_idx
@@ -207,6 +222,10 @@ def fetch_volume_profile(ticker, tf="1d"):
         vah = round(float(bin_mids[hi_idx]), 2)
         val = round(float(bin_mids[lo_idx]), 2)
 
+        # Chart removed — no OHLCV bars needed
+        chart_bars = []
+
+        # Volume profile bins (normalized 0-1 for display)
         max_vol = float(vol_profile.max())
         vp_bins = [
             {"price": round(float(bin_mids[i]), 2),
@@ -214,24 +233,28 @@ def fetch_volume_profile(ticker, tf="1d"):
             for i in range(n_bins)
         ]
 
+        # Extract top High Volume Nodes for S/R levels (for Claude output)
+        # HVNs = bins where vol > 60th percentile of all bins
         hvn_threshold = float(np.percentile(vol_profile[vol_profile > 0], 70))
         hvn_nodes = sorted(
             [{"price": round(float(bin_mids[i]), 2),
               "vol_pct": round(float(vol_profile[i] / max_vol * 100), 1)}
              for i in range(n_bins) if vol_profile[i] >= hvn_threshold],
             key=lambda x: -x["vol_pct"]
-        )[:10]
+        )[:10]  # top 10 HVNs
 
+        # LVNs = bins where vol < 20th percentile (areas price moves through fast)
         lvn_threshold = float(np.percentile(vol_profile[vol_profile > 0], 20))
         lvn_nodes = sorted(
             [{"price": round(float(bin_mids[i]), 2),
               "vol_pct": round(float(vol_profile[i] / max_vol * 100), 1)}
              for i in range(n_bins) if 0 < vol_profile[i] <= lvn_threshold],
             key=lambda x: x["vol_pct"]
-        )[:5]
+        )[:5]  # top 5 LVNs (lowest volume)
 
         current = round(float(close.iloc[-1]), 2)
 
+        # Label nodes as support or resistance relative to current price
         for node in hvn_nodes:
             node["role"] = "support" if node["price"] < current else "resistance"
         for node in lvn_nodes:
@@ -266,6 +289,7 @@ def fetch_options(ticker):
 
     today = datetime.date.today()
 
+    # Collect all expirations in the 27-45 DTE window
     valid_exps = []
     for exp_str in expirations:
         try:
@@ -305,6 +329,7 @@ def fetch_options(ticker):
                 return None
             delta_abs = abs(delta)
 
+            # Mark as "optimal" if closest to 0.20 delta
             theta = bs_theta(spot, strike, dte_days, iv, is_put=is_put)
             ann_yield = (bid / strike) * (365 / dte_days) * 100 if strike > 0 and dte_days > 0 else 0
             be = (strike - bid) if is_put else (strike + bid)
@@ -314,7 +339,7 @@ def fetch_options(ticker):
                 "strike": strike,
                 "bid": round(bid, 2),
                 "ask": round(ask, 2),
-                "delta": round(abs(delta), 3),
+                "delta": round(delta_abs, 3),
                 "theta": round(theta, 4) if theta is not None else None,
                 "impliedVolatility": round(iv, 4),
                 "openInterest": oi,
@@ -352,6 +377,7 @@ def fetch_options(ticker):
                     c["dte"] = dte
                     exp_calls.append(c)
 
+            # Mark optimal contract (closest to 20 delta) for each expiration
             if exp_puts:
                 best = min(exp_puts, key=lambda x: abs(x["delta"] - 0.20))
                 best["optimal"] = True
@@ -366,78 +392,23 @@ def fetch_options(ticker):
         except Exception:
             continue
 
-    # ── NEW: Implied move (ATM straddle, nearest expiration) ─────────────────
-    implied_move = None
-    try:
-        if valid_exps and spot > 0:
-            first_exp_str, first_dte = valid_exps[0]
-            first_label = datetime.date.fromisoformat(first_exp_str).strftime("%b %-d, %Y")
-            near_puts_im  = [c for c in all_puts  if c.get("expiration") == first_label]
-            near_calls_im = [c for c in all_calls if c.get("expiration") == first_label]
-            if near_puts_im and near_calls_im:
-                atm_put  = min(near_puts_im,  key=lambda c: abs(c["strike"] - spot))
-                atm_call = min(near_calls_im, key=lambda c: abs(c["strike"] - spot))
-                straddle_cost = atm_put["bid"] + atm_call["bid"]
-                move_pct = (straddle_cost / spot) * 100
-                implied_move = {
-                    "straddle_cost": round(straddle_cost, 2),
-                    "move_pct":      round(move_pct, 1),
-                    "move_dollar":   round(straddle_cost, 2),
-                    "upper":         round(spot + straddle_cost, 2),
-                    "lower":         round(spot - straddle_cost, 2),
-                    "dte":           first_dte,
-                    "expiration":    first_label,
-                    "atm_strike":    atm_put["strike"],
-                }
-    except Exception:
-        implied_move = None
-
-    # ── NEW: IV Skew (~20-delta put IV vs call IV, nearest expiration) ────────
-    skew = None
-    try:
-        if valid_exps:
-            first_label = datetime.date.fromisoformat(valid_exps[0][0]).strftime("%b %-d, %Y")
-            near_puts_sk  = [c for c in all_puts  if c.get("expiration") == first_label]
-            near_calls_sk = [c for c in all_calls if c.get("expiration") == first_label]
-            opt_put  = next((c for c in near_puts_sk  if c.get("optimal")), None)
-            opt_call = next((c for c in near_calls_sk if c.get("optimal")), None)
-            if not opt_put  and near_puts_sk:
-                opt_put  = min(near_puts_sk,  key=lambda c: abs(c["delta"] - 0.20))
-            if not opt_call and near_calls_sk:
-                opt_call = min(near_calls_sk, key=lambda c: abs(c["delta"] - 0.20))
-            if opt_put and opt_call:
-                put_iv  = round(opt_put["impliedVolatility"]  * 100, 1)
-                call_iv = round(opt_call["impliedVolatility"] * 100, 1)
-                ratio   = round(put_iv / call_iv, 2) if call_iv > 0 else None
-                if ratio is not None:
-                    interp = "put-skewed" if ratio > 1.10 else "call-skewed" if ratio < 0.91 else "flat"
-                    skew = {
-                        "put_iv":      put_iv,
-                        "call_iv":     call_iv,
-                        "ratio":       ratio,
-                        "interp":      interp,
-                        "put_strike":  opt_put["strike"],
-                        "call_strike": opt_call["strike"],
-                        "put_delta":   opt_put["delta"],
-                        "call_delta":  opt_call["delta"],
-                    }
-    except Exception:
-        skew = None
-
     return {
-        "spot":         spot,
-        "expirations":  expirations_meta,
-        "puts":         all_puts,
-        "calls":        all_calls,
-        "implied_move": implied_move,
-        "skew":         skew,
+        "spot": spot,
+        "expirations": expirations_meta,
+        "puts": all_puts,
+        "calls": all_calls,
     }
 
 
 # ── Main ticker scan ──────────────────────────────────────────────────────────
 
 def compute_avwap(df, anchor_date):
+    """
+    Anchored VWAP from a specific date with ±1σ and ±2σ bands.
+    Uses typical price = (H+L+C)/3, volume-weighted.
+    """
     try:
+        # Normalize anchor_date to same timezone as df index
         idx = df.index
         if hasattr(idx, 'tz') and idx.tz is not None:
             if hasattr(anchor_date, 'tz_localize'):
@@ -455,6 +426,7 @@ def compute_avwap(df, anchor_date):
     cum_vtp = vtp.cumsum()
     cum_vol = subset['Volume'].cumsum()
     avwap = cum_vtp / cum_vol.replace(0, np.nan)
+    # Weighted standard deviation
     variance = ((tp - avwap) ** 2 * subset['Volume']).cumsum() / cum_vol.replace(0, np.nan)
     std = variance.apply(lambda x: x**0.5 if x >= 0 else 0)
     val = float(avwap.iloc[-1])
@@ -470,8 +442,15 @@ def compute_avwap(df, anchor_date):
 
 
 def find_confluence_levels(price, avwap_dict, mtf, high_52w, low_52w):
+    """
+    Find confluence zones where multiple independent levels cluster within 2%.
+    Sources: AVWAPs (±1σ, ±2σ), MTF MAs, 52w high/low, round numbers.
+    Returns list of confluence zones sorted by distance from current price.
+    """
+    # Collect all candidate levels with their source labels
     candidates = []
 
+    # AVWAP levels
     for anchor_name, av in avwap_dict.items():
         if av is None:
             continue
@@ -482,11 +461,12 @@ def find_confluence_levels(price, avwap_dict, mtf, high_52w, low_52w):
         }
         base = label_map.get(anchor_name, anchor_name + ' AVWAP')
         candidates.append((av['avwap'],  base))
-        candidates.append((av['s1_up'],  base + ' +1\u03c3'))
-        candidates.append((av['s1_dn'],  base + ' -1\u03c3'))
-        candidates.append((av['s2_up'],  base + ' +2\u03c3'))
-        candidates.append((av['s2_dn'],  base + ' -2\u03c3'))
+        candidates.append((av['s1_up'],  base + ' +1σ'))
+        candidates.append((av['s1_dn'],  base + ' -1σ'))
+        candidates.append((av['s2_up'],  base + ' +2σ'))
+        candidates.append((av['s2_dn'],  base + ' -2σ'))
 
+    # MTF MA levels
     tf_labels = {'4h': '4h', '1d': '1D', '1wk': '1W', '1mo': '1M'}
     for tf_key, tf_label in tf_labels.items():
         tf = mtf.get(tf_key, {})
@@ -495,11 +475,13 @@ def find_confluence_levels(price, avwap_dict, mtf, high_52w, low_52w):
         if tf.get('ma200'):
             candidates.append((tf['ma200'], f'{tf_label} 200 MA'))
 
+    # 52w high and low
     if high_52w:
         candidates.append((high_52w, '52w High'))
     if low_52w:
         candidates.append((low_52w, '52w Low'))
 
+    # Round numbers: $25 increments above $100, $10 below
     increment = 25 if price > 100 else 10
     lo = int(price * 0.5 / increment) * increment
     hi = int(price * 1.6 / increment) * increment + increment
@@ -507,12 +489,13 @@ def find_confluence_levels(price, avwap_dict, mtf, high_52w, low_52w):
         if rn > 0:
             candidates.append((float(rn), f'${rn} round'))
 
+    # Cluster candidates within 2% of each other
     candidates = [(p, l) for p, l in candidates if p and p > 0]
     candidates.sort(key=lambda x: x[0])
 
     clusters = []
     used = [False] * len(candidates)
-    threshold = 0.02
+    threshold = 0.02  # 2%
 
     for i, (p, l) in enumerate(candidates):
         if used[i]:
@@ -528,11 +511,11 @@ def find_confluence_levels(price, avwap_dict, mtf, high_52w, low_52w):
                 used[j] = True
         used[i] = True
 
-        if len(cluster_labels) >= 2:
+        if len(cluster_labels) >= 2:  # Only report confluences (2+ sources)
             mid = sum(cluster_prices) / len(cluster_prices)
             dist_pct = (mid - price) / price * 100
             role = 'resistance' if mid > price else 'support'
-            strength = len(cluster_labels)
+            strength = len(cluster_labels)  # More sources = stronger
             clusters.append({
                 'price': round(mid, 2),
                 'price_lo': round(min(cluster_prices), 2),
@@ -543,8 +526,9 @@ def find_confluence_levels(price, avwap_dict, mtf, high_52w, low_52w):
                 'role': role,
             })
 
+    # Sort by strength (desc) then distance from price (asc)
     clusters.sort(key=lambda x: (-x['strength'], abs(x['dist_pct'])))
-    return clusters[:8]
+    return clusters[:8]  # Top 8 confluences
 
 
 def scan_ticker(ticker):
@@ -596,18 +580,6 @@ def scan_ticker(ticker):
     except Exception:
         info = {}
         inc_q = bal_q = cf_q = pd.DataFrame()
-
-    # ── NEW: Earnings date ────────────────────────────────────────────────────
-    earnings_date = None
-    try:
-        cal = yf.Ticker(ticker).calendar
-        if cal is not None and hasattr(cal, 'columns') and len(cal.columns) > 0:
-            ed = cal[cal.columns[0]].get("Earnings Date")
-            if ed is not None:
-                first = list(ed)[0] if hasattr(ed, '__iter__') and not isinstance(ed, str) else ed
-                earnings_date = str(first.date()) if hasattr(first, 'date') else str(first)[:10]
-    except Exception:
-        earnings_date = None
 
     sector = info.get("sector", "Unknown")
     industry = info.get("industry", "Unknown")
@@ -667,18 +639,22 @@ def scan_ticker(ticker):
             return None
         return round(float(v), decimals)
 
+    # Fetch MTF MAs inline (4 lightweight calls, no chart bars)
     price_now = safe(last["Close"], 2) or 0
     try:
         mtf = fetch_mtf_inline(ticker, price_now)
     except Exception:
         mtf = {}
 
+    # Compute Anchored VWAPs from key dates
     avwap_dict = {}
     try:
+        # Build a clean single-level close series from raw
         _raw = raw.copy()
         if isinstance(_raw.columns, pd.MultiIndex):
             _raw.columns = _raw.columns.get_level_values(0)
         _close = _raw["Close"].squeeze()
+        # Strip timezone so comparisons work consistently
         if hasattr(_close.index, 'tz') and _close.index.tz is not None:
             _close.index = _close.index.tz_localize(None)
         if hasattr(_raw.index, 'tz') and _raw.index.tz is not None:
@@ -695,6 +671,7 @@ def scan_ticker(ticker):
     except Exception:
         avwap_dict = {}
 
+    # Find confluence levels
     confluences = []
     try:
         confluences = find_confluence_levels(
@@ -751,9 +728,10 @@ def scan_ticker(ticker):
         "obv_roc": round(obv_roc, 1),
         "avwap": avwap_dict,
         "confluences": confluences,
-        "earnings_date": earnings_date,
     }
 
+
+# ── HTML frontend ─────────────────────────────────────────────────────────────
 
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -790,7 +768,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .card-blowoff { border-left: 3px solid #f59e0b; }
   .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
   .ticker-name { font-size: 20px; font-weight: 500; letter-spacing: -0.3px; }
-  .ticker-meta { font-size: 12px; color: #64748b; display: block; margin-top: 3px; }
+  .ticker-meta { font-size: 12px; color: #64748b; margin-left: 10px; }
   .price-block { text-align: right; }
   .price { font-size: 20px; font-weight: 500; }
   .drawdown { font-size: 11px; color: #64748b; }
@@ -812,17 +790,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
   .detail-key { color: #64748b; white-space: nowrap; }
   .section-divider { border: none; border-top: 0.5px solid #1e2a35; margin: 14px 0; }
+  /* Volume profile inline */
   .vp-inline-section { margin: 10px 0 14px; }
+  /* AVWAP + Confluence */
   .avwap-section { margin: 10px 0 14px; }
   .confluence-section { margin: 10px 0 14px; }
   .strength-dots { display: flex; gap: 2px; align-items: center; }
   .strength-dot { width: 5px; height: 5px; border-radius: 50%; background: #22c55e; }
   .strength-dot.dim { background: #1e2a35; }
+  /* MTF inline */
   .mtf-inline-section { margin: 10px 0 14px; }
   .mtf-inline-grid { display: flex; flex-direction: column; gap: 4px; }
   .mtf-inline-row { display: flex; align-items: center; gap: 16px; background: #0f1419; border-radius: 6px; padding: 5px 10px; }
   .mtf-inline-tf { font-size: 11px; font-weight: 500; color: #64748b; min-width: 28px; }
   .mtf-inline-pair { display: flex; align-items: center; gap: 5px; flex: 1; }
+  /* MTF MA table (legacy, kept for loadMTF) */
   .mtf-section { margin-bottom: 12px; }
   .mtf-title { font-size: 11px; color: #475569; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
   .mtf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -832,29 +814,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .mtf-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; margin-left: 4px; }
   .badge-above { background: #0f2518; color: #22c55e; }
   .badge-below { background: #1c1215; color: #ef4444; }
-  /* ── NEW: Earnings badge ───────────────────────────────────────────────── */
-  .earnings-badge { display: inline-flex; align-items: center; gap: 5px; background: #1c1508; border: 0.5px solid #78350f; border-radius: 5px; padding: 3px 9px; font-size: 11px; color: #f59e0b; margin-left: 8px; vertical-align: middle; }
-  .earnings-badge.soon { background: #1c0a0a; border-color: #7f1d1d; color: #ef4444; }
-  .earnings-badge.far  { background: #0d1f0f; border-color: #14532d; color: #22c55e; }
-  /* ── NEW: Implied move bar ─────────────────────────────────────────────── */
-  .im-section { margin: 10px 0 14px; }
-  .im-bar-wrap { position: relative; height: 28px; background: #0f1419; border-radius: 6px; overflow: visible; margin: 8px 0 4px; }
-  .im-bar-fill { position: absolute; top: 0; bottom: 0; background: rgba(99,102,241,0.15); border-left: 2px solid #6366f1; border-right: 2px solid #6366f1; border-radius: 2px; }
-  .im-bar-spot { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #e2e8f0; border-radius: 1px; }
-  .im-bar-label { position: absolute; top: 50%; transform: translateY(-50%); font-size: 10px; color: #64748b; white-space: nowrap; }
-  .im-conf-dots { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .im-conf-dot { font-size: 10px; padding: 2px 6px; border-radius: 3px; cursor: default; }
-  .im-conf-dot.inside  { background: #0f2518; color: #22c55e; border: 0.5px solid #166534; }
-  .im-conf-dot.outside { background: #1e2a35; color: #475569; border: 0.5px solid #2a3a4e; }
-  /* ── NEW: Skew gauge ───────────────────────────────────────────────────── */
-  .skew-section { margin: 10px 0 14px; }
-  .skew-bar-wrap { position: relative; height: 20px; background: #0f1419; border-radius: 5px; overflow: hidden; margin: 6px 0 3px; }
-  .skew-bar-center { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: #334155; }
-  .skew-bar-fill { position: absolute; top: 3px; bottom: 3px; border-radius: 3px; transition: width 0.4s; }
-  .skew-bar-fill.put-skewed  { background: linear-gradient(to left,  #ef4444, #991b1b); right: 50%; }
-  .skew-bar-fill.call-skewed { background: linear-gradient(to right, #22c55e, #166534); left:  50%; }
-  .skew-bar-fill.flat        { background: #6366f1; left: 44%; right: 44%; }
-  .skew-labels { display: flex; justify-content: space-between; font-size: 10px; color: #475569; margin-top: 2px; }
   /* Options */
   .options-section { }
   .options-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
@@ -863,11 +822,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .options-load-btn:hover { background: #2a3a4e; color: #e2e8f0; }
   .options-warn { background: #1c1215; border: 0.5px solid #3b1520; border-radius: 6px; padding: 10px 14px; font-size: 12px; color: #f87171; }
   .options-warn-amber { background: #1c1508; border: 0.5px solid #3b2c10; border-radius: 6px; padding: 10px 14px; font-size: 12px; color: #f59e0b; }
+  /* Tabs */
   .opts-tabs { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 0.5px solid #1e2a35; }
   .opts-tab { padding: 7px 16px; font-size: 12px; color: #64748b; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -0.5px; }
   .opts-tab.active { color: #22c55e; border-bottom-color: #22c55e; }
   .opts-tab-panel { display: none; }
   .opts-tab-panel.active { display: block; }
+  /* Options table */
   .opts-table-wrap { overflow-x: auto; }
   .opts-table { width: 100%; border-collapse: collapse; font-size: 11px; }
   .opts-table th { color: #475569; font-weight: 400; text-align: right; padding: 4px 6px; border-bottom: 0.5px solid #1e2a35; white-space: nowrap; }
@@ -879,11 +840,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .opts-table tr:last-child td { border-bottom: none; }
   .exp-group-header { background: #0f1419; }
   .exp-group-header td { color: #475569 !important; font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; padding: 6px 6px 4px !important; }
+  /* Colors */
   .c-green { color: #22c55e; }
   .c-red { color: #ef4444; }
   .c-amber { color: #f59e0b; }
   .c-muted { color: #94a3b8; }
   .c-dim { color: #475569; }
+  /* Copy row */
   .copy-row { display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 0.5px solid #1e2a35; }
   .copy-btn { background: #1e2a35; color: #94a3b8; border: 0.5px solid #2a3a4e; padding: 6px 12px; border-radius: 6px; font-size: 11px; cursor: pointer; font-family: inherit; }
   .copy-btn:hover { background: #2a3a4e; color: #e2e8f0; }
@@ -951,6 +914,7 @@ async function runScan() {
     if (data.error) { resultsDiv.innerHTML = '<div class="error-msg">' + data.error + '</div>'; return; }
     scanResults = data.results.filter(d => !d.error);
     resultsDiv.innerHTML = data.results.map(renderCard).join('');
+    // Auto-load VP for each ticker after cards render
     scanResults.forEach(d => setTimeout(() => loadVP(d.ticker), 100));
     if (scanResults.length > 1) {
       copyAllContainer.innerHTML = '<div class="copy-all-row"><button class="copy-btn" onclick="copyAll(this)">Copy all for Claude</button></div>';
@@ -1002,7 +966,6 @@ function renderCard(d) {
   return '<div class="card '+borderClass+'" id="card-'+d.ticker+'">' +
     '<div class="card-top"><div>' +
       '<span class="ticker-name">'+d.ticker+'</span>' +
-      renderEarningsBadge(d) +
       '<span class="ticker-meta">'+d.sector+' &middot; '+d.industry+'</span>' +
     '</div><div class="price-block">' +
       '<div class="price">$'+d.price.toFixed(2)+'</div>' +
@@ -1047,8 +1010,6 @@ function renderCard(d) {
     renderMTFInline(d) +
     renderAVWAP(d) +
     renderConfluences(d) +
-    '<div id="im-section-'+d.ticker+'"></div>' +
-    '<div id="skew-section-'+d.ticker+'"></div>' +
     renderVPSection(d.ticker) +
 
     '<hr class="section-divider">' +
@@ -1057,81 +1018,6 @@ function renderCard(d) {
     '<div class="copy-row">' +
       '<button class="copy-btn" data-label="Copy for Claude" onclick="copyOne(\''+d.ticker+'\', this)">Copy for Claude</button>' +
     '</div>' +
-  '</div>';
-}
-
-// ── NEW: Earnings badge ──────────────────────────────────────────────────────
-
-function renderEarningsBadge(d) {
-  if (!d.earnings_date) return '';
-  const ed = new Date(d.earnings_date + 'T00:00:00');
-  const days = Math.round((ed - new Date()) / 86400000);
-  if (days < 0 || days > 120) return '';
-  const cls = days <= 14 ? 'soon' : days <= 45 ? '' : 'far';
-  const label = days === 0 ? 'Earnings today' : days === 1 ? 'Earnings tomorrow' : 'Earnings in ' + days + 'd';
-  return '<span class="earnings-badge ' + cls + '">&#128197; ' + label + ' (' + d.earnings_date + ')</span>';
-}
-
-// ── NEW: Implied move visual ─────────────────────────────────────────────────
-
-function renderImpliedMove(im, price, confluences) {
-  if (!im) return '';
-  const lo = im.lower, hi = im.upper;
-  const windowLo = price * 0.72, windowHi = price * 1.28;
-  const windowRange = windowHi - windowLo;
-  const fillLeft  = Math.max(0,  Math.min(97, (lo - windowLo) / windowRange * 100));
-  const fillRight = Math.max(3,  Math.min(100, (hi - windowLo) / windowRange * 100));
-  const spotPct   = Math.max(1,  Math.min(99, (price - windowLo) / windowRange * 100));
-
-  const confDots = (confluences || []).slice(0, 10).map(function(c) {
-    const inside = c.price >= lo && c.price <= hi;
-    const label = '$' + c.price.toFixed(0) + ' ' + (c.role === 'support' ? 'sup' : 'res');
-    return '<span class="im-conf-dot ' + (inside ? 'inside' : 'outside') + '" title="' + c.sources.join(', ') + '">' + label + '</span>';
-  }).join('');
-
-  return '<div class="im-section">' +
-    '<div class="detail-title" style="margin-bottom:4px">Implied Move — ' + im.expiration + ' (' + im.dte + 'd)</div>' +
-    '<div style="font-size:12px;color:#94a3b8;margin-bottom:4px">' +
-      'Straddle <span style="color:#e2e8f0">$' + im.straddle_cost.toFixed(2) + '</span>' +
-      ' &nbsp;&middot;&nbsp; &#177;' + im.move_pct + '% &nbsp;&middot;&nbsp; ' +
-      'Range <span style="color:#a78bfa">$' + lo.toFixed(2) + ' &#8211; $' + hi.toFixed(2) + '</span>' +
-    '</div>' +
-    '<div class="im-bar-wrap">' +
-      '<div class="im-bar-fill" style="left:' + fillLeft.toFixed(1) + '%;right:' + (100 - fillRight).toFixed(1) + '%"></div>' +
-      '<div class="im-bar-spot" style="left:' + spotPct.toFixed(1) + '%"></div>' +
-      '<div class="im-bar-label" style="left:' + Math.max(0, fillLeft - 1).toFixed(1) + '%;transform:translateY(-50%) translateX(-100%);position:absolute;top:50%">$' + lo.toFixed(0) + '</div>' +
-      '<div class="im-bar-label" style="left:' + Math.min(98, fillRight + 1).toFixed(1) + '%;position:absolute;top:50%">$' + hi.toFixed(0) + '</div>' +
-    '</div>' +
-    (confDots ? '<div style="font-size:10px;color:#475569;margin:5px 0 3px">Confluences <span style="color:#22c55e">inside</span> vs <span style="color:#475569">outside</span> move:</div><div class="im-conf-dots">' + confDots + '</div>' : '') +
-  '</div>';
-}
-
-// ── NEW: Skew gauge ──────────────────────────────────────────────────────────
-
-function renderSkew(skew) {
-  if (!skew) return '';
-  const ratio = skew.ratio;
-  const clampedRatio = Math.max(0.7, Math.min(1.3, ratio));
-  const fillPct = Math.round(Math.abs(clampedRatio - 1.0) / 0.3 * 48);
-  const cls = skew.interp;
-  const interpColor = cls === 'put-skewed' ? 'c-red' : cls === 'call-skewed' ? 'c-green' : 'c-muted';
-  const interpLabel = cls === 'put-skewed'  ? 'Put-skewed \u2014 downside fear elevated; market pricing more downside risk' :
-                      cls === 'call-skewed' ? 'Call-skewed \u2014 upside demand elevated; market pricing more upside risk' :
-                      'Flat skew \u2014 put and call IV roughly symmetric';
-
-  return '<div class="skew-section">' +
-    '<div class="detail-title" style="margin-bottom:4px">IV Skew \u2014 ~20\u0394 Put vs Call</div>' +
-    '<div style="display:flex;gap:20px;font-size:12px;margin-bottom:4px;flex-wrap:wrap;align-items:center">' +
-      '<span><span class="detail-key">Put ' + skew.put_delta.toFixed(2) + '\u0394 $' + skew.put_strike.toFixed(0) + '</span>&nbsp;<span class="c-red">' + skew.put_iv + '% IV</span></span>' +
-      '<span><span class="detail-key">Call ' + skew.call_delta.toFixed(2) + '\u0394 $' + skew.call_strike.toFixed(0) + '</span>&nbsp;<span class="c-green">' + skew.call_iv + '% IV</span></span>' +
-      '<span class="detail-key">Ratio&nbsp;</span><span class="' + interpColor + '" style="font-weight:500">' + ratio.toFixed(2) + '</span>' +
-    '</div>' +
-    '<div class="skew-bar-wrap">' +
-      '<div class="skew-bar-center"></div>' +
-      '<div class="skew-bar-fill ' + cls + '" style="width:' + fillPct + '%"></div>' +
-    '</div>' +
-    '<div class="skew-labels"><span class="c-red">\u2190 Put-skewed</span><span>Flat</span><span class="c-green">Call-skewed \u2192</span></div>' +
-    '<div style="font-size:11px;margin-top:5px" class="' + interpColor + '">' + interpLabel + '</div>' +
   '</div>';
 }
 
@@ -1162,11 +1048,10 @@ function renderMTFInline(d) {
   });
 
   return '<div class="mtf-inline-section">' +
-    '<div class="detail-title" style="margin-bottom:6px">Moving Averages \u2014 Multi-Timeframe</div>' +
+    '<div class="detail-title" style="margin-bottom:6px">Moving Averages — Multi-Timeframe</div>' +
     '<div class="mtf-inline-grid">' + rows + '</div>' +
   '</div>';
 }
-
 function renderHVNTable(vp) {
   if (!vp || !vp.hvn_nodes || !vp.hvn_nodes.length) return '';
   const current = vp.current_price || 0;
@@ -1179,7 +1064,7 @@ function renderHVNTable(vp) {
     const dist = current ? ((n.price - current) / current * 100) : 0;
     return '<tr><td class="c-amber">$'+n.price.toFixed(2)+'</td><td class="c-muted">'+(dist>=0?'+':'')+dist.toFixed(1)+'%</td><td class="c-muted">'+n.vol_pct.toFixed(0)+'%</td><td class="c-amber">low-vol</td></tr>';
   }).join('');
-  return '<div style="margin-top:10px"><div class="detail-title" style="margin-bottom:6px">Volume Nodes \u2014 HVN = S/R, LVN = price moves through fast</div>' +
+  return '<div style="margin-top:10px"><div class="detail-title" style="margin-bottom:6px">Volume Nodes — HVN = S/R, LVN = price moves through fast</div>' +
     '<table class="opts-table"><thead><tr><th style="text-align:left">Price</th><th style="text-align:left">From Current</th><th style="text-align:left">Vol %</th><th style="text-align:left">Role</th></tr></thead>' +
     '<tbody>'+rows+lvnRows+'</tbody></table></div>';
 }
@@ -1216,16 +1101,16 @@ function renderAVWAP(d) {
     const a = av[key];
     if (!a) return;
     rows += bandRow(a.avwap,  label,        true);
-    rows += bandRow(a.s1_up,  label + ' +1\u03c3', false);
-    rows += bandRow(a.s1_dn,  label + ' -1\u03c3', false);
-    rows += bandRow(a.s2_up,  label + ' +2\u03c3', false);
-    rows += bandRow(a.s2_dn,  label + ' -2\u03c3', false);
+    rows += bandRow(a.s1_up,  label + ' +1σ', false);
+    rows += bandRow(a.s1_dn,  label + ' -1σ', false);
+    rows += bandRow(a.s2_up,  label + ' +2σ', false);
+    rows += bandRow(a.s2_dn,  label + ' -2σ', false);
   });
 
   if (!rows) return '';
 
   return '<div class="avwap-section">' +
-    '<div class="detail-title" style="margin-bottom:6px">Anchored VWAP \u2014 Institutional Cost Basis</div>' +
+    '<div class="detail-title" style="margin-bottom:6px">Anchored VWAP — Institutional Cost Basis</div>' +
     '<table class="opts-table">' +
       '<thead><tr>' +
         '<th style="text-align:left">Level</th>' +
@@ -1241,12 +1126,13 @@ function renderAVWAP(d) {
 function renderConfluences(d) {
   const conf = d.confluences || [];
   if (!conf.length) return '';
+  const price = d.price;
 
   const rows = conf.map(function(c) {
     const role = c.role === 'support' ? 'c-green' : 'c-red';
     const zoneStr = c.price_lo === c.price_hi
       ? '$' + c.price.toFixed(2)
-      : '$' + c.price_lo.toFixed(2) + '\u2013$' + c.price_hi.toFixed(2);
+      : '$' + c.price_lo.toFixed(2) + '–$' + c.price_hi.toFixed(2);
     const srcStr = c.sources.join(', ');
     const dots = Array(5).fill(0).map(function(_, i) {
       return '<span class="strength-dot' + (i < c.strength ? '' : ' dim') + '"></span>';
@@ -1261,7 +1147,7 @@ function renderConfluences(d) {
   }).join('');
 
   return '<div class="confluence-section">' +
-    '<div class="detail-title" style="margin-bottom:6px">Confluence Levels \u2014 Multi-Source S/R</div>' +
+    '<div class="detail-title" style="margin-bottom:6px">Confluence Levels — Multi-Source S/R</div>' +
     '<table class="opts-table">' +
       '<thead><tr>' +
         '<th style="text-align:left">Zone</th>' +
@@ -1274,6 +1160,7 @@ function renderConfluences(d) {
     '</table>' +
   '</div>';
 }
+
 
 function renderVPSection(ticker) {
   return '<div class="vp-inline-section" id="vp-section-' + ticker + '">' +
@@ -1289,6 +1176,7 @@ async function loadVP(ticker) {
     const res = await fetch('/api/scan?vp=' + encodeURIComponent(ticker));
     const vp = await res.json();
     if (vp.error) { el.innerHTML = '<span class="c-red">' + vp.error + '</span>'; return; }
+    // Store for Copy for Claude
     const d = scanResults.find(r => r.ticker === ticker);
     if (d) d.vp = vp;
     el.innerHTML = renderVPContent(vp, d ? d.price : 0);
@@ -1321,25 +1209,28 @@ function renderVPContent(vp, curr) {
   return header + table;
 }
 
+
+
 function renderOptionsSection(d) {
   const crash = d.crash_score;
   const tk = d.ticker;
   if (crash >= 75) {
     return '<div class="options-section"><div class="options-header"><div class="options-title">Options</div></div>' +
-      '<div class="options-warn">CrashScore ' + crash.toFixed(0) + ' \u2014 put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
+      '<div class="options-warn">CrashScore ' + crash.toFixed(0) + ' — put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
   }
   const warn = crash >= 60
-    ? '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore ' + crash.toFixed(0) + ' \u2014 puts caution (60-74). Call selling against existing positions acceptable.</div>'
+    ? '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore ' + crash.toFixed(0) + ' — puts caution (60-74). Call selling against existing positions acceptable.</div>'
     : '';
   return '<div class="options-section">' +
     '<div class="options-header">' +
-      '<div class="options-title">Options \u2014 27-45 DTE, all expirations, ~20\u0394 optimal marked</div>' +
+      '<div class="options-title">Options — 27-45 DTE, all expirations, ~20Δ optimal marked</div>' +
       '<button class="options-load-btn" data-ticker="' + tk + '" data-crash="' + crash + '" onclick="loadOptionsBtn(this)">Load chain</button>' +
     '</div>' +
     warn +
     '<div id="opts-' + tk + '"></div>' +
   '</div>';
 }
+
 
 function loadOptionsBtn(btnEl) {
   const ticker = btnEl.getAttribute('data-ticker');
@@ -1356,18 +1247,7 @@ async function loadOptions(ticker, crashScore, btnEl) {
     const data = await res.json();
     if (data.error) { el.innerHTML = '<div class="options-warn">'+data.error+'</div>'; btnEl.disabled=false; btnEl.textContent='Retry'; return; }
     optionsCache[ticker] = data;
-    data.crashScore = crashScore;
     el.innerHTML = buildOptionsTabs(data, crashScore, ticker);
-    // ── NEW: populate implied move + skew now that options are loaded ────────
-    const _imEl   = document.getElementById('im-section-'   + ticker);
-    const _skewEl = document.getElementById('skew-section-' + ticker);
-    const _scanD  = scanResults.find(function(r) { return r.ticker === ticker; });
-    if (_imEl && data.implied_move) {
-      _imEl.innerHTML = renderImpliedMove(data.implied_move, data.spot, _scanD ? _scanD.confluences : []);
-    }
-    if (_skewEl && data.skew) {
-      _skewEl.innerHTML = renderSkew(data.skew);
-    }
     btnEl.style.display = 'none';
     activateTab(ticker, 'puts', 0);
   } catch(e) {
@@ -1375,6 +1255,7 @@ async function loadOptions(ticker, crashScore, btnEl) {
     btnEl.disabled=false; btnEl.textContent='Retry';
   }
 }
+
 
 function buildOptionsTabs(data, crashScore, ticker) {
   const exps = data.expirations || [];
@@ -1460,11 +1341,12 @@ function formatForClaude(d) {
   L.push('Market Cap: '+mcap+'   Drawdown from 52w high: '+d.drawdown.toFixed(1)+'%');
   L.push('52w High: $'+(d.high_52w||'N/A')+'   52w Low: $'+(d.low_52w||'N/A'));
   L.push('50 MA: $'+(d.ma50||'N/A')+'   200 MA: $'+(d.ma200||'N/A'));
-  L.push('Returns \u2014 Daily: '+pct(d.rally_1d,2)+'   Weekly: '+pct(d.rally_5d,2)+'   Monthly: '+pct(d.rally_21d,2));
+  L.push('Returns — Daily: '+pct(d.rally_1d,2)+'   Weekly: '+pct(d.rally_5d,2)+'   Monthly: '+pct(d.rally_21d,2));
   const roc = v => v==null?'N/A':(v>=0?'+':'')+v.toFixed(3)+'%';
-  L.push('50 MA slope  \u2014 1D: '+roc(d.ma50_roc_1d)+'   1W: '+roc(d.ma50_roc_5d)+'   1M: '+roc(d.ma50_roc_21d));
-  L.push('200 MA slope \u2014 1D: '+roc(d.ma200_roc_1d)+'   1W: '+roc(d.ma200_roc_5d)+'   1M: '+roc(d.ma200_roc_21d));
+  L.push('50 MA slope  — 1D: '+roc(d.ma50_roc_1d)+'   1W: '+roc(d.ma50_roc_5d)+'   1M: '+roc(d.ma50_roc_21d));
+  L.push('200 MA slope — 1D: '+roc(d.ma200_roc_1d)+'   1W: '+roc(d.ma200_roc_5d)+'   1M: '+roc(d.ma200_roc_21d));
 
+  // MTF MAs — embedded in scan result
   const mtf = d.mtf || {};
   if (Object.keys(mtf).length) {
     L.push('');
@@ -1481,6 +1363,7 @@ function formatForClaude(d) {
     });
   }
 
+  // Anchored VWAP
   const av = d.avwap || {};
   const avAnchors = [['52w_high','52wH AVWAP'],['ytd','YTD AVWAP'],['ytd_low','YTD Low AVWAP']];
   if (Object.keys(av).length) {
@@ -1498,17 +1381,18 @@ function formatForClaude(d) {
           '  (' + (above?'above':'below') + ', ' + (dist>=0?'+':'') + dist.toFixed(1) + '%)');
       }
       avLine(a.avwap,  label);
-      avLine(a.s1_up,  label + ' +1\u03c3');
-      avLine(a.s1_dn,  label + ' -1\u03c3');
-      avLine(a.s2_up,  label + ' +2\u03c3');
-      avLine(a.s2_dn,  label + ' -2\u03c3');
+      avLine(a.s1_up,  label + ' +1σ');
+      avLine(a.s1_dn,  label + ' -1σ');
+      avLine(a.s2_up,  label + ' +2σ');
+      avLine(a.s2_dn,  label + ' -2σ');
     });
   }
 
+  // Confluence levels
   const conf = d.confluences || [];
   if (conf.length) {
     L.push('');
-    L.push('CONFLUENCE LEVELS (multi-source S/R \u2014 use for entries/targets)');
+    L.push('CONFLUENCE LEVELS (multi-source S/R — use for entries/targets)');
     L.push('  Zone               Distance  Role        Strength  Sources');
     conf.forEach(function(c) {
       const zone = c.price_lo === c.price_hi
@@ -1521,6 +1405,7 @@ function formatForClaude(d) {
     });
   }
 
+  // Volume profile — now embedded in scan result
   const vp = d.vp;
   if (vp && vp.poc) {
     L.push('');
@@ -1529,7 +1414,7 @@ function formatForClaude(d) {
     const curr = vp.current_price || d.price;
     if (vp.hvn_nodes && vp.hvn_nodes.length) {
       L.push('');
-      L.push('  HIGH VOLUME NODES (S/R levels \u2014 price tends to slow or reverse here):');
+      L.push('  HIGH VOLUME NODES (S/R levels — price tends to slow or reverse here):');
       vp.hvn_nodes.forEach(n => {
         const dist = ((n.price - curr)/curr*100);
         L.push('    $'+n.price.toFixed(2)+'  '+n.role+'  '+n.vol_pct.toFixed(0)+'% of max vol  ('+(dist>=0?'+':'')+dist.toFixed(1)+'% from current)');
@@ -1579,48 +1464,11 @@ function formatForClaude(d) {
   L.push('  OBV 20d:    '+pct(d.obv_roc,1)+' ('+obvRead+')');
   L.push('  RSI:        '+d.rsi.toFixed(1));
 
-  // ── NEW: Earnings date ───────────────────────────────────────────────────
-  if (d.earnings_date) {
-    const _ed = new Date(d.earnings_date + 'T00:00:00');
-    const _days = Math.round((_ed - new Date()) / 86400000);
-    L.push('');
-    L.push('EARNINGS');
-    L.push('  Next earnings: ' + d.earnings_date + (_days >= 0 ? ' (' + _days + 'd away)' : ' (already reported)'));
-    const _optsE = optionsCache[d.ticker];
-    if (_optsE && _optsE.implied_move) {
-      const _within = _days >= 0 && _days <= (_optsE.implied_move.dte || 45);
-      L.push('  Within options window: ' + (_within ? 'YES \u2014 earnings inside expiration; avoid selling puts through earnings' : 'No \u2014 earnings outside nearest expiration'));
-    }
-  }
-
-  // ── NEW: Implied move + skew (populated after Load chain) ───────────────
-  const _optsIM = optionsCache[d.ticker];
-  if (_optsIM && _optsIM.implied_move) {
-    const _im = _optsIM.implied_move;
-    L.push('');
-    L.push('IMPLIED MOVE (' + _im.expiration + ', ' + _im.dte + 'd)');
-    L.push('  ATM straddle cost: $' + _im.straddle_cost.toFixed(2) + ' at $' + _im.atm_strike.toFixed(0) + ' strike');
-    L.push('  Expected move:     \u00b1' + _im.move_pct + '% (\u00b1$' + _im.move_dollar.toFixed(2) + ')');
-    L.push('  Price range:       $' + _im.lower.toFixed(2) + ' \u2013 $' + _im.upper.toFixed(2));
-    const _cIn  = (d.confluences || []).filter(function(c) { return c.price >= _im.lower && c.price <= _im.upper; });
-    const _cOut = (d.confluences || []).filter(function(c) { return c.price < _im.lower || c.price > _im.upper; });
-    if (_cIn.length)  L.push('  Confluences INSIDE move:   ' + _cIn.map(function(c)  { return '$' + c.price.toFixed(0) + ' (' + c.role + ', ' + c.strength + ' src)'; }).join(', '));
-    if (_cOut.length) L.push('  Confluences OUTSIDE move:  ' + _cOut.map(function(c) { return '$' + c.price.toFixed(0) + ' (' + c.role + ', ' + c.strength + ' src)'; }).join(', '));
-  }
-  if (_optsIM && _optsIM.skew) {
-    const _sk = _optsIM.skew;
-    L.push('');
-    L.push('IV SKEW (~20\u0394, nearest expiration)');
-    L.push('  Put  IV: ' + _sk.put_iv  + '% at $' + _sk.put_strike  + ' (' + _sk.put_delta.toFixed(2)  + '\u0394)');
-    L.push('  Call IV: ' + _sk.call_iv + '% at $' + _sk.call_strike + ' (' + _sk.call_delta.toFixed(2) + '\u0394)');
-    L.push('  Ratio:   ' + _sk.ratio + ' \u2192 ' + _sk.interp.toUpperCase());
-  }
-
-  // Options chain
+  // Options if loaded
   const opts = optionsCache[d.ticker];
   if (opts && opts.puts) {
     L.push('');
-    L.push('OPTIONS \u2014 All 27-45 DTE expirations | Spot $'+opts.spot.toFixed(2));
+    L.push('OPTIONS — All 27-45 DTE expirations | Spot $'+opts.spot.toFixed(2));
     L.push('SELL PUTS (* = ~20 delta optimal per expiration)');
     L.push('  Strike\tBid\tAsk\tDelta\tTheta/d\tIV\tOI\tB/E\tAnn Yld');
     let lastExp = null;
@@ -1669,6 +1517,7 @@ class handler(BaseHTTPRequestHandler):
         options_ticker = params.get("options", [""])[0].strip().upper()
         vp_ticker = params.get("vp", [""])[0].strip().upper()
 
+        # Serve HTML for root
         if not any([tickers_raw, options_ticker, vp_ticker]):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
@@ -1698,6 +1547,9 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(result).encode())
             return
 
+
+
+        # Main scan
         tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()][:5]
         results = []
         for ticker in tickers:
@@ -1706,4 +1558,4 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 results.append({"ticker": ticker, "error": str(e)})
 
-        self.wfile.write(json.dumps({"results": results}).encode())
+        self.wfile.write(json.dumps({"results": results}).encode())# ── Multi-timeframe MA fetch ──────────────────────────────────────────────────

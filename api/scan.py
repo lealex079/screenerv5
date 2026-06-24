@@ -392,11 +392,76 @@ def fetch_options(ticker):
         except Exception:
             continue
 
+    # ── Implied move: ATM straddle nearest expiration ──────────────────────
+    implied_move = None
+    try:
+        # Use the first (nearest) expiration's ATM straddle
+        if all_puts and all_calls and spot > 0:
+            first_exp = valid_exps[0][0]
+            first_exp_label = datetime.date.fromisoformat(first_exp).strftime("%b %-d, %Y")
+            first_dte = valid_exps[0][1]
+            # ATM put: closest strike to spot
+            fp = [c for c in all_puts if c['expiration'] == first_exp_label]
+            fc = [c for c in all_calls if c['expiration'] == first_exp_label]
+            if fp and fc:
+                atm_put  = min(fp, key=lambda x: abs(x['strike'] - spot))
+                atm_call = min(fc, key=lambda x: abs(x['strike'] - spot))
+                straddle_mid = ((atm_put['bid'] + atm_put['ask']) / 2 +
+                                (atm_call['bid'] + atm_call['ask']) / 2)
+                exp_move = straddle_mid * 0.85  # standard adjustment
+                exp_move_pct = (exp_move / spot) * 100
+                implied_move = {
+                    "move_dollars": round(exp_move, 2),
+                    "move_pct": round(exp_move_pct, 2),
+                    "upper": round(spot + exp_move, 2),
+                    "lower": round(spot - exp_move, 2),
+                    "straddle_mid": round(straddle_mid, 2),
+                    "expiration": first_exp_label,
+                    "dte": first_dte,
+                }
+    except Exception:
+        implied_move = None
+
+    # ── IV skew: 20-delta put IV vs 20-delta call IV ──────────────────────
+    skew = None
+    try:
+        if all_puts and all_calls:
+            # Use first expiration
+            first_exp_label = valid_exps[0][1] and datetime.date.fromisoformat(valid_exps[0][0]).strftime("%b %-d, %Y")
+            fp = [c for c in all_puts  if c['expiration'] == first_exp_label and c.get('delta')]
+            fc = [c for c in all_calls if c['expiration'] == first_exp_label and c.get('delta')]
+            if fp and fc:
+                put20  = min(fp, key=lambda x: abs(x['delta'] - 0.20))
+                call20 = min(fc, key=lambda x: abs(x['delta'] - 0.20))
+                put_iv  = put20['impliedVolatility']
+                call_iv = call20['impliedVolatility']
+                if call_iv > 0:
+                    skew_ratio = put_iv / call_iv
+                else:
+                    skew_ratio = None
+                skew = {
+                    "put_iv": round(put_iv * 100, 1),
+                    "call_iv": round(call_iv * 100, 1),
+                    "put_strike": put20['strike'],
+                    "call_strike": call20['strike'],
+                    "ratio": round(skew_ratio, 3) if skew_ratio else None,
+                    "label": (
+                        "normal (put fear > call greed)" if skew_ratio and skew_ratio > 1.1 else
+                        "flat (put/call IV equal)" if skew_ratio and 0.9 <= skew_ratio <= 1.1 else
+                        "reverse (call IV > put IV)" if skew_ratio else "unknown"
+                    ),
+                    "expiration": first_exp_label,
+                }
+    except Exception:
+        skew = None
+
     return {
         "spot": spot,
         "expirations": expirations_meta,
         "puts": all_puts,
         "calls": all_calls,
+        "implied_move": implied_move,
+        "skew": skew,
     }
 
 
@@ -684,6 +749,32 @@ def scan_ticker(ticker):
     except Exception:
         confluences = []
 
+    # Earnings date
+    earnings_date = None
+    earnings_within_window = False
+    try:
+        import datetime as _dt
+        _cal = yf.Ticker(ticker).calendar
+        if _cal is not None and not _cal.empty:
+            _col = None
+            for _c in ['Earnings Date', 'earnings_date', 'Earnings date']:
+                if _c in _cal.columns:
+                    _col = _c
+                    break
+            if _col and len(_cal[_col]) > 0:
+                _ed = _cal[_col].iloc[0]
+                if hasattr(_ed, 'date'):
+                    _ed = _ed.date()
+                elif isinstance(_ed, str):
+                    _ed = _dt.date.fromisoformat(_ed[:10])
+                _today = _dt.date.today()
+                if _ed >= _today:
+                    earnings_date = str(_ed)
+                    # Flag if within 45 days (options window)
+                    earnings_within_window = (_ed - _today).days <= 45
+    except Exception:
+        pass
+
     return {
         "ticker": ticker.upper(),
         "price": safe(last["Close"], 2),
@@ -728,6 +819,8 @@ def scan_ticker(ticker):
         "obv_roc": round(obv_roc, 1),
         "avwap": avwap_dict,
         "confluences": confluences,
+        "earnings_date": earnings_date,
+        "earnings_in_window": earnings_within_window,
     }
 
 
@@ -972,6 +1065,8 @@ function renderCard(d) {
       '<div class="drawdown">'+d.drawdown.toFixed(1)+'% from 52w high &middot; '+mcap+'</div>' +
     '</div></div>' +
 
+    renderEarningsFlag(d) +
+
     '<div class="scores">' +
       '<div class="score-box"><div class="score-label">TrendScore</div><div class="score-value '+trendColor+'">'+d.trend_score.toFixed(0)+'</div></div>' +
       '<div class="score-box"><div class="score-label">CrashScore</div><div class="score-value '+crashColor+'">'+d.crash_score.toFixed(0)+'</div></div>' +
@@ -1069,6 +1164,19 @@ function renderHVNTable(vp) {
     '<tbody>'+rows+lvnRows+'</tbody></table></div>';
 }
 
+function renderEarningsFlag(d) {
+  if (!d.earnings_date) return '';
+  const inWindow = d.earnings_in_window;
+  const bg = inWindow ? 'background:#7c2d12;border:1px solid #dc2626' : 'background:#1e2a35;border:1px solid #334155';
+  const icon = inWindow ? '⚠️ ' : '📅 ';
+  const label = inWindow
+    ? 'EARNINGS ' + d.earnings_date + ' — within options window. Do not sell puts through earnings.'
+    : 'Next earnings: ' + d.earnings_date;
+  return '<div style="' + bg + ';border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + (inWindow ? '#fca5a5' : '#94a3b8') + '">' +
+    icon + label + '</div>';
+}
+
+
 function renderAVWAP(d) {
   const av = d.avwap || {};
   const price = d.price;
@@ -1128,6 +1236,17 @@ function renderConfluences(d) {
   if (!conf.length) return '';
   const price = d.price;
 
+  // Pull implied move from cached options data if available
+  const optData = optionsCache[d.ticker];
+  const im = optData && optData.implied_move ? optData.implied_move : null;
+  const imLower = im ? im.lower : null;
+  const imUpper = im ? im.upper : null;
+  const imPct   = im ? im.move_pct : null;
+
+  const imHeader = im
+    ? '<div style="font-size:10px;color:#94a3b8;margin-bottom:6px">Implied move ±' + im.move_pct.toFixed(1) + '% ($' + im.move_dollars.toFixed(2) + ') through ' + im.expiration + ' — zones outside range shown dimmed</div>'
+    : '';
+
   const rows = conf.map(function(c) {
     const role = c.role === 'support' ? 'c-green' : 'c-red';
     const zoneStr = c.price_lo === c.price_hi
@@ -1137,8 +1256,19 @@ function renderConfluences(d) {
     const dots = Array(5).fill(0).map(function(_, i) {
       return '<span class="strength-dot' + (i < c.strength ? '' : ' dim') + '"></span>';
     }).join('');
-    return '<tr>' +
-      '<td class="' + role + '" style="font-size:11px">' + zoneStr + '</td>' +
+
+    // Implied move annotation
+    let imTag = '';
+    if (im) {
+      const inside = c.price >= imLower && c.price <= imUpper;
+      imTag = inside
+        ? '<span style="font-size:9px;color:#22c55e;margin-left:4px">✓ in range</span>'
+        : '<span style="font-size:9px;color:#475569;margin-left:4px">out of range</span>';
+    }
+    const dimRow = im && !(c.price >= imLower && c.price <= imUpper) ? 'opacity:0.45' : '';
+
+    return '<tr style="' + dimRow + '">' +
+      '<td class="' + role + '" style="font-size:11px">' + zoneStr + imTag + '</td>' +
       '<td class="c-muted" style="font-size:10px">' + (c.dist_pct >= 0 ? '+' : '') + c.dist_pct + '%</td>' +
       '<td class="' + role + '" style="font-size:10px">' + c.role + '</td>' +
       '<td><div class="strength-dots">' + dots + '</div></td>' +
@@ -1148,6 +1278,7 @@ function renderConfluences(d) {
 
   return '<div class="confluence-section">' +
     '<div class="detail-title" style="margin-bottom:6px">Confluence Levels — Multi-Source S/R</div>' +
+    imHeader +
     '<table class="opts-table">' +
       '<thead><tr>' +
         '<th style="text-align:left">Zone</th>' +
@@ -1264,7 +1395,32 @@ function buildOptionsTabs(data, crashScore, ticker) {
   const putsTable = buildOptsTable(data.puts, false, crashScore);
   const callsTable = buildOptsTable(data.calls, true, crashScore);
 
-  return '<div class="opts-tabs" id="exp-tabs-'+ticker+'">' + expTabs + '</div>' +
+  // Implied move banner
+  let imBanner = '';
+  if (data.implied_move) {
+    const im = data.implied_move;
+    imBanner = '<div style="background:#0f1e2e;border:1px solid #1e3a5f;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#93c5fd">' +
+      '📐 Implied move ' + im.expiration + ' (' + im.dte + 'd): <strong>±' + im.move_pct.toFixed(1) + '%</strong> ($±' + im.move_dollars.toFixed(2) + ')' +
+      ' → range $' + im.lower.toFixed(2) + ' – $' + im.upper.toFixed(2) +
+      ' <span style="color:#64748b">(straddle mid $' + im.straddle_mid.toFixed(2) + ' × 0.85)</span>' +
+    '</div>';
+  }
+
+  // Skew banner
+  let skewBanner = '';
+  if (data.skew) {
+    const sk = data.skew;
+    const skewColor = sk.ratio > 1.15 ? '#fca5a5' : sk.ratio < 0.9 ? '#86efac' : '#94a3b8';
+    skewBanner = '<div style="background:#0f1419;border:1px solid #1e2a35;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + skewColor + '">' +
+      '⚖️ IV Skew (' + sk.expiration + '): ' +
+      '20Δ put ($' + sk.put_strike + ') ' + sk.put_iv + '% IV  vs  ' +
+      '20Δ call ($' + sk.call_strike + ') ' + sk.call_iv + '% IV' +
+      ' — ratio ' + (sk.ratio ? sk.ratio.toFixed(2) : 'N/A') + ' — <em>' + sk.label + '</em>' +
+    '</div>';
+  }
+
+  return imBanner + skewBanner +
+    '<div class="opts-tabs" id="exp-tabs-'+ticker+'">' + expTabs + '</div>' +
     '<div style="display:flex;gap:8px;margin-bottom:8px">' +
       '<button class="opts-tab" style="background:#0f1419;border:0.5px solid #1e2a35;border-radius:4px" onclick="switchSide(\''+ticker+'\',\'puts\',this)" id="side-puts-'+ticker+'">Sell Puts</button>' +
       '<button class="opts-tab" style="background:#0f1419;border:0.5px solid #1e2a35;border-radius:4px;color:#64748b" onclick="switchSide(\''+ticker+'\',\'calls\',this)" id="side-calls-'+ticker+'">Sell Calls</button>' +
@@ -1363,6 +1519,13 @@ function formatForClaude(d) {
     });
   }
 
+  // Earnings flag
+  if (d.earnings_date) {
+    L.push('');
+    const ewarn = d.earnings_in_window ? ' ⚠️  WITHIN OPTIONS WINDOW — do not sell puts through earnings' : '';
+    L.push('EARNINGS DATE: ' + d.earnings_date + ewarn);
+  }
+
   // Anchored VWAP
   const av = d.avwap || {};
   const avAnchors = [['52w_high','52wH AVWAP'],['ytd','YTD AVWAP'],['ytd_low','YTD Low AVWAP']];
@@ -1403,6 +1566,26 @@ function formatForClaude(d) {
       const str = (c.strength + '/5 sources').padEnd(9);
       L.push('  ' + zone + ' ' + dist + ' ' + role + ' ' + str + ' ' + c.sources.join(', '));
     });
+  }
+
+  // Implied move + skew (from options cache)
+  const _optD = optionsCache[d.ticker];
+  if (_optD && _optD.implied_move) {
+    const im = _optD.implied_move;
+    L.push('');
+    L.push('IMPLIED MOVE (' + im.expiration + ', ' + im.dte + 'd): ±' + im.move_pct.toFixed(1) + '% ($' + im.move_dollars.toFixed(2) + ')');
+    L.push('  Expected range: $' + im.lower.toFixed(2) + ' – $' + im.upper.toFixed(2));
+    L.push('  (ATM straddle mid $' + im.straddle_mid.toFixed(2) + ' × 0.85)');
+    L.push('  Confluence zones OUTSIDE implied move are shown for reference only — not actionable within this expiration.');
+  }
+  if (_optD && _optD.skew) {
+    const sk = _optD.skew;
+    L.push('');
+    L.push('IV SKEW (' + sk.expiration + '): ' + sk.label.toUpperCase());
+    L.push('  20Δ put $' + sk.put_strike + ': ' + sk.put_iv + '% IV');
+    L.push('  20Δ call $' + sk.call_strike + ': ' + sk.call_iv + '% IV');
+    L.push('  Put/call IV ratio: ' + (sk.ratio ? sk.ratio.toFixed(2) : 'N/A'));
+    L.push('  Interpretation: ratio >1.10 = market pricing more downside fear (normal in downtrends). Ratio near 1.0 = flat skew (notable in severely beaten-down names — may signal capitulation or complacency).');
   }
 
   // Volume profile — now embedded in scan result

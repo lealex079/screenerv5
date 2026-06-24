@@ -1,3 +1,6 @@
 yfinance>=0.2.0
 pandas>=2.0.0
 numpy>=1.24.0
+anthropic>=0.40.0
+finviz>=1.4.6
+sendgrid>=6.11.0

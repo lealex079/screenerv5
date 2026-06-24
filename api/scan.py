@@ -303,6 +303,7 @@ def fetch_options(ticker):
             delta = bs_delta(spot, strike, dte_days, iv, is_put=is_put)
             if delta is None:
                 return None
+            delta_abs = abs(delta)
 
             theta = bs_theta(spot, strike, dte_days, iv, is_put=is_put)
             ann_yield = (bid / strike) * (365 / dte_days) * 100 if strike > 0 and dte_days > 0 else 0
@@ -599,20 +600,12 @@ def scan_ticker(ticker):
     # ── NEW: Earnings date ────────────────────────────────────────────────────
     earnings_date = None
     try:
-        _yt2 = yf.Ticker(ticker)
-        cal = _yt2.calendar
-        if cal is not None and not (hasattr(cal, 'empty') and cal.empty):
-            if hasattr(cal, 'columns') and len(cal.columns) > 0:
-                col = cal.columns[0]
-                ed_row = cal[col].get("Earnings Date")
-                if ed_row is not None:
-                    if hasattr(ed_row, 'date'):
-                        earnings_date = str(ed_row.date())
-                    elif hasattr(ed_row, '__iter__') and not isinstance(ed_row, str):
-                        first = list(ed_row)[0]
-                        earnings_date = str(first.date()) if hasattr(first, 'date') else str(first)[:10]
-                    else:
-                        earnings_date = str(ed_row)[:10]
+        cal = yf.Ticker(ticker).calendar
+        if cal is not None and hasattr(cal, 'columns') and len(cal.columns) > 0:
+            ed = cal[cal.columns[0]].get("Earnings Date")
+            if ed is not None:
+                first = list(ed)[0] if hasattr(ed, '__iter__') and not isinstance(ed, str) else ed
+                earnings_date = str(first.date()) if hasattr(first, 'date') else str(first)[:10]
     except Exception:
         earnings_date = None
 

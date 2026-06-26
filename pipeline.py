@@ -100,8 +100,7 @@ def finviz_screen() -> list[str]:
         from finviz.screener import Screener
         log.info("Running Finviz screen...")
         screen = Screener(filters=filters, table="Overview", order="-marketcap")
-        df = screen.to_dataframe()
-        tickers = df["Ticker"].dropna().tolist()
+        tickers = [row["Ticker"] for row in screen if row.get("Ticker")]
         log.info(f"Finviz returned {len(tickers)} candidates")
         return tickers
     except ImportError:
@@ -166,7 +165,7 @@ def run_parallel_scan(tickers: list[str], max_workers: int = MAX_WORKERS) -> lis
 
 def _safe_scan(ticker: str) -> dict:
     """Wrapper around scan_ticker with a small delay to avoid rate limiting."""
-    time.sleep(0.3)  # ~3 req/sec per worker — safe for yfinance
+    time.sleep(0.5)  # ~3 req/sec per worker — safe for yfinance
     try:
         return scan_ticker(ticker)
     except Exception as e:

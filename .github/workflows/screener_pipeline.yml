@@ -1,0 +1,82 @@
+name: Daily Screener Pipeline
+
+on:
+  schedule:
+    # 7:00 AM Pacific (14:00 UTC) — before US market open
+    # Adjust UTC offset: PST = UTC-8, PDT = UTC-7
+    # Change to "0 13 * * 1-5" during PDT (March–November)
+    - cron: "0 14 * * 1-5"   # Mon–Fri only, PST
+
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Override tickers (comma-separated, leave blank for Finviz)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run (no Claude, no email)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      top_n:
+        description: "Number of full reports (default 10)"
+        required: false
+        default: "10"
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60   # full 300-ticker scan should finish in ~20 min
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            yfinance>=0.2.0 \
+            pandas>=2.0.0 \
+            numpy>=1.24.0 \
+            anthropic \
+            sendgrid \
+            finviz
+
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SENDGRID_API_KEY:  ${{ secrets.SENDGRID_API_KEY }}
+          EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO:          ${{ secrets.EMAIL_TO }}
+          TOP_N:             ${{ github.event.inputs.top_n || '10' }}
+        run: |
+          ARGS=""
+
+          # Dry run flag
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          # Manual ticker override
+          if [ -n "${{ github.event.inputs.tickers }}" ]; then
+            ARGS="$ARGS --tickers ${{ github.event.inputs.tickers }}"
+          fi
+
+          python pipeline.py $ARGS
+
+      - name: Upload email preview (dry run only)
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-preview
+          path: screener_email_preview.html
+          retention-days: 3

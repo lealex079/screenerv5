@@ -1260,47 +1260,46 @@ function renderChart(d) {
   '</div>';
 }
 
+// 1. Centralized loading state
+const libraryLoading = {
+    promise: null,
+    isLoaded: false
+};
+
 async function loadLibrary() {
-    if (typeof LightweightCharts !== 'undefined') return true;
-    return new Promise((resolve) => {
+    if (libraryLoading.isLoaded) return true;
+    if (libraryLoading.promise) return libraryLoading.promise;
+
+    libraryLoading.promise = new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
-        script.onload = () => resolve(true);
+        script.onload = () => {
+            libraryLoading.isLoaded = true;
+            resolve(true);
+        };
+        script.onerror = reject;
         document.head.appendChild(script);
     });
+    return libraryLoading.promise;
 }
-
-// Global tracker to ensure we don't double-initialize
-const chartLoadQueue = {};
 
 async function initChart(ticker) {
     const el = document.getElementById('chart-' + ticker);
-    if (!el || chartInstances[ticker]) return;
+    if (!el) return;
 
-    // 1. Force the library to load if it's not present
+    // 2. Await the library explicitly
+    await loadLibrary();
+
+    // 3. Verify it exists in global scope
     if (typeof LightweightCharts === 'undefined') {
-        el.innerHTML = '<div style="padding:20px; color:#64748b; font-size:12px;">Waiting for library...</div>';
-        try {
-            await new Promise((resolve, reject) => {
-                const script = document.createElement('script');
-                script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
-                script.onload = resolve;
-                script.onerror = reject;
-                document.head.appendChild(script);
-            });
-        } catch (e) {
-            el.innerHTML = '<div style="color:#ef4444;">Failed to load charting library.</div>';
-            return;
-        }
+        el.innerHTML = '<div style="padding:20px; color:#ef4444;">Library failed to initialize.</div>';
+        return;
     }
 
     const d = scanResults.find(r => r.ticker === ticker);
     if (!d || !d.chart_data) return;
 
     try {
-        // 2. Explicitly verify the library is defined before calling
-        if (typeof LightweightCharts === 'undefined') throw new Error("Library failed to attach");
-
         const chart = LightweightCharts.createChart(el, {
             width: el.clientWidth || 700,
             height: 220,
@@ -1308,7 +1307,11 @@ async function initChart(ticker) {
             grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } }
         });
 
-        // 3. Defensive Series Creation
+        // 4. Defensive Check: Confirm createChart actually returned a working instance
+        if (typeof chart.addCandlestickSeries !== 'function') {
+            throw new Error("createChart failed to return valid series functions");
+        }
+
         const candleSeries = chart.addCandlestickSeries({
             upColor: '#22c55e', downColor: '#ef4444',
             borderUpColor: '#22c55e', borderDownColor: '#ef4444',
@@ -1325,8 +1328,8 @@ async function initChart(ticker) {
 
         applyTF(ticker, '1D');
     } catch (err) {
-        console.error(err);
-        el.innerHTML = '<div style="padding:20px; color:#ef4444; font-size:12px;">' + err.message + '</div>';
+        console.error("Initialization error:", err);
+        el.innerHTML = '<div style="padding:20px; color:#ef4444; font-size:12px;">Init Error: ' + err.message + '</div>';
     }
 }
 

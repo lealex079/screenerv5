@@ -1267,7 +1267,7 @@ function initChart(ticker) {
   if (!d || !d.chart_data) return;
 
   const chart = LightweightCharts.createChart(el, {
-    autoSize: true,
+    autoSize: true, // Let the library handle resizing natively
     height: 220,
     layout: { background: { color: '#0f1419' }, textColor: '#475569' },
     grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
@@ -1277,48 +1277,26 @@ function initChart(ticker) {
   });
 
   const candleSeries = chart.addCandlestickSeries({
-    upColor: '#22c55e', downColor: '#ef4444',
-    borderUpColor: '#22c55e', borderDownColor: '#ef4444',
-    wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+    upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#22c55e', borderDownColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444',
   });
-
-  const ma50Series = chart.addLineSeries({
-    color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-  });
-  const ma200Series = chart.addLineSeries({
-    color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-  });
-
-  // Volume series on separate pane
-  const volSeries = chart.addHistogramSeries({
-    color: '#1e2a35', priceFormat: { type: 'volume' },
-    priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 },
-  });
+  const ma50Series = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+  const ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+  const volSeries = chart.addHistogramSeries({ color: '#1e2a35', priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 }});
 
   chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
-  chartTFState[ticker] = '1D';
-
-  // Resize observer — also triggers first data load once element has real dimensions
-  const ro = new ResizeObserver(function(entries) {
-    if (!chartInstances[ticker]) return;
-    const w = entries[0].contentRect.width;
-    if (w > 0) {
-      chartInstances[ticker].chart.applyOptions({ width: w });
-      // Load data on first resize (when element gets real width)
-      if (!chartInstances[ticker]._loaded) {
-        chartInstances[ticker]._loaded = true;
-        applyTF(ticker, '1D');
-        // Sync active button to 1D
-        const bar = document.getElementById('tf-bar-' + ticker);
-        if (bar) {
+  
+  // CRITICAL: Force immediate render. Do not rely entirely on ResizeObserver for first paint.
+  setTimeout(() => {
+      applyTF(ticker, '1D');
+      
+      // Update active button state
+      const bar = document.getElementById('tf-bar-' + ticker);
+      if (bar) {
           bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
           const btn1d = bar.querySelector('[data-tf="1D"]');
           if (btn1d) btn1d.classList.add('active');
-        }
       }
-    }
-  });
-  ro.observe(el);
+  }, 50);
 }
 
 function applyTF(ticker, tfLabel) {
@@ -1329,47 +1307,67 @@ function applyTF(ticker, tfLabel) {
   const cfg  = TF_CONFIGS.find(t => t.label === tfLabel);
   if (!cfg) return;
 
-  let bars = (d.chart_data[cfg.key] || []);
+  let rawBars = (d.chart_data[cfg.key] || []);
+  if (!rawBars.length) return;
 
-  // 1. Sort and deduplicate timestamps
-  bars.sort((a, b) => a.t - b.t);
-  let uniqueBars = [];
-  let lastT = null;
-  for (let b of bars) {
-    if (b.t !== lastT && b.t != null && b.o != null) {
-      uniqueBars.push(b);
-      lastT = b.t;
-    }
-  }
+  const isIntraday = (cfg.label === '1H' || cfg.label === '4H');
   
-  bars = uniqueBars.slice(-cfg.bars);
-  if (!bars.length) return;
-
-  // 2. CRITICAL FIX: Format Time for LightweightCharts
-  // LWC requires 'YYYY-MM-DD' strings for daily charts to avoid timezone crashes
-  const isIntraday = (cfg.label === '1H');
   const formatTime = (unixSeconds) => {
-      if (isIntraday) return unixSeconds;
+      if (isIntraday) return unixSeconds; // LWC intraday requires unix seconds
+      
+      // LWC Daily requires exact 'YYYY-MM-DD' strings.
+      // Using UTC conversion to avoid local browser timezone shifts shifting days.
       const date = new Date(unixSeconds * 1000);
-      return date.toISOString().split('T')[0]; // Returns strict 'YYYY-MM-DD'
+      const y = date.getUTCFullYear();
+      const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(date.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
   };
 
-  // 3. Map Data safely
-  const candles = bars.map(b => ({ time: formatTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c }));
-  const vols = bars.map(b => ({
-    time: formatTime(b.t), value: b.v || 0,
-    color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
-  }));
-  const m50  = bars.filter(b => b.m50 != null).map(b => ({ time: formatTime(b.t), value: b.m50 }));
-  const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: formatTime(b.t), value: b.m200 }));
+  // 1. Map to LWC format and deduplicate based on FORMATTED time
+  let processedCandles = [];
+  let processedVols = [];
+  let processedM50 = [];
+  let processedM200 = [];
+  let seenTimes = new Set();
+
+  // Ensure chronological order
+  rawBars.sort((a, b) => a.t - b.t);
+
+  for (let b of rawBars) {
+      if (b.t == null || b.o == null) continue; // Skip invalid bars
+      
+      let t = formatTime(b.t);
+      
+      // Strict deduplication: LWC throws a fatal error if two data points share the same time
+      if (!seenTimes.has(t)) {
+          seenTimes.add(t);
+          
+          processedCandles.push({ time: t, open: b.o, high: b.h, low: b.l, close: b.c });
+          processedVols.push({ 
+              time: t, value: b.v || 0, 
+              color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)' 
+          });
+          
+          if (b.m50 != null) processedM50.push({ time: t, value: b.m50 });
+          if (b.m200 != null) processedM200.push({ time: t, value: b.m200 });
+      }
+  }
+
+  // 2. Slice to requested timeframe length
+  processedCandles = processedCandles.slice(-cfg.bars);
+  processedVols = processedVols.slice(-cfg.bars);
+  processedM50 = processedM50.slice(-cfg.bars);
+  processedM200 = processedM200.slice(-cfg.bars);
 
   try {
-    inst.candleSeries.setData(candles);
-    inst.volSeries.setData(vols);
-    inst.ma50Series.setData(m50);
-    inst.ma200Series.setData(m200);
+    // 3. Mount Data
+    inst.candleSeries.setData(processedCandles);
+    inst.volSeries.setData(processedVols);
+    inst.ma50Series.setData(processedM50);
+    inst.ma200Series.setData(processedM200);
 
-    // 4. VOLUME PROFILE OVERLAYS (POC, VAH, VAL)
+    // 4. Mount VP Overlays (If loaded)
     if (d.vp) {
       if (inst.pocLine) inst.candleSeries.removePriceLine(inst.pocLine);
       if (inst.vahLine) inst.candleSeries.removePriceLine(inst.vahLine);
@@ -1389,9 +1387,9 @@ function applyTF(ticker, tfLabel) {
       });
     }
 
+    // 5. Adjust Viewport
     inst.chart.timeScale().fitContent();
     chartTFState[ticker] = tfLabel;
-    
   } catch (e) {
     console.error("LightweightCharts Rendering Error:", e);
   }

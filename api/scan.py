@@ -123,7 +123,7 @@ SECTOR_METRICS = {
 
 def fetch_mtf_inline(ticker, price):
     configs = [
-        ("4h",  "4h",  "60d"),    # 4h: 60d max from yfinance
+        ("1h",  "1h",  "60d"),    # Changed from 4h to 1h
         ("1d",  "1d",  "max"),
         ("1wk", "1wk", "max"),
         ("1mo", "1mo", "max"),
@@ -173,7 +173,7 @@ def fetch_mtf_inline(ticker, price):
                         pass
         except Exception:
             result[label] = {"ma50": None, "ma200": None}
-    result["_ohlcv_4h"] = ohlcv_4h
+    result["_ohlcv_1h"] = ohlcv_4h
     return result
 
 
@@ -886,7 +886,8 @@ def scan_ticker(ticker):
             except Exception:
                 pass
         # Attach 4h bars from mtf fetch
-        chart_data["h4"] = mtf.pop("_ohlcv_4h", [])
+        # Attach 1h bars from mtf fetch
+        chart_data["h1"] = mtf.pop("_ohlcv_1h", [])
     except Exception:
         chart_data = {"daily": [], "weekly": [], "h4": []}
     # ─────────────────────────────────────────────────────────────────────────
@@ -1233,16 +1234,15 @@ const chartTFState   = {};   // ticker → current TF string
 
 // Timeframe config: [label, key in chart_data, bars to show]
 const TF_CONFIGS = [
-  { label: "4H",  key: "h4",     bars: 120  },
+  { label: "1H",  key: "h1",     bars: 120  }, // Updated to 1H
   { label: "1D",  key: "daily",  bars: 30   },
-  { label: "1W",  key: "daily",  bars: 5    },   // ~5 trading days
+  { label: "1W",  key: "daily",  bars: 5    },   
   { label: "1M",  key: "daily",  bars: 21   },
   { label: "3M",  key: "daily",  bars: 63   },
   { label: "6M",  key: "daily",  bars: 126  },
   { label: "1Y",  key: "daily",  bars: 252  },
   { label: "2Y",  key: "weekly", bars: 104  },
 ];
-
 function renderChart(d) {
   const cd = d.chart_data;
   if (!cd || (!cd.daily || !cd.daily.length)) return '';
@@ -1331,8 +1331,7 @@ function applyTF(ticker, tfLabel) {
 
   let bars = (d.chart_data[cfg.key] || []);
 
-  // 1. CRITICAL FIX: Sort and deduplicate timestamps
-  // LightweightCharts will crash and render a blank screen if data overlaps!
+  // 1. Sort and deduplicate timestamps
   bars.sort((a, b) => a.t - b.t);
   let uniqueBars = [];
   let lastT = null;
@@ -1346,17 +1345,25 @@ function applyTF(ticker, tfLabel) {
   bars = uniqueBars.slice(-cfg.bars);
   if (!bars.length) return;
 
-  // 2. Format Data Arrays
-  const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
+  // 2. CRITICAL FIX: Format Time for LightweightCharts
+  // LWC requires 'YYYY-MM-DD' strings for daily charts to avoid timezone crashes
+  const isIntraday = (cfg.label === '1H');
+  const formatTime = (unixSeconds) => {
+      if (isIntraday) return unixSeconds;
+      const date = new Date(unixSeconds * 1000);
+      return date.toISOString().split('T')[0]; // Returns strict 'YYYY-MM-DD'
+  };
+
+  // 3. Map Data safely
+  const candles = bars.map(b => ({ time: formatTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c }));
   const vols = bars.map(b => ({
-    time: b.t, value: b.v || 0,
+    time: formatTime(b.t), value: b.v || 0,
     color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
   }));
-  const m50  = bars.filter(b => b.m50  != null).map(b => ({ time: b.t, value: b.m50  }));
-  const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: b.t, value: b.m200 }));
+  const m50  = bars.filter(b => b.m50 != null).map(b => ({ time: formatTime(b.t), value: b.m50 }));
+  const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: formatTime(b.t), value: b.m200 }));
 
   try {
-    // 3. Safely Render Data
     inst.candleSeries.setData(candles);
     inst.volSeries.setData(vols);
     inst.ma50Series.setData(m50);
@@ -1364,7 +1371,6 @@ function applyTF(ticker, tfLabel) {
 
     // 4. VOLUME PROFILE OVERLAYS (POC, VAH, VAL)
     if (d.vp) {
-      // Clear existing lines to prevent stacking on TF changes
       if (inst.pocLine) inst.candleSeries.removePriceLine(inst.pocLine);
       if (inst.vahLine) inst.candleSeries.removePriceLine(inst.vahLine);
       if (inst.valLine) inst.candleSeries.removePriceLine(inst.valLine);
@@ -1381,22 +1387,6 @@ function applyTF(ticker, tfLabel) {
         price: d.vp.val, color: '#3b82f6', lineWidth: 1, lineStyle: 1,
         axisLabelVisible: true, title: 'VAL',
       });
-    }
-
-    // 5. Earnings Markers
-    const ed = d.earnings_date;
-    if (ed) {
-      const edTs = Math.floor(new Date(ed).getTime() / 1000);
-      const inRange = bars.some(b => Math.abs(b.t - edTs) < 7 * 86400);
-      if (inRange) {
-        inst.candleSeries.setMarkers([{
-          time: edTs, position: 'aboveBar',
-          color: d.earnings_in_window ? '#ef4444' : '#f59e0b',
-          shape: 'arrowDown', text: 'ERN',
-        }]);
-      } else {
-        inst.candleSeries.setMarkers([]);
-      }
     }
 
     inst.chart.timeScale().fitContent();

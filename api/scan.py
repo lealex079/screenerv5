@@ -1281,50 +1281,40 @@ async function loadLibrary() {
 
 async function initChart(ticker) {
     const el = document.getElementById('chart-' + ticker);
-    if (!el || chartInstances[ticker]) return;
+    if (!el) return;
 
-    await loadLibrary();
+    // Standard CDN load - this is the most reliable way to get the library
+    if (typeof LightweightCharts === 'undefined') {
+        const script = document.createElement('script');
+        script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
+        document.head.appendChild(script);
+        // Wait for it to load
+        await new Promise(resolve => script.onload = resolve);
+    }
 
     const d = scanResults.find(r => r.ticker === ticker);
     if (!d || !d.chart_data) return;
 
-    try {
-        // Namespace check
-        if (typeof LightweightCharts === 'undefined' || !LightweightCharts.createChart) {
-            throw new Error("Library loaded but LightweightCharts namespace is empty");
-        }
+    // Force explicit dimensions for the first paint
+    el.style.width = '700px'; 
+    el.style.height = '220px';
 
-        const chart = LightweightCharts.createChart(el, {
-            width: el.clientWidth || 700,
-            height: 220,
-            layout: { background: { color: '#0f1419' }, textColor: '#475569' },
-            grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } }
-        });
+    const chart = LightweightCharts.createChart(el, {
+        width: 700,
+        height: 220,
+        layout: { background: { color: '#0f1419' } }
+    });
 
-        // Defensive check: is the instance valid?
-        if (!chart.addCandlestickSeries) {
-             throw new Error("createChart returned an invalid object (missing series functions)");
-        }
+    const candleSeries = chart.addCandlestickSeries();
+    
+    // Only send the daily data
+    const bars = d.chart_data.daily || [];
+    const formattedData = bars.map(b => ({
+        time: new Date(b.t * 1000).toISOString().split('T')[0],
+        open: b.o, high: b.h, low: b.l, close: b.c
+    }));
 
-        const candleSeries = chart.addCandlestickSeries({
-            upColor: '#22c55e', downColor: '#ef4444',
-            borderUpColor: '#22c55e', borderDownColor: '#ef4444',
-            wickUpColor: '#22c55e', wickDownColor: '#ef4444'
-        });
-
-        chartInstances[ticker] = { 
-            chart, 
-            candleSeries, 
-            volSeries: chart.addHistogramSeries({ color: '#1e2a35', priceScaleId: 'vol' }),
-            ma50Series: chart.addLineSeries({ color: '#22c55e', lineWidth: 1 }),
-            ma200Series: chart.addLineSeries({ color: '#3b82f6', lineWidth: 1 })
-        };
-
-        applyTF(ticker, '1D');
-    } catch (err) {
-        console.error("Initialization Error:", err);
-        el.innerHTML = '<div style="padding:20px; color:#ef4444; font-size:12px;">Init Error: ' + err.message + '</div>';
-    }
+    candleSeries.setData(formattedData);
 }
 
 function applyTF(ticker, tfLabel) {
@@ -2112,6 +2102,26 @@ function copyOne(ticker, btnEl) { const d = scanResults.find(r => r.ticker === t
 function copyAll(btnEl) {
   const all = scanResults.map(formatForClaude).join('\n\n' + '='.repeat(60) + '\n\n');
   btnEl.dataset.label = 'Copy all for Claude'; copyText(all, btnEl);
+}
+const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+        mutation.addedNodes.forEach((node) => {
+            // Check if the added node is a card
+            if (node.nodeType === 1 && node.id && node.id.startsWith('card-')) {
+                const ticker = node.id.replace('card-', '');
+                // Wait for the next browser paint so the div has dimensions
+                requestAnimationFrame(() => {
+                    initChart(ticker);
+                });
+            }
+        });
+    });
+});
+
+// Start watching the results container
+const resultsContainer = document.getElementById('results');
+if (resultsContainer) {
+    observer.observe(resultsContainer, { childList: true });
 }
 </script>
 </body>

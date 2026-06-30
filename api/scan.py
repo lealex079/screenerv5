@@ -1263,12 +1263,19 @@ function renderChart(d) {
 function initChart(ticker) {
   const el = document.getElementById('chart-' + ticker);
   if (!el || chartInstances[ticker]) return;
+
+  // 1. ADDED: Wait for library to load
+  if (typeof LightweightCharts === 'undefined') {
+    el.innerHTML = '<div style="padding:20px; color:#64748b; font-family:monospace; font-size:12px;">Waiting for library...</div>';
+    setTimeout(() => initChart(ticker), 100); 
+    return;
+  }
+
   const d = scanResults.find(r => r.ticker === ticker);
   if (!d || !d.chart_data) return;
 
   try {
-    // 1. Explicit sizing bypasses the zero-width race condition
-    const chartWidth = el.clientWidth || el.parentElement.clientWidth || 700;
+    const chartWidth = el.clientWidth || 700;
     
     const chart = LightweightCharts.createChart(el, {
       width: chartWidth,
@@ -1289,18 +1296,15 @@ function initChart(ticker) {
 
     chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
     
-    // Auto-resize listener
     new ResizeObserver(entries => {
-      if (entries.length === 0 || entries[0].target !== el) return;
-      const newRect = entries[0].contentRect;
-      if (newRect.width > 0) chart.applyOptions({ width: newRect.width });
+      if (entries.length > 0 && entries[0].target.clientWidth > 0) {
+        chart.applyOptions({ width: entries[0].target.clientWidth });
+      }
     }).observe(el);
 
-    // Initial load
     applyTF(ticker, '1D');
     
   } catch (err) {
-    // If initialization fails, print the error visually to the screen
     el.innerHTML = '<div style="padding:20px; color:#ef4444; font-family:monospace; font-size:12px;">Chart Init Error: ' + err.message + '</div>';
   }
 }

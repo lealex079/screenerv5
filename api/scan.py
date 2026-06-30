@@ -1330,49 +1330,81 @@ function applyTF(ticker, tfLabel) {
   if (!cfg) return;
 
   let bars = (d.chart_data[cfg.key] || []);
-  // Slice to the number of bars for this TF
-  bars = bars.slice(-cfg.bars);
+
+  // 1. CRITICAL FIX: Sort and deduplicate timestamps
+  // LightweightCharts will crash and render a blank screen if data overlaps!
+  bars.sort((a, b) => a.t - b.t);
+  let uniqueBars = [];
+  let lastT = null;
+  for (let b of bars) {
+    if (b.t !== lastT && b.t != null && b.o != null) {
+      uniqueBars.push(b);
+      lastT = b.t;
+    }
+  }
+  
+  bars = uniqueBars.slice(-cfg.bars);
   if (!bars.length) return;
 
-  // Candlestick data
+  // 2. Format Data Arrays
   const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
-  inst.candleSeries.setData(candles);
-
-  // Volume
   const vols = bars.map(b => ({
-    time: b.t, value: b.v,
+    time: b.t, value: b.v || 0,
     color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
   }));
-  inst.volSeries.setData(vols);
-
-  // MAs — only show points that have values
   const m50  = bars.filter(b => b.m50  != null).map(b => ({ time: b.t, value: b.m50  }));
   const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: b.t, value: b.m200 }));
-  inst.ma50Series.setData(m50);
-  inst.ma200Series.setData(m200);
 
-  // Add earnings marker if within the visible range
-  const ed = d.earnings_date;
-  if (ed) {
-    try {
+  try {
+    // 3. Safely Render Data
+    inst.candleSeries.setData(candles);
+    inst.volSeries.setData(vols);
+    inst.ma50Series.setData(m50);
+    inst.ma200Series.setData(m200);
+
+    // 4. VOLUME PROFILE OVERLAYS (POC, VAH, VAL)
+    if (d.vp) {
+      // Clear existing lines to prevent stacking on TF changes
+      if (inst.pocLine) inst.candleSeries.removePriceLine(inst.pocLine);
+      if (inst.vahLine) inst.candleSeries.removePriceLine(inst.vahLine);
+      if (inst.valLine) inst.candleSeries.removePriceLine(inst.valLine);
+
+      inst.pocLine = inst.candleSeries.createPriceLine({
+        price: d.vp.poc, color: '#a78bfa', lineWidth: 2, lineStyle: 0,
+        axisLabelVisible: true, title: 'POC',
+      });
+      inst.vahLine = inst.candleSeries.createPriceLine({
+        price: d.vp.vah, color: '#3b82f6', lineWidth: 1, lineStyle: 1,
+        axisLabelVisible: true, title: 'VAH',
+      });
+      inst.valLine = inst.candleSeries.createPriceLine({
+        price: d.vp.val, color: '#3b82f6', lineWidth: 1, lineStyle: 1,
+        axisLabelVisible: true, title: 'VAL',
+      });
+    }
+
+    // 5. Earnings Markers
+    const ed = d.earnings_date;
+    if (ed) {
       const edTs = Math.floor(new Date(ed).getTime() / 1000);
       const inRange = bars.some(b => Math.abs(b.t - edTs) < 7 * 86400);
       if (inRange) {
         inst.candleSeries.setMarkers([{
-          time: edTs,
-          position: 'aboveBar',
+          time: edTs, position: 'aboveBar',
           color: d.earnings_in_window ? '#ef4444' : '#f59e0b',
-          shape: 'arrowDown',
-          text: 'ERN',
+          shape: 'arrowDown', text: 'ERN',
         }]);
       } else {
         inst.candleSeries.setMarkers([]);
       }
-    } catch(e) {}
-  }
+    }
 
-  inst.chart.timeScale().fitContent();
-  chartTFState[ticker] = tfLabel;
+    inst.chart.timeScale().fitContent();
+    chartTFState[ticker] = tfLabel;
+    
+  } catch (e) {
+    console.error("LightweightCharts Rendering Error:", e);
+  }
 }
 
 function setChartTFBtn(btnEl) {
@@ -1526,9 +1558,15 @@ async function loadVP(ticker) {
     const res = await fetch('/api/scan?vp=' + encodeURIComponent(ticker));
     const vp = await res.json();
     if (vp.error) { el.innerHTML = '<span class="c-red">' + vp.error + '</span>'; return; }
+    
     const d = scanResults.find(r => r.ticker === ticker);
     if (d) d.vp = vp;
     el.innerHTML = renderVPContent(vp, d ? d.price : 0);
+    
+    // CRITICAL: Redraw the chart to apply the VP price lines now that data exists
+    if (chartInstances[ticker] && chartInstances[ticker]._loaded) {
+        applyTF(ticker, chartTFState[ticker] || '1D');
+    }
   } catch(e) {
     el.innerHTML = '<span class="c-red">Error: ' + e.message + '</span>';
   }

@@ -1260,59 +1260,75 @@ function renderChart(d) {
   '</div>';
 }
 
-function initChart(ticker) {
+function initChart(ticker, _attempt) {
+  _attempt = _attempt || 0;
   const el = document.getElementById('chart-' + ticker);
-  if (!el || chartInstances[ticker]) return;
+  // Container may not be in the DOM yet — retry, but cap it so we never spin forever.
+  if (!el) {
+    if (_attempt < 30) { requestAnimationFrame(function(){ initChart(ticker, _attempt + 1); }); }
+    else { console.warn('[chart] container #chart-' + ticker + ' never appeared after 30 frames'); }
+    return;
+  }
+  if (chartInstances[ticker]) return;
   const d = scanResults.find(r => r.ticker === ticker);
-  if (!d || !d.chart_data) return;
+  if (!d || !d.chart_data) { console.warn('[chart] no chart_data on scanResults for', ticker); return; }
 
-  // Wait until the element has a real width before creating the chart.
-  const w = el.clientWidth || el.offsetWidth;
-  if (!w || w < 50) {
-    // Element not painted yet — retry on next frame
-    requestAnimationFrame(function() { initChart(ticker); });
+  // ── Diagnostics (remove once the render is confirmed working) ──────────────
+  console.log('[chart] init', ticker,
+    '| typeof LightweightCharts =', typeof LightweightCharts,
+    '| daily bars =', (d.chart_data.daily ? d.chart_data.daily.length : 'n/a'),
+    '| container =', el.clientWidth + 'x' + el.clientHeight);
+
+  if (typeof LightweightCharts === 'undefined') {
+    console.error('[chart] LightweightCharts global is undefined — the CDN script did not load (or loaded after this ran).');
     return;
   }
 
-  const chart = LightweightCharts.createChart(el, {
-    width:  w,
-    height: 220,
-    layout: { background: { color: '#0f1419' }, textColor: '#475569' },
-    grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
-    crosshair: { mode: 0 },
-    rightPriceScale: { borderColor: '#1e2a35' },
-    timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
-  });
+  let chart;
+  try {
+    // autoSize lets lightweight-charts read the container size itself via a
+    // ResizeObserver. This is the library's documented fix for the
+    // "container not painted yet" problem — preferred over passing width/height.
+    chart = LightweightCharts.createChart(el, {
+      autoSize: true,
+      layout: { background: { color: '#0f1419' }, textColor: '#475569' },
+      grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
+      crosshair: { mode: 0 },
+      rightPriceScale: { borderColor: '#1e2a35' },
+      timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
+    });
+  } catch(e) {
+    console.error('[chart] createChart() threw for', ticker, e);
+    return;
+  }
 
-  const candleSeries = chart.addCandlestickSeries({
-    upColor: '#22c55e', downColor: '#ef4444',
-    borderUpColor: '#22c55e', borderDownColor: '#ef4444',
-    wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-  });
-  const ma50Series = chart.addLineSeries({
-    color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-  });
-  const ma200Series = chart.addLineSeries({
-    color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-  });
-  const volSeries = chart.addHistogramSeries({
-    priceFormat: { type: 'volume' },
-    priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 },
-  });
+  let candleSeries, ma50Series, ma200Series, volSeries;
+  try {
+    candleSeries = chart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444',
+      borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+    });
+    ma50Series = chart.addLineSeries({
+      color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    });
+    ma200Series = chart.addLineSeries({
+      color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    });
+    volSeries = chart.addHistogramSeries({
+      priceFormat: { type: 'volume' },
+      priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 },
+    });
+  } catch(e) {
+    console.error('[chart] addSeries threw for', ticker, e);
+    return;
+  }
 
   chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
   chartTFState[ticker] = '1D';
 
   // Load default timeframe data immediately
   applyTF(ticker, '1D');
-
-  // Keep chart width in sync with the container on window resize
-  window.addEventListener('resize', function() {
-    if (chartInstances[ticker]) {
-      const nw = el.clientWidth || el.offsetWidth;
-      if (nw > 50) chartInstances[ticker].chart.applyOptions({ width: nw });
-    }
-  });
 }
 
 function applyTF(ticker, tfLabel) {
@@ -1326,24 +1342,41 @@ function applyTF(ticker, tfLabel) {
   let bars = (d.chart_data[cfg.key] || []);
   // Slice to the number of bars for this TF
   bars = bars.slice(-cfg.bars);
-  if (!bars.length) return;
+  if (!bars.length) {
+    console.warn('[chart] applyTF: 0 bars for', ticker, tfLabel, '(key=' + cfg.key + ') — chart will be blank for this TF');
+    return;
+  }
 
-  // Candlestick data
-  const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
-  inst.candleSeries.setData(candles);
+  // Candlestick data. lightweight-charts requires time strictly ascending and
+  // unique; setData throws otherwise, so this is wrapped to surface the cause.
+  try {
+    const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
+    inst.candleSeries.setData(candles);
+  } catch(e) {
+    console.error('[chart] candle setData FAILED', ticker, tfLabel, '— first bar:', bars[0], e);
+    return;
+  }
 
   // Volume
-  const vols = bars.map(b => ({
-    time: b.t, value: b.v,
-    color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
-  }));
-  inst.volSeries.setData(vols);
+  try {
+    const vols = bars.map(b => ({
+      time: b.t, value: b.v,
+      color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
+    }));
+    inst.volSeries.setData(vols);
+  } catch(e) {
+    console.error('[chart] volume setData FAILED', ticker, tfLabel, e);
+  }
 
   // MAs — only show points that have values
-  const m50  = bars.filter(b => b.m50  != null).map(b => ({ time: b.t, value: b.m50  }));
-  const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: b.t, value: b.m200 }));
-  inst.ma50Series.setData(m50);
-  inst.ma200Series.setData(m200);
+  try {
+    const m50  = bars.filter(b => b.m50  != null).map(b => ({ time: b.t, value: b.m50  }));
+    const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: b.t, value: b.m200 }));
+    inst.ma50Series.setData(m50);
+    inst.ma200Series.setData(m200);
+  } catch(e) {
+    console.error('[chart] MA setData FAILED', ticker, tfLabel, e);
+  }
 
   // Add earnings marker if within the visible range
   const ed = d.earnings_date;
@@ -1365,7 +1398,11 @@ function applyTF(ticker, tfLabel) {
     } catch(e) {}
   }
 
-  inst.chart.timeScale().fitContent();
+  try {
+    inst.chart.timeScale().fitContent();
+  } catch(e) {
+    console.error('[chart] fitContent FAILED', ticker, tfLabel, e);
+  }
   chartTFState[ticker] = tfLabel;
 }
 

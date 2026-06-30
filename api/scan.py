@@ -1266,37 +1266,135 @@ function initChart(ticker) {
   const d = scanResults.find(r => r.ticker === ticker);
   if (!d || !d.chart_data) return;
 
-  const chart = LightweightCharts.createChart(el, {
-    autoSize: true, // Let the library handle resizing natively
-    height: 220,
-    layout: { background: { color: '#0f1419' }, textColor: '#475569' },
-    grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
-    crosshair: { mode: 1 },
-    rightPriceScale: { borderColor: '#1e2a35' },
-    timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
-  });
+  try {
+    // 1. Explicit sizing bypasses the zero-width race condition
+    const chartWidth = el.clientWidth || el.parentElement.clientWidth || 700;
+    
+    const chart = LightweightCharts.createChart(el, {
+      width: chartWidth,
+      height: 220,
+      layout: { background: { color: '#0f1419' }, textColor: '#475569' },
+      grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
+      crosshair: { mode: 1 },
+      rightPriceScale: { borderColor: '#1e2a35' },
+      timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
+    });
 
-  const candleSeries = chart.addCandlestickSeries({
-    upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#22c55e', borderDownColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-  });
-  const ma50Series = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-  const ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-  const volSeries = chart.addHistogramSeries({ color: '#1e2a35', priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 }});
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#22c55e', borderDownColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+    });
+    const ma50Series = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    const ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    const volSeries = chart.addHistogramSeries({ color: '#1e2a35', priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 }});
 
-  chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
-  
-  // CRITICAL: Force immediate render. Do not rely entirely on ResizeObserver for first paint.
-  setTimeout(() => {
-      applyTF(ticker, '1D');
-      
-      // Update active button state
-      const bar = document.getElementById('tf-bar-' + ticker);
-      if (bar) {
-          bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
-          const btn1d = bar.querySelector('[data-tf="1D"]');
-          if (btn1d) btn1d.classList.add('active');
-      }
-  }, 50);
+    chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
+    
+    // Auto-resize listener
+    new ResizeObserver(entries => {
+      if (entries.length === 0 || entries[0].target !== el) return;
+      const newRect = entries[0].contentRect;
+      if (newRect.width > 0) chart.applyOptions({ width: newRect.width });
+    }).observe(el);
+
+    // Initial load
+    applyTF(ticker, '1D');
+    
+  } catch (err) {
+    // If initialization fails, print the error visually to the screen
+    el.innerHTML = '<div style="padding:20px; color:#ef4444; font-family:monospace; font-size:12px;">Chart Init Error: ' + err.message + '</div>';
+  }
+}
+
+function applyTF(ticker, tfLabel) {
+  const inst = chartInstances[ticker];
+  const el = document.getElementById('chart-' + ticker);
+  const d = scanResults.find(r => r.ticker === ticker);
+  if (!inst || !d || !d.chart_data) return;
+
+  const cfg = TF_CONFIGS.find(t => t.label === tfLabel);
+  if (!cfg) return;
+
+  try {
+    let rawBars = (d.chart_data[cfg.key] || []);
+    if (!rawBars.length) return; 
+
+    const isIntraday = (cfg.label === '1H' || cfg.label === '4H');
+    
+    // 2. Ironclad Data Sanitization
+    // Sort raw data by Unix timestamp first
+    rawBars.sort((a, b) => a.t - b.t);
+    
+    let processedCandles = [];
+    let processedVols = [];
+    let processedM50 = [];
+    let processedM200 = [];
+    
+    let seenTimes = new Set();
+    let lastTimeMs = 0;
+
+    for (let b of rawBars) {
+        // Skip invalid rows from yfinance
+        if (b.t == null || isNaN(b.o) || b.o == null) continue;
+        
+        let t;
+        let timeMs;
+        
+        if (isIntraday) {
+            t = b.t; // Intraday requires pure Unix timestamp
+            timeMs = b.t * 1000;
+        } else {
+            // Daily requires strict YYYY-MM-DD. Use UTC to prevent browser timezone drift.
+            const date = new Date(b.t * 1000);
+            const y = date.getUTCFullYear();
+            const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+            const day = String(date.getUTCDate()).padStart(2, '0');
+            t = `${y}-${m}-${day}`;
+            timeMs = new Date(t).getTime();
+        }
+
+        // 3. FATAL RULE PREVENTION: Must be strictly increasing and unique
+        if (seenTimes.has(t) || timeMs <= lastTimeMs) continue; 
+        
+        seenTimes.add(t);
+        lastTimeMs = timeMs;
+        
+        processedCandles.push({ time: t, open: b.o, high: b.h, low: b.l, close: b.c });
+        processedVols.push({ time: t, value: b.v || 0, color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)' });
+        if (b.m50 != null) processedM50.push({ time: t, value: b.m50 });
+        if (b.m200 != null) processedM200.push({ time: t, value: b.m200 });
+    }
+
+    // Slice to the UI timeframe length
+    processedCandles = processedCandles.slice(-cfg.bars);
+    processedVols = processedVols.slice(-cfg.bars);
+    processedM50 = processedM50.slice(-cfg.bars);
+    processedM200 = processedM200.slice(-cfg.bars);
+
+    // Set Data
+    inst.candleSeries.setData(processedCandles);
+    inst.volSeries.setData(processedVols);
+    inst.ma50Series.setData(processedM50);
+    inst.ma200Series.setData(processedM200);
+
+    // Volume Profile Overlays
+    if (d.vp && inst.pocLine) {
+        inst.candleSeries.removePriceLine(inst.pocLine);
+        inst.candleSeries.removePriceLine(inst.vahLine);
+        inst.candleSeries.removePriceLine(inst.valLine);
+    }
+    if (d.vp) {
+        inst.pocLine = inst.candleSeries.createPriceLine({ price: d.vp.poc, color: '#a78bfa', lineWidth: 2, lineStyle: 0 });
+        inst.vahLine = inst.candleSeries.createPriceLine({ price: d.vp.vah, color: '#3b82f6', lineWidth: 1, lineStyle: 1 });
+        inst.valLine = inst.candleSeries.createPriceLine({ price: d.vp.val, color: '#3b82f6', lineWidth: 1, lineStyle: 1 });
+    }
+
+    inst.chart.timeScale().fitContent();
+    chartTFState[ticker] = tfLabel;
+    
+  } catch (err) {
+    // If data mapping fails, print the exact JS error over the canvas
+    if (el) el.innerHTML = `<div style="padding:20px; color:#ef4444; font-family:monospace; font-size:12px; z-index:99; position:relative;">Data Error (${tfLabel}): ${err.message}</div>`;
+  }
 }
 
 function applyTF(ticker, tfLabel) {

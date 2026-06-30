@@ -409,7 +409,201 @@ def fetch_chart(ticker, rng, interval):
             "visible_from": visible_from, "visible_to": last_t}
 
 
-def fetch_options(ticker):
+# ══════════════════════════════════════════════════════════════════════════════
+#  TRADE SCORING LAYER  (deterministic, auditable, reusable by the pipeline)
+#
+#  IMPORTANT: the weights below are SENSIBLE STARTING POINTS, not validated.
+#  They have NOT been back-tested against the SA validation dataset. Treat the
+#  letter grades as a structured summary of the existing signals, not as a
+#  proven edge. Tune the weights, then validate against real outcomes before
+#  relying on them.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _clamp(x, lo=0.0, hi=100.0):
+    try:
+        return max(lo, min(hi, float(x)))
+    except (TypeError, ValueError):
+        return lo
+
+
+def grade_letter(score):
+    if score is None:
+        return "N/A"
+    if score >= 80: return "A"
+    if score >= 68: return "B"
+    if score >= 55: return "C"
+    if score >= 40: return "D"
+    return "F"
+
+
+def compute_fundamental_score(pe, pb, ps, ev_ebit, gross_margin, fcf_yield, roic, rev_growth):
+    """0-100 blend of valuation cheapness (60%) and quality (40%).
+    Returns None if there is essentially no fundamental data."""
+    val_pts, val_w = 0.0, 0.0
+    # cheapness: map each multiple to 0-100 (cheaper = higher) against the
+    # screener's own thresholds (cheap / expensive boundaries from knowledge_1).
+    def cheap(v, cheap_th, exp_th):
+        if v is None or v <= 0:
+            return None
+        if v <= cheap_th:  return 100.0
+        if v >= exp_th:    return 0.0
+        return (exp_th - v) / (exp_th - cheap_th) * 100.0
+    for v, c, e, w in [(pe, 15, 35, 1.0), (pb, 2, 10, 0.7),
+                       (ps, 2, 10, 0.7), (ev_ebit, 12, 30, 1.0)]:
+        s = cheap(v, c, e)
+        if s is not None:
+            val_pts += s * w; val_w += w
+    val_score = (val_pts / val_w) if val_w > 0 else None
+
+    qual_pts, qual_w = 0.0, 0.0
+    if gross_margin is not None:
+        qual_pts += _clamp(gross_margin / 60.0 * 100) * 1.0; qual_w += 1.0   # 60%+ = full
+    if fcf_yield is not None:
+        qual_pts += _clamp(fcf_yield / 5.0 * 100) * 1.0; qual_w += 1.0       # 5%+ = full
+    if roic is not None:
+        qual_pts += _clamp(roic / 20.0 * 100) * 0.8; qual_w += 0.8          # 20%+ = full
+    if rev_growth is not None:
+        qual_pts += _clamp((rev_growth + 10) / 40.0 * 100) * 0.6; qual_w += 0.6  # -10%..+30%
+    qual_score = (qual_pts / qual_w) if qual_w > 0 else None
+
+    if val_score is None and qual_score is None:
+        return None
+    if val_score is None:  return round(qual_score, 0)
+    if qual_score is None: return round(val_score, 0)
+    return round(0.60 * val_score + 0.40 * qual_score, 0)
+
+
+def premium_score(iv_rank, iv_hv):
+    """Premium richness 0-100. Blends IV rank and IV/HV when available."""
+    parts = []
+    if iv_rank is not None:
+        parts.append(_clamp(iv_rank))
+    if iv_hv is not None:
+        # IV/HV: 0.7x -> 0, 1.0x -> ~38, 1.5x -> 100. >1 means options rich vs realized.
+        parts.append(_clamp((iv_hv - 0.7) / (1.5 - 0.7) * 100))
+    if not parts:
+        return 50.0
+    return sum(parts) / len(parts)
+
+
+def _g(ctx, key, default):
+    v = ctx.get(key) if ctx else None
+    return default if v is None else v
+
+
+def compute_trade_grades(ctx, opt):
+    """Returns {sell_put, wheel, buy_shares, sell_call} each {score, grade, reasons}.
+    ctx = scan-level scalars; opt = options-level scalars."""
+    ctx = ctx or {}
+    opt = opt or {}
+    trend   = _clamp(_g(ctx, "trend_score", 50))
+    crash   = _clamp(_g(ctx, "crash_score", 50))
+    support = _clamp(_g(ctx, "support_strength", 30))
+    resist  = _clamp(_g(ctx, "resistance_strength", 30))
+    fund    = _g(ctx, "fundamental_score", None)
+    fund_v  = _clamp(fund if fund is not None else 50)
+    rsi     = _g(ctx, "rsi", 50)
+    ma_dist = _g(ctx, "ma_distance", 0)        # % above 200MA
+    cmf     = _g(ctx, "cmf", 0)
+    obv     = _g(ctx, "obv_roc", 0)
+    drawdown = _g(ctx, "drawdown", 0)          # % from 52w high (<=0)
+
+    liq  = _clamp(_g(opt, "liquidity_score", 50))
+    prem = premium_score(opt.get("iv_rank"), opt.get("iv_hv"))
+    ed   = opt.get("earnings_days")
+    risk_free = _clamp(100 - crash)            # lower crash = safer timing
+
+    # flow component 0-100
+    flow = 50 + (cmf * 200) + (obv * 1.5)
+    flow = _clamp(flow)
+    # MA-structure component for share buying (above 200MA good, extended capped)
+    ma_struct = _clamp(50 + ma_dist * 2.0)
+
+    # ── Sell Put ──────────────────────────────────────────────────────────────
+    sp = (0.25 * trend + 0.20 * support + 0.20 * prem + 0.15 * liq + 0.20 * risk_free)
+    sp_reasons = ["trend %d" % trend, "support %d" % support,
+                  "premium %d" % prem, "liquidity %d" % liq]
+    if crash >= 60:
+        sp = min(sp, 35.0); sp_reasons.append("CrashScore %d gate (no puts)" % crash)
+    if ed is not None and 0 <= ed <= 45:
+        sp = min(sp, 45.0); sp_reasons.append("earnings in %d d" % ed)
+
+    # ── Wheel (sell put, but willing to own -> fundamentals matter) ───────────
+    wh = 0.78 * sp + 0.22 * fund_v
+    wh_reasons = list(sp_reasons) + ["fundamentals %d" % fund_v]
+    if crash >= 60: wh = min(wh, 35.0)
+    if ed is not None and 0 <= ed <= 45: wh = min(wh, 45.0)
+
+    # ── Buy Shares ────────────────────────────────────────────────────────────
+    bs = (0.30 * trend + 0.28 * fund_v + 0.22 * ma_struct + 0.20 * flow)
+    bs_reasons = ["trend %d" % trend, "fundamentals %d" % fund_v,
+                  "MA structure %d" % ma_struct, "flow %d" % flow]
+    if crash >= 70:
+        bs = min(bs, 45.0); bs_reasons.append("blow-off risk (CrashScore %d)" % crash)
+
+    # ── Sell Call (best when overhead resistance + rich IV + flat/weak trend) ──
+    trend_inv = _clamp(100 - trend)
+    overbought = _clamp((rsi - 50) * 2)        # RSI>50 adds
+    sc = (0.35 * resist + 0.25 * prem + 0.20 * trend_inv + 0.10 * liq + 0.10 * overbought)
+    sc_reasons = ["resistance %d" % resist, "premium %d" % prem,
+                  "trend-fade %d" % trend_inv, "liquidity %d" % liq]
+
+    def pack(score, reasons):
+        s = round(_clamp(score), 0)
+        return {"score": s, "grade": grade_letter(s), "reasons": reasons}
+
+    return {
+        "sell_put":   pack(sp, sp_reasons),
+        "wheel":      pack(wh, wh_reasons),
+        "buy_shares": pack(bs, bs_reasons),
+        "sell_call":  pack(sc, sc_reasons),
+    }
+
+
+def compute_liquidity(all_puts, all_calls, spot, total_chain_oi, avg_volume, today_chain_vol=None):
+    """LiquidityScore 0-100 from underlying volume, chain OI, bid/ask spread, and
+    current chain volume. Single-ticker thresholds (handoff item 1)."""
+    contracts = [c for c in (all_puts + all_calls) if c.get("bid", 0) > 0 and c.get("ask", 0) > 0]
+    # spread % over the 10 contracts nearest the money
+    near = sorted(contracts, key=lambda c: abs(c.get("strike", 0) - spot))[:10] if spot else contracts[:10]
+    spreads, widths = [], []
+    for c in near:
+        b, a = c["bid"], c["ask"]
+        mid = (a + b) / 2.0
+        if mid > 0:
+            spreads.append((a - b) / mid)
+            widths.append(a - b)
+    import statistics
+    med_spread = statistics.median(spreads) if spreads else None
+    med_width  = statistics.median(widths) if widths else None
+    if today_chain_vol is None:
+        today_chain_vol = sum(c.get("volume", 0) or 0 for c in (all_puts + all_calls))
+
+    def norm(v, lo, hi):
+        if v is None: return 0.5
+        if v <= lo: return 0.0
+        if v >= hi: return 1.0
+        return (v - lo) / (hi - lo)
+
+    n_vol    = norm(avg_volume, 100_000, 5_000_000)
+    n_oi     = norm(total_chain_oi, 2_000, 200_000)
+    n_spread = 1.0 - norm(med_spread, 0.02, 0.20) if med_spread is not None else 0.5  # tighter=better
+    n_today  = norm(today_chain_vol, 500, 50_000)
+
+    score = (0.30 * n_vol + 0.30 * n_oi + 0.25 * n_spread + 0.15 * n_today) * 100
+    score = round(_clamp(score), 0)
+    return {
+        "score": score,
+        "grade": grade_letter(score),
+        "avg_volume": int(avg_volume) if avg_volume else None,
+        "total_chain_oi": int(total_chain_oi) if total_chain_oi else None,
+        "median_spread_pct": round(med_spread * 100, 1) if med_spread is not None else None,
+        "median_spread_width": round(med_width, 2) if med_width is not None else None,
+        "today_chain_volume": int(today_chain_vol) if today_chain_vol else 0,
+    }
+
+
+def fetch_options(ticker, ctx=None):
     """Fetch full options chain for all expirations in 27-45 DTE window."""
     import datetime
 
@@ -665,6 +859,48 @@ def fetch_options(ticker):
         unusual_oi = None
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── IV/HV ratio, liquidity score, and trade grades ───────────────────────
+    hv30 = avg_volume = atm_iv = iv_hv = None
+    try:
+        _h = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True, progress=False)
+        if isinstance(_h.columns, pd.MultiIndex):
+            _h.columns = _h.columns.get_level_values(0)
+        _h = _h.dropna(subset=["Close"])
+        if len(_h) > 31:
+            _lr = np.log(_h["Close"] / _h["Close"].shift(1)).dropna()
+            hv30 = round(float(_lr.tail(30).std() * np.sqrt(252)) * 100, 1)
+            avg_volume = float(_h["Volume"].tail(20).mean())
+    except Exception:
+        pass
+    try:
+        _atm = min((c for c in (all_puts + all_calls) if c.get("impliedVolatility", 0) > 0),
+                   key=lambda c: abs(c["strike"] - spot)) if spot else None
+        atm_iv = round(_atm["impliedVolatility"] * 100, 1) if _atm else None
+    except Exception:
+        atm_iv = None
+    if atm_iv and hv30 and hv30 > 0:
+        iv_hv = round(atm_iv / hv30, 2)
+
+    _total_oi = unusual_oi["total_chain_oi"] if unusual_oi else 0
+    try:
+        liquidity = compute_liquidity(all_puts, all_calls, spot, _total_oi, avg_volume)
+    except Exception:
+        liquidity = None
+
+    grades = None
+    if ctx is not None:
+        try:
+            _opt = {
+                "iv_rank": iv_rank,
+                "iv_hv": iv_hv,
+                "liquidity_score": liquidity["score"] if liquidity else None,
+                "earnings_days": ctx.get("earnings_days"),
+                "pc_oi_ratio": unusual_oi["pc_oi_ratio"] if unusual_oi else None,
+            }
+            grades = compute_trade_grades(ctx, _opt)
+        except Exception:
+            grades = None
+
     return {
         "spot": spot,
         "expirations": expirations_meta,
@@ -674,6 +910,12 @@ def fetch_options(ticker):
         "skew": skew,
         "iv_rank": iv_rank,
         "unusual_oi": unusual_oi,
+        "hv30": hv30,
+        "atm_iv": atm_iv,
+        "iv_hv": iv_hv,
+        "avg_volume": int(avg_volume) if avg_volume else None,
+        "liquidity": liquidity,
+        "grades": grades,
     }
 
 
@@ -939,7 +1181,34 @@ def scan_ticker(ticker):
         confluences = []
 
     # Earnings date
+    # ── Scalars feeding the trade-grade layer (passed to the options endpoint) ──
+    _cur_px = float(last["Close"])
+    def _conf_strength(role):
+        best = 0.0
+        for _c in confluences:
+            if _c.get("role") != role:
+                continue
+            _d = abs(_c.get("dist_pct", 999))
+            if _d > 15.0:
+                continue
+            _src = min(_c.get("strength", 0), 4) / 4.0
+            _prox = max(0.0, 1.0 - _d / 15.0)
+            _s = (0.7 * _src + 0.3 * _prox) * 100
+            if _s > best:
+                best = _s
+        return round(best, 1)
+    support_strength = _conf_strength("support")
+    resistance_strength = _conf_strength("resistance")
+    fundamental_score = compute_fundamental_score(
+        pe, pb, ps, ev_ebit,
+        gm * 100 if gm else None,
+        fcf_yield * 100 if fcf_yield else None,
+        roic,
+        rev_growth * 100 if rev_growth else None,
+    )
+
     earnings_date = None
+    earnings_days = None
     earnings_within_window = False
     try:
         import datetime as _dt
@@ -959,7 +1228,8 @@ def scan_ticker(ticker):
                 _today = _dt.date.today()
                 if _ed >= _today:
                     earnings_date = str(_ed)
-                    earnings_within_window = (_ed - _today).days <= 45
+                    earnings_days = (_ed - _today).days
+                    earnings_within_window = earnings_days <= 45
     except Exception:
         pass
 
@@ -1069,6 +1339,10 @@ def scan_ticker(ticker):
         "confluences": confluences,
         "earnings_date": earnings_date,
         "earnings_in_window": earnings_within_window,
+        "earnings_days": earnings_days,
+        "support_strength": support_strength,
+        "resistance_strength": resistance_strength,
+        "fundamental_score": fundamental_score,
         "chart_data": chart_data,
     }
 
@@ -1197,6 +1471,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chart-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #475569; background: #0f1419; z-index: 3; }
   .vp-overlay { position: absolute; top: 0; right: 0; pointer-events: none; z-index: 2; }
   .legend-vp { color: #475569; }
+  .grades-panel { background:#0f1419; border:1px solid #1e2a35; border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+  .grades-title { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
+  .grades-note { text-transform:none; letter-spacing:0; color:#475569; font-size:9px; margin-left:6px; }
+  .grade-row { display:flex; align-items:center; gap:8px; padding:3px 0; }
+  .grade-pill { width:20px; height:20px; border-radius:4px; color:#0a0e13; font-weight:700; font-size:11px; display:flex; align-items:center; justify-content:center; flex:0 0 auto; }
+  .grade-name { width:78px; font-size:11px; color:#e2e8f0; flex:0 0 auto; }
+  .grade-bar { flex:1 1 auto; height:6px; background:#1e2a35; border-radius:3px; overflow:hidden; min-width:40px; }
+  .grade-bar-fill { height:100%; border-radius:3px; }
+  .grade-score { width:24px; text-align:right; font-size:11px; color:#94a3b8; flex:0 0 auto; }
+  .grade-reasons { flex:2 1 auto; font-size:9px; color:#475569; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .badge-row { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; align-items:center; }
+  .mini-badge { font-size:10px; padding:3px 8px; border:1px solid #334155; border-radius:10px; font-weight:600; }
+  .mini-badge-dim { font-size:10px; color:#475569; padding:3px 0; }
   .empty-state { text-align: center; padding: 80px 0 60px; }
   .empty-state p { color: #334155; font-size: 14px; }
   .empty-state .hint-tickers { color: #475569; font-size: 12px; margin-top: 8px; }
@@ -1695,12 +1982,16 @@ function renderVolumeBadge(d) {
 function renderEarningsFlag(d) {
   if (!d.earnings_date) return '';
   const inWindow = d.earnings_in_window;
+  const days = d.earnings_days;
+  const soon = days != null && days <= 7;
   const bg = inWindow ? 'background:#7c2d12;border:1px solid #dc2626' : 'background:#1e2a35;border:1px solid #334155';
   const icon = inWindow ? '⚠️ ' : '📅 ';
+  const inDays = days != null ? ' (in ' + days + ' day' + (days === 1 ? '' : 's') + ')' : '';
   const label = inWindow
-    ? 'EARNINGS ' + d.earnings_date + ' — within options window. Do not sell puts through earnings.'
-    : 'Next earnings: ' + d.earnings_date;
-  return '<div style="' + bg + ';border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + (inWindow ? '#fca5a5' : '#94a3b8') + '">' +
+    ? 'EARNINGS ' + d.earnings_date + inDays + ' — within options window. Do not sell puts through earnings.'
+    : 'Next earnings: ' + d.earnings_date + inDays;
+  const col = inWindow ? '#fca5a5' : (soon ? '#fbbf24' : '#94a3b8');
+  return '<div style="' + bg + ';border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + col + '">' +
     icon + label + '</div>';
 }
 
@@ -1867,7 +2158,11 @@ async function loadOptions(ticker, crashScore, btnEl) {
   const el = document.getElementById('opts-' + ticker);
   el.innerHTML = '<div class="c-dim" style="font-size:12px;padding:8px 0">Fetching chain...</div>';
   try {
-    const res = await fetch('/api/scan?options=' + encodeURIComponent(ticker));
+    const d = scanResults.find(function(r){ return r.ticker === ticker; }) || {};
+    const ctx = { trend_score:d.trend_score, crash_score:d.crash_score, support_strength:d.support_strength, resistance_strength:d.resistance_strength, fundamental_score:d.fundamental_score, rsi:d.rsi, ma_distance:d.ma_distance, drawdown:d.drawdown, cmf:d.cmf, obv_roc:d.obv_roc, earnings_days:d.earnings_days };
+    let ctxParam = '';
+    try { ctxParam = '&ctx=' + encodeURIComponent(btoa(JSON.stringify(ctx))); } catch(e) {}
+    const res = await fetch('/api/scan?options=' + encodeURIComponent(ticker) + ctxParam);
     const data = await res.json();
     if (data.error) { el.innerHTML = '<div class="options-warn">'+data.error+'</div>'; btnEl.disabled=false; btnEl.textContent='Retry'; return; }
     optionsCache[ticker] = data;
@@ -1880,6 +2175,49 @@ async function loadOptions(ticker, crashScore, btnEl) {
   }
 }
 
+function gradeColor(g){
+  return g==='A'?'#22c55e':g==='B'?'#86efac':g==='C'?'#f59e0b':g==='D'?'#fb923c':g==='F'?'#ef4444':'#475569';
+}
+function renderTradeGrades(data){
+  const g = data.grades;
+  if (!g) return '';
+  const order = [['Sell Put',g.sell_put],['Wheel',g.wheel],['Buy Shares',g.buy_shares],['Sell Call',g.sell_call]];
+  const rows = order.map(function(p){
+    const name=p[0], v=p[1];
+    if(!v) return '';
+    const col = gradeColor(v.grade);
+    return '<div class="grade-row">'+
+      '<div class="grade-pill" style="background:'+col+'">'+v.grade+'</div>'+
+      '<div class="grade-name">'+name+'</div>'+
+      '<div class="grade-bar"><div class="grade-bar-fill" style="width:'+v.score+'%;background:'+col+'"></div></div>'+
+      '<div class="grade-score">'+v.score+'</div>'+
+      '<div class="grade-reasons">'+(v.reasons||[]).slice(0,3).join(' \u00b7 ')+'</div>'+
+    '</div>';
+  }).join('');
+  return '<div class="grades-panel">'+
+    '<div class="grades-title">Trade Grades <span class="grades-note">starting weights, not yet validated against outcomes</span></div>'+
+    rows+'</div>';
+}
+function renderLiqIVHV(data){
+  let out='';
+  const L=data.liquidity;
+  if(L){
+    const c=gradeColor(L.grade);
+    out += '<span class="mini-badge" style="border-color:'+c+';color:'+c+'">Liquidity '+L.grade+' '+L.score+'</span>';
+    if(L.median_spread_pct!=null) out+='<span class="mini-badge-dim">spread '+L.median_spread_pct+'%</span>';
+    if(L.avg_volume) out+='<span class="mini-badge-dim">avg vol '+(L.avg_volume/1e6).toFixed(1)+'M</span>';
+    if(L.total_chain_oi) out+='<span class="mini-badge-dim">chain OI '+(L.total_chain_oi/1e3).toFixed(0)+'k</span>';
+  }
+  if(data.iv_hv!=null){
+    const r=data.iv_hv;
+    const col = r>=1.2?'#22c55e':r>=0.9?'#94a3b8':'#ef4444';
+    const lbl = r>=1.2?'options rich vs realized':r>=0.9?'fairly priced':'options cheap vs realized';
+    const detail = (data.atm_iv!=null&&data.hv30!=null)?' (IV '+data.atm_iv+'% / HV '+data.hv30+'%)':'';
+    out += '<span class="mini-badge" style="border-color:'+col+';color:'+col+'">IV/HV '+r.toFixed(2)+'x</span>'+
+      '<span class="mini-badge-dim">'+lbl+detail+'</span>';
+  }
+  return out ? '<div class="badge-row">'+out+'</div>' : '';
+}
 function buildOptionsTabs(data, crashScore, ticker) {
   const exps = data.expirations || [];
   const expTabs = exps.map((e,i) => '<div class="opts-tab'+(i===0?' active':'')+'" onclick="activateTab(\''+ticker+'\',\'puts\','+i+');this.parentNode.querySelectorAll(\'.opts-tab\').forEach((t,j)=>t.classList.toggle(\'active\',j==='+i+'))">'+e.exp+' ('+e.dte+'d)</div>').join('');
@@ -1968,7 +2306,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
   const putsTable = buildOptsTable(data.puts, false, crashScore);
   const callsTable = buildOptsTable(data.calls, true, crashScore);
 
-  return imBanner + skewBanner + ivRankBanner + unusualOISection +
+  return renderTradeGrades(data) + renderLiqIVHV(data) + imBanner + skewBanner + ivRankBanner + unusualOISection +
     '<div class="opts-tabs" id="exp-tabs-'+ticker+'">' + expTabs + '</div>' +
     '<div style="display:flex;gap:8px;margin-bottom:8px">' +
       '<button class="opts-tab" style="background:#0f1419;border:0.5px solid #1e2a35;border-radius:4px" onclick="switchSide(\''+ticker+'\',\'puts\',this)" id="side-puts-'+ticker+'">Sell Puts</button>' +
@@ -2290,8 +2628,15 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         if options_ticker:
+            ctx = None
+            _ctx_raw = params.get("ctx", [""])[0]
+            if _ctx_raw:
+                try:
+                    ctx = json.loads(base64.b64decode(_ctx_raw).decode())
+                except Exception:
+                    ctx = None
             try:
-                result = fetch_options(options_ticker)
+                result = fetch_options(options_ticker, ctx=ctx)
             except Exception as e:
                 result = {"error": str(e)}
             self.wfile.write(json.dumps(result).encode())

@@ -1267,11 +1267,11 @@ function initChart(ticker) {
   if (!d || !d.chart_data) return;
 
   const chart = LightweightCharts.createChart(el, {
-    width:  el.offsetWidth || 780,
+    autoSize: true,
     height: 220,
     layout: { background: { color: '#0f1419' }, textColor: '#475569' },
     grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    crosshair: { mode: 1 },
     rightPriceScale: { borderColor: '#1e2a35' },
     timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
   });
@@ -1297,12 +1297,25 @@ function initChart(ticker) {
 
   chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
   chartTFState[ticker] = '1D';
-  applyTF(ticker, '1D');
 
-  // Responsive resize
-  const ro = new ResizeObserver(function() {
-    if (chartInstances[ticker]) {
-      chartInstances[ticker].chart.applyOptions({ width: el.offsetWidth });
+  // Resize observer — also triggers first data load once element has real dimensions
+  const ro = new ResizeObserver(function(entries) {
+    if (!chartInstances[ticker]) return;
+    const w = entries[0].contentRect.width;
+    if (w > 0) {
+      chartInstances[ticker].chart.applyOptions({ width: w });
+      // Load data on first resize (when element gets real width)
+      if (!chartInstances[ticker]._loaded) {
+        chartInstances[ticker]._loaded = true;
+        applyTF(ticker, '1D');
+        // Sync active button to 1D
+        const bar = document.getElementById('tf-bar-' + ticker);
+        if (bar) {
+          bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+          const btn1d = bar.querySelector('[data-tf="1D"]');
+          if (btn1d) btn1d.classList.add('active');
+        }
+      }
     }
   });
   ro.observe(el);

@@ -284,6 +284,91 @@ def fetch_volume_profile(ticker, tf="1d"):
 
 # ── Options chain ─────────────────────────────────────────────────────────────
 
+# ── Yahoo-style chart endpoint: range + interval, lazy-loaded per card ────────
+CHART_RANGE_PERIOD = {
+    "1D": "1d", "5D": "5d", "1M": "1mo", "3M": "3mo", "6M": "6mo",
+    "YTD": "ytd", "1Y": "1y", "5Y": "5y", "All": "max",
+}
+CHART_RANGE_INTERVALS = {
+    "1D":  ["1m", "2m", "5m"],
+    "5D":  ["1m", "5m", "15m", "30m"],
+    "1M":  ["15m", "30m", "1h", "1d"],
+    "3M":  ["1h", "1d"],
+    "6M":  ["1h", "1d"],
+    "YTD": ["1d", "1wk"],
+    "1Y":  ["1d", "1wk"],
+    "5Y":  ["1d", "1wk", "1mo"],
+    "All": ["1wk", "1mo"],
+}
+CHART_RANGE_DEFAULT_IV = {
+    "1D": "1m", "5D": "5m", "1M": "30m", "3M": "1d", "6M": "1d",
+    "YTD": "1d", "1Y": "1d", "5Y": "1wk", "All": "1mo",
+}
+
+
+def fetch_chart(ticker, rng, interval):
+    """Yahoo-style chart data: a date range at a chosen candle interval.
+    Range and interval are independent; interval is validated against the
+    range's allowed list (Yahoo's intraday-history limits) and falls back to
+    the range default if not permitted. MAs are computed on the displayed
+    interval, matching Yahoo's behavior."""
+    rng = rng if rng in CHART_RANGE_PERIOD else "1Y"
+    allowed = CHART_RANGE_INTERVALS[rng]
+    if interval not in allowed:
+        interval = CHART_RANGE_DEFAULT_IV[rng]
+    period = CHART_RANGE_PERIOD[rng]
+    yf_iv = "60m" if interval == "1h" else interval
+
+    try:
+        df = yf.download(ticker, period=period, interval=yf_iv,
+                         auto_adjust=True, progress=False)
+    except Exception as e:
+        return {"error": "Download failed: %s" % e}
+
+    if df is None or len(df) == 0:
+        return {"error": "No data for %s (%s / %s)" % (ticker, rng, interval)}
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df.dropna(subset=["Close"])
+    n = len(df)
+    if n == 0:
+        return {"error": "No data for %s (%s / %s)" % (ticker, rng, interval)}
+
+    close = df["Close"]
+    ma50_v  = close.rolling(min(50, n)).mean().values
+    ma200_v = close.rolling(min(200, n)).mean().values
+    o_v = df["Open"].values
+    h_v = df["High"].values
+    l_v = df["Low"].values
+    c_v = close.values
+    v_v = df["Volume"].values
+    idx = df.index
+
+    intraday = interval not in ("1d", "1wk", "1mo")
+    bars = []
+    for i in range(n):
+        try:
+            t_unix = int(pd.Timestamp(idx[i]).timestamp())
+            m50 = float(ma50_v[i])
+            m200 = float(ma200_v[i])
+            vol = float(v_v[i])
+            bars.append({
+                "t":   t_unix,
+                "o":   round(float(o_v[i]), 4),
+                "h":   round(float(h_v[i]), 4),
+                "l":   round(float(l_v[i]), 4),
+                "c":   round(float(c_v[i]), 4),
+                "v":   int(vol) if not math.isnan(vol) else 0,
+                "m50":  round(m50, 4)  if not math.isnan(m50)  else None,
+                "m200": round(m200, 4) if not math.isnan(m200) else None,
+            })
+        except Exception:
+            pass
+
+    return {"ticker": ticker.upper(), "range": rng, "interval": interval,
+            "intraday": intraday, "bars": bars}
+
+
 def fetch_options(ticker):
     """Fetch full options chain for all expirations in 27-45 DTE window."""
     import datetime
@@ -1062,6 +1147,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chart-legend { display: flex; gap: 12px; margin-top: 4px; font-size: 10px; color: #475569; }
   .legend-item { display: flex; align-items: center; gap: 4px; }
   .legend-dot { width: 12px; height: 2px; border-radius: 1px; }
+  .chart-controls { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  .chart-range-bar { display: flex; gap: 4px; flex-wrap: wrap; }
+  .rng-btn { background: #0f1419; border: 0.5px solid #1e2a35; color: #475569; padding: 3px 9px; border-radius: 4px; font-size: 10px; cursor: pointer; font-family: inherit; transition: all 0.12s; }
+  .rng-btn:hover { color: #94a3b8; border-color: #2a3a4e; }
+  .rng-btn.active { background: #1e2a35; color: #22c55e; border-color: #22c55e; }
+  .chart-interval { font-size: 10px; color: #475569; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .iv-select { background: #0f1419; border: 0.5px solid #1e2a35; color: #94a3b8; padding: 3px 6px; border-radius: 4px; font-size: 10px; font-family: inherit; cursor: pointer; }
+  .chart-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #475569; background: #0f1419; z-index: 3; }
+  .vp-overlay { position: absolute; top: 0; right: 0; pointer-events: none; z-index: 2; }
+  .legend-vp { color: #475569; }
   .empty-state { text-align: center; padding: 80px 0 60px; }
   .empty-state p { color: #334155; font-size: 14px; }
   .empty-state .hint-tickers { color: #475569; font-size: 12px; margin-top: 8px; }
@@ -1233,67 +1328,78 @@ function renderCard(d) {
 
 // ── Chart rendering ──────────────────────────────────────────────────────────
 
-const chartInstances = {};   // ticker → { chart, candleSeries, vol, ma50, ma200 }
-const chartTFState   = {};   // ticker → current TF string
+const chartInstances = {};   // ticker -> instance object
+const chartState     = {};   // ticker -> { range, interval }
 
-// Timeframe config: [label, key in chart_data, bars to show]
-const TF_CONFIGS = [
-  { label: "4H",  key: "h4",     bars: 120  },
-  { label: "1D",  key: "daily",  bars: 30   },
-  { label: "1W",  key: "daily",  bars: 5    },   // ~5 trading days
-  { label: "1M",  key: "daily",  bars: 21   },
-  { label: "3M",  key: "daily",  bars: 63   },
-  { label: "6M",  key: "daily",  bars: 126  },
-  { label: "1Y",  key: "daily",  bars: 252  },
-  { label: "2Y",  key: "weekly", bars: 104  },
-];
+// Yahoo-style range -> allowed intervals (mirrors server fetch_chart gating).
+const RANGE_INTERVALS = {
+  '1D':  ['1m','2m','5m'],
+  '5D':  ['1m','5m','15m','30m'],
+  '1M':  ['15m','30m','1h','1d'],
+  '3M':  ['1h','1d'],
+  '6M':  ['1h','1d'],
+  'YTD': ['1d','1wk'],
+  '1Y':  ['1d','1wk'],
+  '5Y':  ['1d','1wk','1mo'],
+  'All': ['1wk','1mo'],
+};
+const RANGE_DEFAULT_IV = {
+  '1D':'1m', '5D':'5m', '1M':'30m', '3M':'1d', '6M':'1d',
+  'YTD':'1d', '1Y':'1d', '5Y':'1wk', 'All':'1mo',
+};
+const RANGE_ORDER   = ['1D','5D','1M','3M','6M','YTD','1Y','5Y','All'];
+const DEFAULT_RANGE = '1Y';
 
 function renderChart(d) {
-  const cd = d.chart_data;
-  if (!cd || (!cd.daily || !cd.daily.length)) return '';
-  const tfButtons = TF_CONFIGS.map(function(tf) {
-    const active = tf.label === '1D' ? ' active' : '';
-    return '<button class="tf-btn' + active + '" data-ticker="' + d.ticker + '" data-tf="' + tf.label + '" onclick="setChartTFBtn(this)">' + tf.label + '</button>';
+  const rngButtons = RANGE_ORDER.map(function(r) {
+    const active = r === DEFAULT_RANGE ? ' active' : '';
+    return '<button class="rng-btn' + active + '" data-ticker="' + d.ticker + '" data-range="' + r + '" onclick="onRangeChange(this)">' + r + '</button>';
   }).join('');
   return '<div class="chart-section">' +
-    '<div class="chart-tf-bar" id="tf-bar-' + d.ticker + '">' + tfButtons + '</div>' +
-    '<div class="chart-wrap" id="chart-' + d.ticker + '"></div>' +
+    '<div class="chart-controls">' +
+      '<div class="chart-range-bar" id="rng-bar-' + d.ticker + '">' + rngButtons + '</div>' +
+      '<div class="chart-interval">Interval: ' +
+        '<select class="iv-select" id="iv-sel-' + d.ticker + '" data-ticker="' + d.ticker + '" onchange="onIntervalChange(this)"></select>' +
+      '</div>' +
+    '</div>' +
+    '<div class="chart-wrap" id="chart-' + d.ticker + '"><div class="chart-loading" id="chart-loading-' + d.ticker + '">Loading chart...</div></div>' +
     '<div class="chart-legend">' +
       '<div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>50 MA</div>' +
       '<div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>200 MA</div>' +
+      '<div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div>POC</div>' +
+      '<div class="legend-item legend-vp">Vol profile (visible range, right)</div>' +
     '</div>' +
   '</div>';
+}
+
+function buildIntervalOptions(ticker, range, preferred) {
+  const sel = document.getElementById('iv-sel-' + ticker);
+  const allowed = RANGE_INTERVALS[range] || ['1d'];
+  const chosen = (preferred && allowed.indexOf(preferred) !== -1) ? preferred : RANGE_DEFAULT_IV[range];
+  if (sel) {
+    sel.innerHTML = allowed.map(function(iv) {
+      return '<option value="' + iv + '"' + (iv === chosen ? ' selected' : '') + '>' + iv + '</option>';
+    }).join('');
+  }
+  return chosen;
 }
 
 function initChart(ticker, _attempt) {
   _attempt = _attempt || 0;
   const el = document.getElementById('chart-' + ticker);
-  // Container may not be in the DOM yet — retry, but cap it so we never spin forever.
   if (!el) {
     if (_attempt < 30) { requestAnimationFrame(function(){ initChart(ticker, _attempt + 1); }); }
-    else { console.warn('[chart] container #chart-' + ticker + ' never appeared after 30 frames'); }
+    else { console.warn('[chart] container #chart-' + ticker + ' never appeared'); }
     return;
   }
   if (chartInstances[ticker]) return;
-  const d = scanResults.find(r => r.ticker === ticker);
-  if (!d || !d.chart_data) { console.warn('[chart] no chart_data on scanResults for', ticker); return; }
-
-  // ── Diagnostics (remove once the render is confirmed working) ──────────────
-  console.log('[chart] init', ticker,
-    '| typeof LightweightCharts =', typeof LightweightCharts,
-    '| daily bars =', (d.chart_data.daily ? d.chart_data.daily.length : 'n/a'),
-    '| container =', el.clientWidth + 'x' + el.clientHeight);
-
   if (typeof LightweightCharts === 'undefined') {
-    console.error('[chart] LightweightCharts global is undefined — the CDN script did not load (or loaded after this ran).');
+    console.error('[chart] LightweightCharts global is undefined - library did not load.');
     return;
   }
 
   let chart;
   try {
-    // autoSize lets lightweight-charts read the container size itself via a
-    // ResizeObserver. This is the library's documented fix for the
-    // "container not painted yet" problem — preferred over passing width/height.
     chart = LightweightCharts.createChart(el, {
       autoSize: true,
       layout: { background: { color: '#0f1419' }, textColor: '#475569' },
@@ -1302,10 +1408,7 @@ function initChart(ticker, _attempt) {
       rightPriceScale: { borderColor: '#1e2a35' },
       timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
     });
-  } catch(e) {
-    console.error('[chart] createChart() threw for', ticker, e);
-    return;
-  }
+  } catch(e) { console.error('[chart] createChart threw', ticker, e); return; }
 
   let candleSeries, ma50Series, ma200Series, volSeries;
   try {
@@ -1314,117 +1417,195 @@ function initChart(ticker, _attempt) {
       borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
     });
-    ma50Series = chart.addLineSeries({
-      color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-    });
-    ma200Series = chart.addLineSeries({
-      color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-    });
-    volSeries = chart.addHistogramSeries({
-      priceFormat: { type: 'volume' },
-      priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 },
-    });
-  } catch(e) {
-    console.error('[chart] addSeries threw for', ticker, e);
-    return;
-  }
+    ma50Series  = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    volSeries   = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 } });
+  } catch(e) { console.error('[chart] addSeries threw', ticker, e); return; }
 
-  chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
-  chartTFState[ticker] = '1D';
+  // Volume-profile overlay canvas (absolute, on top of the plot area).
+  let vpCanvas = null, vpCtx = null;
+  try {
+    vpCanvas = document.createElement('canvas');
+    vpCanvas.className = 'vp-overlay';
+    el.appendChild(vpCanvas);
+    vpCtx = vpCanvas.getContext('2d');
+  } catch(e) { console.warn('[chart] VP canvas failed', e); }
 
-  // Load default timeframe data immediately
-  applyTF(ticker, '1D');
+  chartInstances[ticker] = {
+    chart: chart, candleSeries: candleSeries, volSeries: volSeries,
+    ma50Series: ma50Series, ma200Series: ma200Series,
+    vpCanvas: vpCanvas, vpCtx: vpCtx, vpBars: null, vpRefPrice: null, vpLastTop: null,
+  };
+  chartState[ticker] = { range: DEFAULT_RANGE, interval: RANGE_DEFAULT_IV[DEFAULT_RANGE] };
+
+  try {
+    const ro = new ResizeObserver(function() { resizeVPCanvas(ticker); drawVP(ticker); });
+    ro.observe(el);
+  } catch(e) {}
+
+  const iv = buildIntervalOptions(ticker, DEFAULT_RANGE, RANGE_DEFAULT_IV[DEFAULT_RANGE]);
+  loadChart(ticker, DEFAULT_RANGE, iv);
+  startVPLoop();
 }
 
-function applyTF(ticker, tfLabel) {
+function onRangeChange(btn) {
+  const ticker = btn.getAttribute('data-ticker');
+  const range  = btn.getAttribute('data-range');
+  const bar = document.getElementById('rng-bar-' + ticker);
+  if (bar) bar.querySelectorAll('.rng-btn').forEach(function(b){ b.classList.remove('active'); });
+  btn.classList.add('active');
+  const prev = chartState[ticker] ? chartState[ticker].interval : null;
+  const iv = buildIntervalOptions(ticker, range, prev);
+  loadChart(ticker, range, iv);
+}
+
+function onIntervalChange(sel) {
+  const ticker = sel.getAttribute('data-ticker');
+  const iv = sel.value;
+  const range = chartState[ticker] ? chartState[ticker].range : DEFAULT_RANGE;
+  loadChart(ticker, range, iv);
+}
+
+async function loadChart(ticker, range, interval) {
   const inst = chartInstances[ticker];
-  const d    = scanResults.find(r => r.ticker === ticker);
-  if (!inst || !d || !d.chart_data) return;
-
-  const cfg  = TF_CONFIGS.find(t => t.label === tfLabel);
-  if (!cfg) return;
-
-  let bars = (d.chart_data[cfg.key] || []);
-  // Slice to the number of bars for this TF
-  bars = bars.slice(-cfg.bars);
-  if (!bars.length) {
-    console.warn('[chart] applyTF: 0 bars for', ticker, tfLabel, '(key=' + cfg.key + ') — chart will be blank for this TF');
-    return;
-  }
-
-  // Candlestick data. lightweight-charts requires time strictly ascending and
-  // unique; setData throws otherwise, so this is wrapped to surface the cause.
+  if (!inst) return;
+  chartState[ticker] = { range: range, interval: interval };
+  const loadingEl = document.getElementById('chart-loading-' + ticker);
+  if (loadingEl) { loadingEl.textContent = 'Loading ' + range + ' / ' + interval + '...'; loadingEl.style.display = 'flex'; }
   try {
-    const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
-    inst.candleSeries.setData(candles);
-  } catch(e) {
-    console.error('[chart] candle setData FAILED', ticker, tfLabel, '— first bar:', bars[0], e);
-    return;
-  }
+    const res = await fetch('/api/scan?chart=' + encodeURIComponent(ticker) + '&range=' + encodeURIComponent(range) + '&interval=' + encodeURIComponent(interval));
+    const data = await res.json();
+    if (data.error) { if (loadingEl) loadingEl.textContent = data.error; console.warn('[chart] load error', ticker, range, interval, data.error); return; }
+    const bars = data.bars || [];
+    if (!bars.length) { if (loadingEl) loadingEl.textContent = 'No data for ' + range + ' / ' + interval; return; }
 
-  // Volume
-  try {
-    const vols = bars.map(b => ({
-      time: b.t, value: b.v,
-      color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
-    }));
-    inst.volSeries.setData(vols);
-  } catch(e) {
-    console.error('[chart] volume setData FAILED', ticker, tfLabel, e);
-  }
+    try { inst.candleSeries.setData(bars.map(function(b){ return { time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }; })); }
+    catch(e) { console.error('[chart] candle setData failed', ticker, e, 'first bar:', bars[0]); if (loadingEl) loadingEl.textContent = 'render error'; return; }
 
-  // MAs — only show points that have values
-  try {
-    const m50  = bars.filter(b => b.m50  != null).map(b => ({ time: b.t, value: b.m50  }));
-    const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: b.t, value: b.m200 }));
-    inst.ma50Series.setData(m50);
-    inst.ma200Series.setData(m200);
-  } catch(e) {
-    console.error('[chart] MA setData FAILED', ticker, tfLabel, e);
-  }
+    try { inst.volSeries.setData(bars.map(function(b){ return { time: b.t, value: b.v, color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)' }; })); }
+    catch(e) { console.error('[chart] vol setData failed', ticker, e); }
 
-  // Add earnings marker if within the visible range
-  const ed = d.earnings_date;
-  if (ed) {
     try {
-      const edTs = Math.floor(new Date(ed).getTime() / 1000);
-      const inRange = bars.some(b => Math.abs(b.t - edTs) < 7 * 86400);
-      if (inRange) {
-        inst.candleSeries.setMarkers([{
-          time: edTs,
-          position: 'aboveBar',
-          color: d.earnings_in_window ? '#ef4444' : '#f59e0b',
-          shape: 'arrowDown',
-          text: 'ERN',
-        }]);
-      } else {
-        inst.candleSeries.setMarkers([]);
+      inst.ma50Series.setData(bars.filter(function(b){ return b.m50 != null; }).map(function(b){ return { time: b.t, value: b.m50 }; }));
+      inst.ma200Series.setData(bars.filter(function(b){ return b.m200 != null; }).map(function(b){ return { time: b.t, value: b.m200 }; }));
+    } catch(e) { console.error('[chart] MA setData failed', ticker, e); }
+
+    try {
+      const d = scanResults.find(function(r){ return r.ticker === ticker; });
+      const ed = d && d.earnings_date;
+      if (ed) {
+        const edTs = Math.floor(new Date(ed).getTime() / 1000);
+        const inRange = bars.some(function(b){ return Math.abs(b.t - edTs) < 7 * 86400; });
+        inst.candleSeries.setMarkers(inRange ? [{ time: edTs, position: 'aboveBar', color: (d.earnings_in_window ? '#ef4444' : '#f59e0b'), shape: 'arrowDown', text: 'ERN' }] : []);
       }
     } catch(e) {}
-  }
 
-  try {
-    inst.chart.timeScale().fitContent();
+    try { inst.chart.timeScale().fitContent(); } catch(e) {}
+
+    inst.vpBars = bars;
+    computeVPRef(ticker);
+    resizeVPCanvas(ticker);
+    drawVP(ticker);
+    if (loadingEl) loadingEl.style.display = 'none';
   } catch(e) {
-    console.error('[chart] fitContent FAILED', ticker, tfLabel, e);
+    console.error('[chart] loadChart fetch failed', ticker, range, interval, e);
+    if (loadingEl) loadingEl.textContent = 'Connection error';
   }
-  chartTFState[ticker] = tfLabel;
 }
 
-function setChartTFBtn(btnEl) {
-  const ticker  = btnEl.getAttribute('data-ticker');
-  const tfLabel = btnEl.getAttribute('data-tf');
-  const bar = document.getElementById('tf-bar-' + ticker);
-  if (bar) bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
-  btnEl.classList.add('active');
-  applyTF(ticker, tfLabel);
+// -- Visible-range volume profile -------------------------------------------
+function computeVPRef(ticker) {
+  const inst = chartInstances[ticker];
+  if (!inst || !inst.vpBars || !inst.vpBars.length) return;
+  let hi = -Infinity;
+  for (let i = 0; i < inst.vpBars.length; i++) { if (inst.vpBars[i].h > hi) hi = inst.vpBars[i].h; }
+  inst.vpRefPrice = hi;   // sentinel: redraw VP whenever this price's y-coordinate moves
 }
 
-function setChartTF(ticker, tfLabel, btnEl) {
-  const bar = document.getElementById('tf-bar-' + ticker);
-  if (bar) bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
-  if (btnEl) btnEl.classList.add('active');
-  applyTF(ticker, tfLabel);
+function resizeVPCanvas(ticker) {
+  const inst = chartInstances[ticker];
+  if (!inst || !inst.vpCanvas) return;
+  const el = document.getElementById('chart-' + ticker);
+  if (!el) return;
+  const w = el.clientWidth, h = el.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  inst.vpCanvas.width  = Math.round(w * dpr);
+  inst.vpCanvas.height = Math.round(h * dpr);
+  inst.vpCanvas.style.width  = w + 'px';
+  inst.vpCanvas.style.height = h + 'px';
+  if (inst.vpCtx) inst.vpCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawVP(ticker) {
+  const inst = chartInstances[ticker];
+  if (!inst || !inst.vpCtx || !inst.vpBars || !inst.vpBars.length) return;
+  const el = document.getElementById('chart-' + ticker);
+  if (!el) return;
+  const ctx = inst.vpCtx;
+  const W = el.clientWidth, H = el.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+
+  const bars = inst.vpBars;
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < bars.length; i++) { if (bars[i].l < lo) lo = bars[i].l; if (bars[i].h > hi) hi = bars[i].h; }
+  if (!(hi > lo)) return;
+
+  const NB = 50;
+  const step = (hi - lo) / NB;
+  const binVol = new Array(NB).fill(0);
+  for (let k = 0; k < bars.length; k++) {
+    const b = bars[k];
+    let loB = Math.floor((b.l - lo) / step);
+    let hiB = Math.floor((b.h - lo) / step);
+    if (loB < 0) loB = 0;
+    if (hiB > NB - 1) hiB = NB - 1;
+    if (hiB < loB) hiB = loB;
+    const span = hiB - loB + 1;
+    const share = (b.v || 0) / span;
+    for (let i = loB; i <= hiB; i++) binVol[i] += share;
+  }
+  let maxVol = 0, pocIdx = 0;
+  for (let i = 0; i < NB; i++) { if (binVol[i] > maxVol) { maxVol = binVol[i]; pocIdx = i; } }
+  if (maxVol <= 0) return;
+
+  let scaleW = 0;
+  try { scaleW = inst.chart.priceScale('right').width(); } catch(e) { scaleW = 0; }
+  const plotRight = W - scaleW - 1;
+  const maxBarW = Math.max(40, (W - scaleW) * 0.30);
+
+  for (let i = 0; i < NB; i++) {
+    if (binVol[i] <= 0) continue;
+    const pLow  = lo + i * step;
+    const pHigh = lo + (i + 1) * step;
+    let yTop, yBot;
+    try {
+      yTop = inst.candleSeries.priceToCoordinate(pHigh);
+      yBot = inst.candleSeries.priceToCoordinate(pLow);
+    } catch(e) { continue; }
+    if (yTop == null || yBot == null) continue;
+    const barH = Math.max(1, yBot - yTop - 1);
+    const w = (binVol[i] / maxVol) * maxBarW;
+    ctx.fillStyle = (i === pocIdx) ? 'rgba(245,158,11,0.45)' : 'rgba(34,197,94,0.20)';
+    ctx.fillRect(plotRight - w, yTop, w, barH);
+  }
+}
+
+let _vpLoopRunning = false;
+function startVPLoop() {
+  if (_vpLoopRunning) return;
+  _vpLoopRunning = true;
+  function tick() {
+    for (const tk in chartInstances) {
+      const inst = chartInstances[tk];
+      if (!inst || !inst.vpBars || !inst.candleSeries) continue;
+      try {
+        const top = inst.candleSeries.priceToCoordinate(inst.vpRefPrice);
+        if (top !== inst.vpLastTop) { inst.vpLastTop = top; drawVP(tk); }
+      } catch(e) {}
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
 }
 
 // ── CHANGE 1: Volume spike badge ──────────────────────────────────────────────
@@ -2025,8 +2206,9 @@ class handler(BaseHTTPRequestHandler):
         tickers_raw = params.get("tickers", [""])[0].strip()
         options_ticker = params.get("options", [""])[0].strip().upper()
         vp_ticker = params.get("vp", [""])[0].strip().upper()
+        chart_ticker = params.get("chart", [""])[0].strip().upper()
 
-        if not any([tickers_raw, options_ticker, vp_ticker]):
+        if not any([tickers_raw, options_ticker, vp_ticker, chart_ticker]):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -2050,6 +2232,16 @@ class handler(BaseHTTPRequestHandler):
             tf_param = params.get("tf", ["1d"])[0].strip()
             try:
                 result = fetch_volume_profile(vp_ticker, tf=tf_param)
+            except Exception as e:
+                result = {"error": str(e)}
+            self.wfile.write(json.dumps(result).encode())
+            return
+
+        if chart_ticker:
+            rng = params.get("range", ["1Y"])[0].strip()
+            interval = params.get("interval", ["1d"])[0].strip()
+            try:
+                result = fetch_chart(chart_ticker, rng, interval)
             except Exception as e:
                 result = {"error": str(e)}
             self.wfile.write(json.dumps(result).encode())

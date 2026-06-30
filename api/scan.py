@@ -1266,40 +1266,34 @@ const libraryLoading = {
     isLoaded: false
 };
 
+// Add a version parameter to the URL to force a cache-bust
 async function loadLibrary() {
-    if (libraryLoading.isLoaded) return true;
-    if (libraryLoading.promise) return libraryLoading.promise;
-
-    libraryLoading.promise = new Promise((resolve, reject) => {
+    if (typeof LightweightCharts !== 'undefined') return true;
+    return new Promise((resolve, reject) => {
         const script = document.createElement('script');
-        script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
-        script.onload = () => {
-            libraryLoading.isLoaded = true;
-            resolve(true);
-        };
+        // Force the latest production build and append a timestamp to prevent cache
+        script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js?v=" + Date.now();
+        script.onload = () => resolve(true);
         script.onerror = reject;
         document.head.appendChild(script);
     });
-    return libraryLoading.promise;
 }
 
 async function initChart(ticker) {
     const el = document.getElementById('chart-' + ticker);
-    if (!el) return;
+    if (!el || chartInstances[ticker]) return;
 
-    // 2. Await the library explicitly
     await loadLibrary();
-
-    // 3. Verify it exists in global scope
-    if (typeof LightweightCharts === 'undefined') {
-        el.innerHTML = '<div style="padding:20px; color:#ef4444;">Library failed to initialize.</div>';
-        return;
-    }
 
     const d = scanResults.find(r => r.ticker === ticker);
     if (!d || !d.chart_data) return;
 
     try {
+        // Namespace check
+        if (typeof LightweightCharts === 'undefined' || !LightweightCharts.createChart) {
+            throw new Error("Library loaded but LightweightCharts namespace is empty");
+        }
+
         const chart = LightweightCharts.createChart(el, {
             width: el.clientWidth || 700,
             height: 220,
@@ -1307,9 +1301,9 @@ async function initChart(ticker) {
             grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } }
         });
 
-        // 4. Defensive Check: Confirm createChart actually returned a working instance
-        if (typeof chart.addCandlestickSeries !== 'function') {
-            throw new Error("createChart failed to return valid series functions");
+        // Defensive check: is the instance valid?
+        if (!chart.addCandlestickSeries) {
+             throw new Error("createChart returned an invalid object (missing series functions)");
         }
 
         const candleSeries = chart.addCandlestickSeries({
@@ -1328,7 +1322,7 @@ async function initChart(ticker) {
 
         applyTF(ticker, '1D');
     } catch (err) {
-        console.error("Initialization error:", err);
+        console.error("Initialization Error:", err);
         el.innerHTML = '<div style="padding:20px; color:#ef4444; font-size:12px;">Init Error: ' + err.message + '</div>';
     }
 }

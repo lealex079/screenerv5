@@ -123,12 +123,14 @@ SECTOR_METRICS = {
 
 def fetch_mtf_inline(ticker, price):
     configs = [
-        ("4h",  "4h",  "730d"),
+        ("4h",  "4h",  "60d"),    # 4h: 60d max from yfinance
         ("1d",  "1d",  "max"),
         ("1wk", "1wk", "max"),
         ("1mo", "1mo", "max"),
     ]
     result = {}
+    # Store 4h OHLCV bars separately for the chart
+    ohlcv_4h = []
     for label, interval, period in configs:
         try:
             df = yf.download(ticker, period=period, interval=interval,
@@ -150,8 +152,28 @@ def fetch_mtf_inline(ticker, price):
                 "ma50_dist": round(price - ma50, 2) if ma50 else None,
                 "ma200_dist": round(price - ma200, 2) if ma200 else None,
             }
+            # Capture 4h OHLCV bars for chart rendering
+            if label == "4h" and len(df) > 0:
+                ma50_s  = close.rolling(min(50, n)).mean()
+                ma200_s = close.rolling(min(200, n)).mean()
+                for ts, row in df.iterrows():
+                    try:
+                        t_unix = int(ts.timestamp())
+                        ohlcv_4h.append({
+                            "t": t_unix,
+                            "o": round(float(row["Open"]),  2),
+                            "h": round(float(row["High"]),  2),
+                            "l": round(float(row["Low"]),   2),
+                            "c": round(float(row["Close"]), 2),
+                            "v": int(row["Volume"]),
+                            "m50":  round(float(ma50_s.loc[ts]),  2) if not math.isnan(float(ma50_s.loc[ts]))  else None,
+                            "m200": round(float(ma200_s.loc[ts]), 2) if not math.isnan(float(ma200_s.loc[ts])) else None,
+                        })
+                    except Exception:
+                        pass
         except Exception:
             result[label] = {"ma50": None, "ma200": None}
+    result["_ohlcv_4h"] = ohlcv_4h
     return result
 
 
@@ -816,6 +838,59 @@ def scan_ticker(ticker):
     volume_spike_val = bool(last["volume_spike"]) if pd.notna(last["volume_spike"]) else False
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── Chart OHLCV: extract from the raw daily DataFrame already in memory ──
+    chart_data = {"daily": [], "weekly": []}
+    try:
+        _cd = raw.copy()
+        if isinstance(_cd.columns, pd.MultiIndex):
+            _cd.columns = _cd.columns.get_level_values(0)
+        if hasattr(_cd.index, "tz") and _cd.index.tz is not None:
+            _cd.index = _cd.index.tz_localize(None)
+        # Compute MAs on full history
+        _cd["_m50"]  = _cd["Close"].rolling(50).mean()
+        _cd["_m200"] = _cd["Close"].rolling(200).mean()
+        # Daily bars — last 504 trading days (2 years) for 1Y view headroom
+        for ts, row in _cd.tail(504).iterrows():
+            try:
+                chart_data["daily"].append({
+                    "t":    int(pd.Timestamp(ts).timestamp()),
+                    "o":    round(float(row["Open"]),   2),
+                    "h":    round(float(row["High"]),   2),
+                    "l":    round(float(row["Low"]),    2),
+                    "c":    round(float(row["Close"]),  2),
+                    "v":    int(row["Volume"]),
+                    "m50":  round(float(row["_m50"]),  2) if not math.isnan(float(row["_m50"]))  else None,
+                    "m200": round(float(row["_m200"]), 2) if not math.isnan(float(row["_m200"])) else None,
+                })
+            except Exception:
+                pass
+        # Weekly bars — resample daily to weekly for the 1W/1M/3M/6M/1Y views
+        _wk = _cd.resample("W").agg({
+            "Open": "first", "High": "max", "Low": "min",
+            "Close": "last", "Volume": "sum"
+        }).dropna()
+        _wk["_m50"]  = _wk["Close"].rolling(50).mean()
+        _wk["_m200"] = _wk["Close"].rolling(200).mean()
+        for ts, row in _wk.tail(260).iterrows():   # 5 years weekly
+            try:
+                chart_data["weekly"].append({
+                    "t":    int(pd.Timestamp(ts).timestamp()),
+                    "o":    round(float(row["Open"]),   2),
+                    "h":    round(float(row["High"]),   2),
+                    "l":    round(float(row["Low"]),    2),
+                    "c":    round(float(row["Close"]),  2),
+                    "v":    int(row["Volume"]),
+                    "m50":  round(float(row["_m50"]),  2) if not math.isnan(float(row["_m50"]))  else None,
+                    "m200": round(float(row["_m200"]), 2) if not math.isnan(float(row["_m200"])) else None,
+                })
+            except Exception:
+                pass
+        # Attach 4h bars from mtf fetch
+        chart_data["h4"] = mtf.pop("_ohlcv_4h", [])
+    except Exception:
+        chart_data = {"daily": [], "weekly": [], "h4": []}
+    # ─────────────────────────────────────────────────────────────────────────
+
     return {
         "ticker": ticker.upper(),
         "price": safe(last["Close"], 2),
@@ -864,6 +939,7 @@ def scan_ticker(ticker):
         "confluences": confluences,
         "earnings_date": earnings_date,
         "earnings_in_window": earnings_within_window,
+        "chart_data": chart_data,
     }
 
 
@@ -972,6 +1048,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .copy-all-row { display: flex; justify-content: flex-end; padding: 8px 0 16px; }
   .footer { padding: 24px 0; font-size: 10px; color: #1e2a35; text-align: center; border-top: 0.5px solid #1e2a35; margin-top: 16px; }
   .footer span { color: #334155; }
+  .chart-section { margin: 0 0 12px; }
+  .chart-tf-bar { display: flex; gap: 4px; margin-bottom: 6px; }
+  .tf-btn { background: #0f1419; border: 0.5px solid #1e2a35; color: #475569; padding: 3px 8px; border-radius: 4px; font-size: 10px; cursor: pointer; font-family: inherit; transition: all 0.12s; }
+  .tf-btn:hover { color: #94a3b8; border-color: #2a3a4e; }
+  .tf-btn.active { background: #1e2a35; color: #22c55e; border-color: #22c55e; }
+  .chart-wrap { position: relative; height: 220px; border-radius: 6px; overflow: hidden; background: #0f1419; }
+  .chart-legend { display: flex; gap: 12px; margin-top: 4px; font-size: 10px; color: #475569; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 12px; height: 2px; border-radius: 1px; }
   .empty-state { text-align: center; padding: 80px 0 60px; }
   .empty-state p { color: #334155; font-size: 14px; }
   .empty-state .hint-tickers { color: #475569; font-size: 12px; margin-top: 8px; }
@@ -1031,6 +1116,8 @@ async function runScan() {
     scanResults = data.results.filter(d => !d.error);
     resultsDiv.innerHTML = data.results.map(renderCard).join('');
     scanResults.forEach(d => setTimeout(() => loadVP(d.ticker), 100));
+    // Init charts after DOM settles
+    scanResults.forEach(d => setTimeout(() => initChart(d.ticker), 150));
     if (scanResults.length > 1) {
       copyAllContainer.innerHTML = '<div class="copy-all-row"><button class="copy-btn" onclick="copyAll(this)">Copy all for Claude</button></div>';
     }
@@ -1095,6 +1182,8 @@ function renderCard(d) {
       '<div class="score-box"><div class="score-label">Regime</div><div class="regime-value '+regimeColor+'">'+d.regime+'</div></div>' +
     '</div>' +
 
+    renderChart(d) +
+
     '<div class="price-levels">' +
       plBox('52w High', d.high_52w) + plBox('52w Low', d.low_52w) +
     '</div>' +
@@ -1135,6 +1224,151 @@ function renderCard(d) {
       '<button class="copy-btn" data-label="Copy for Claude" onclick="copyOne(\''+d.ticker+'\', this)">Copy for Claude</button>' +
     '</div>' +
   '</div>';
+}
+
+// ── Chart rendering ──────────────────────────────────────────────────────────
+
+const chartInstances = {};   // ticker → { chart, candleSeries, vol, ma50, ma200 }
+const chartTFState   = {};   // ticker → current TF string
+
+// Timeframe config: [label, key in chart_data, bars to show]
+const TF_CONFIGS = [
+  { label: "4H",  key: "h4",     bars: 120  },
+  { label: "1D",  key: "daily",  bars: 30   },
+  { label: "1W",  key: "daily",  bars: 5    },   // ~5 trading days
+  { label: "1M",  key: "daily",  bars: 21   },
+  { label: "3M",  key: "daily",  bars: 63   },
+  { label: "6M",  key: "daily",  bars: 126  },
+  { label: "1Y",  key: "daily",  bars: 252  },
+  { label: "2Y",  key: "weekly", bars: 104  },
+];
+
+function renderChart(d) {
+  const cd = d.chart_data;
+  if (!cd || (!cd.daily || !cd.daily.length)) return '';
+  return '<div class="chart-section">' +
+    '<div class="chart-tf-bar" id="tf-bar-' + d.ticker + '">' +
+    TF_CONFIGS.map(function(tf) {
+      const active = tf.label === '1D' ? ' active' : '';
+      return '<button class="tf-btn' + active + '" onclick="setChartTF('' + d.ticker + '','' + tf.label + '',this)">' + tf.label + '</button>';
+    }).join('') +
+    '</div>' +
+    '<div class="chart-wrap" id="chart-' + d.ticker + '"></div>' +
+    '<div class="chart-legend">' +
+      '<div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>50 MA</div>' +
+      '<div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>200 MA</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function initChart(ticker) {
+  const el = document.getElementById('chart-' + ticker);
+  if (!el || chartInstances[ticker]) return;
+  const d = scanResults.find(r => r.ticker === ticker);
+  if (!d || !d.chart_data) return;
+
+  const chart = LightweightCharts.createChart(el, {
+    width:  el.offsetWidth || 780,
+    height: 220,
+    layout: { background: { color: '#0f1419' }, textColor: '#475569' },
+    grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#1e2a35' },
+    timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
+  });
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#22c55e', downColor: '#ef4444',
+    borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+    wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+  });
+
+  const ma50Series = chart.addLineSeries({
+    color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+  });
+  const ma200Series = chart.addLineSeries({
+    color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+  });
+
+  // Volume series on separate pane
+  const volSeries = chart.addHistogramSeries({
+    color: '#1e2a35', priceFormat: { type: 'volume' },
+    priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 },
+  });
+
+  chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
+  chartTFState[ticker] = '1D';
+  applyTF(ticker, '1D');
+
+  // Responsive resize
+  const ro = new ResizeObserver(function() {
+    if (chartInstances[ticker]) {
+      chartInstances[ticker].chart.applyOptions({ width: el.offsetWidth });
+    }
+  });
+  ro.observe(el);
+}
+
+function applyTF(ticker, tfLabel) {
+  const inst = chartInstances[ticker];
+  const d    = scanResults.find(r => r.ticker === ticker);
+  if (!inst || !d || !d.chart_data) return;
+
+  const cfg  = TF_CONFIGS.find(t => t.label === tfLabel);
+  if (!cfg) return;
+
+  let bars = (d.chart_data[cfg.key] || []);
+  // Slice to the number of bars for this TF
+  bars = bars.slice(-cfg.bars);
+  if (!bars.length) return;
+
+  // Candlestick data
+  const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
+  inst.candleSeries.setData(candles);
+
+  // Volume
+  const vols = bars.map(b => ({
+    time: b.t, value: b.v,
+    color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
+  }));
+  inst.volSeries.setData(vols);
+
+  // MAs — only show points that have values
+  const m50  = bars.filter(b => b.m50  != null).map(b => ({ time: b.t, value: b.m50  }));
+  const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: b.t, value: b.m200 }));
+  inst.ma50Series.setData(m50);
+  inst.ma200Series.setData(m200);
+
+  // Add earnings marker if within the visible range
+  const ed = d.earnings_date;
+  if (ed) {
+    try {
+      const edTs = Math.floor(new Date(ed).getTime() / 1000);
+      const inRange = bars.some(b => Math.abs(b.t - edTs) < 7 * 86400);
+      if (inRange) {
+        inst.candleSeries.setMarkers([{
+          time: edTs,
+          position: 'aboveBar',
+          color: d.earnings_in_window ? '#ef4444' : '#f59e0b',
+          shape: 'arrowDown',
+          text: 'ERN',
+        }]);
+      } else {
+        inst.candleSeries.setMarkers([]);
+      }
+    } catch(e) {}
+  }
+
+  inst.chart.timeScale().fitContent();
+  chartTFState[ticker] = tfLabel;
+}
+
+function setChartTF(ticker, tfLabel, btnEl) {
+  // Update active button
+  const bar = document.getElementById('tf-bar-' + ticker);
+  if (bar) bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+  btnEl.classList.add('active');
+  applyTF(ticker, tfLabel);
 }
 
 // ── CHANGE 1: Volume spike badge ──────────────────────────────────────────────

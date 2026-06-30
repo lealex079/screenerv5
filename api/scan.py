@@ -1260,52 +1260,53 @@ function renderChart(d) {
   '</div>';
 }
 
-function initChart(ticker) {
+async function loadLibrary() {
+    if (typeof LightweightCharts !== 'undefined') return true;
+    return new Promise((resolve) => {
+        const script = document.createElement('script');
+        script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
+        script.onload = () => resolve(true);
+        document.head.appendChild(script);
+    });
+}
+
+async function initChart(ticker) {
   const el = document.getElementById('chart-' + ticker);
   if (!el || chartInstances[ticker]) return;
 
-  // 1. ADDED: Wait for library to load
-  if (typeof LightweightCharts === 'undefined') {
-    el.innerHTML = '<div style="padding:20px; color:#64748b; font-family:monospace; font-size:12px;">Waiting for library...</div>';
-    setTimeout(() => initChart(ticker), 100); 
-    return;
-  }
+  // Wait for library load
+  el.innerHTML = '<div style="padding:20px; color:#64748b; font-family:monospace; font-size:12px;">Loading library...</div>';
+  await loadLibrary();
 
   const d = scanResults.find(r => r.ticker === ticker);
   if (!d || !d.chart_data) return;
 
   try {
-    const chartWidth = el.clientWidth || 700;
-    
     const chart = LightweightCharts.createChart(el, {
-      width: chartWidth,
+      width: el.clientWidth || 700,
       height: 220,
       layout: { background: { color: '#0f1419' }, textColor: '#475569' },
-      grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
-      crosshair: { mode: 1 },
-      rightPriceScale: { borderColor: '#1e2a35' },
-      timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
+      grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
+      timeScale: { timeVisible: true, secondsVisible: false },
     });
 
     const candleSeries = chart.addCandlestickSeries({
-      upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#22c55e', borderDownColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+        upColor: '#22c55e', downColor: '#ef4444', 
+        borderUpColor: '#22c55e', borderDownColor: '#ef4444', 
+        wickUpColor: '#22c55e', wickDownColor: '#ef4444'
     });
-    const ma50Series = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-    const ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-    const volSeries = chart.addHistogramSeries({ color: '#1e2a35', priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 }});
-
-    chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
     
-    new ResizeObserver(entries => {
-      if (entries.length > 0 && entries[0].target.clientWidth > 0) {
-        chart.applyOptions({ width: entries[0].target.clientWidth });
-      }
-    }).observe(el);
+    chartInstances[ticker] = { 
+        chart, 
+        candleSeries, 
+        volSeries: chart.addHistogramSeries({ color: '#1e2a35', priceScaleId: 'vol' }),
+        ma50Series: chart.addLineSeries({ color: '#22c55e', lineWidth: 1 }),
+        ma200Series: chart.addLineSeries({ color: '#3b82f6', lineWidth: 1 })
+    };
 
     applyTF(ticker, '1D');
-    
   } catch (err) {
-    el.innerHTML = '<div style="padding:20px; color:#ef4444; font-family:monospace; font-size:12px;">Chart Init Error: ' + err.message + '</div>';
+    el.innerHTML = '<div style="padding:20px; color:#ef4444;">Error: ' + err.message + '</div>';
   }
 }
 

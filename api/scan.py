@@ -473,17 +473,20 @@ def compute_fundamental_score(pe, pb, ps, ev_ebit, gross_margin, fcf_yield, roic
     return round(0.60 * val_score + 0.40 * qual_score, 0)
 
 
-def premium_score(iv_rank, iv_hv):
-    """Premium richness 0-100. Blends IV rank and IV/HV when available."""
-    parts = []
-    if iv_rank is not None:
-        parts.append(_clamp(iv_rank))
+def premium_score(vol_rank, iv_hv):
+    """Premium richness 0-100. Blends realized-vol rank (current 30d HV vs the
+    stock's own trailing 1-year range) and IV/HV, weighted toward IV/HV since it
+    directly measures whether options are rich vs what the stock is realizing.
+    IV/HV ~1.0 is treated as fairly priced (50), not penalized."""
+    parts, weights = [], []
     if iv_hv is not None:
-        # IV/HV: 0.7x -> 0, 1.0x -> ~38, 1.5x -> 100. >1 means options rich vs realized.
-        parts.append(_clamp((iv_hv - 0.7) / (1.5 - 0.7) * 100))
+        # IV/HV: 0.7x -> 0, 1.0x -> 50, 1.3x -> 100.
+        parts.append(_clamp((iv_hv - 0.7) / (1.3 - 0.7) * 100)); weights.append(0.6)
+    if vol_rank is not None:
+        parts.append(_clamp(vol_rank)); weights.append(0.4)
     if not parts:
         return 50.0
-    return sum(parts) / len(parts)
+    return sum(p * w for p, w in zip(parts, weights)) / sum(weights)
 
 
 def _g(ctx, key, default):
@@ -509,7 +512,7 @@ def compute_trade_grades(ctx, opt):
     drawdown = _g(ctx, "drawdown", 0)          # % from 52w high (<=0)
 
     liq  = _clamp(_g(opt, "liquidity_score", 50))
-    prem = premium_score(opt.get("iv_rank"), opt.get("iv_hv"))
+    prem = premium_score(opt.get("vol_rank"), opt.get("iv_hv"))
     ed   = opt.get("earnings_days")
     risk_free = _clamp(100 - crash)            # lower crash = safer timing
 
@@ -586,8 +589,8 @@ def compute_liquidity(all_puts, all_calls, spot, total_chain_oi, avg_volume, tod
         return (v - lo) / (hi - lo)
 
     n_vol    = norm(avg_volume, 100_000, 5_000_000)
-    n_oi     = norm(total_chain_oi, 2_000, 200_000)
-    n_spread = 1.0 - norm(med_spread, 0.02, 0.20) if med_spread is not None else 0.5  # tighter=better
+    n_oi     = norm(total_chain_oi, 1_000, 25_000)       # single-name 27-45 DTE OI is small
+    n_spread = 1.0 - norm(med_spread, 0.03, 0.35) if med_spread is not None else 0.5  # tighter=better
     n_today  = norm(today_chain_vol, 500, 50_000)
 
     score = (0.30 * n_vol + 0.30 * n_oi + 0.25 * n_spread + 0.15 * n_today) * 100
@@ -860,15 +863,23 @@ def fetch_options(ticker, ctx=None):
     # ─────────────────────────────────────────────────────────────────────────
 
     # ── IV/HV ratio, liquidity score, and trade grades ───────────────────────
-    hv30 = avg_volume = atm_iv = iv_hv = None
+    hv30 = avg_volume = atm_iv = iv_hv = vol_rank = None
     try:
-        _h = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True, progress=False)
+        _h = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
         if isinstance(_h.columns, pd.MultiIndex):
             _h.columns = _h.columns.get_level_values(0)
         _h = _h.dropna(subset=["Close"])
         if len(_h) > 31:
-            _lr = np.log(_h["Close"] / _h["Close"].shift(1)).dropna()
-            hv30 = round(float(_lr.tail(30).std() * np.sqrt(252)) * 100, 1)
+            _lr = np.log(_h["Close"] / _h["Close"].shift(1))
+            # rolling 30-day annualized realized vol (%), full history
+            _hv = (_lr.rolling(30).std() * np.sqrt(252) * 100).dropna()
+            if len(_hv) > 0:
+                hv30 = round(float(_hv.iloc[-1]), 1)
+                # Vol rank: where current 30d HV sits in the stock's own trailing
+                # ~1-year range. Smile-free surrogate for "is vol rich right now?"
+                _win = _hv.tail(252)
+                if len(_win) >= 30:
+                    vol_rank = round(float((_win <= _hv.iloc[-1]).sum()) / len(_win) * 100, 0)
             avg_volume = float(_h["Volume"].tail(20).mean())
     except Exception:
         pass
@@ -891,6 +902,7 @@ def fetch_options(ticker, ctx=None):
     if ctx is not None:
         try:
             _opt = {
+                "vol_rank": vol_rank,
                 "iv_rank": iv_rank,
                 "iv_hv": iv_hv,
                 "liquidity_score": liquidity["score"] if liquidity else None,
@@ -913,6 +925,7 @@ def fetch_options(ticker, ctx=None):
         "hv30": hv30,
         "atm_iv": atm_iv,
         "iv_hv": iv_hv,
+        "vol_rank": vol_rank,
         "avg_volume": int(avg_volume) if avg_volume else None,
         "liquidity": liquidity,
         "grades": grades,
@@ -2216,6 +2229,12 @@ function renderLiqIVHV(data){
     out += '<span class="mini-badge" style="border-color:'+col+';color:'+col+'">IV/HV '+r.toFixed(2)+'x</span>'+
       '<span class="mini-badge-dim">'+lbl+detail+'</span>';
   }
+  if(data.vol_rank!=null){
+    const vr=data.vol_rank;
+    const col = vr>=70?'#22c55e':vr>=40?'#94a3b8':'#64748b';
+    out += '<span class="mini-badge" style="border-color:'+col+';color:'+col+'">Vol Rank '+vr.toFixed(0)+'</span>'+
+      '<span class="mini-badge-dim">30d HV vs own 1yr range — drives premium grade</span>';
+  }
   return out ? '<div class="badge-row">'+out+'</div>' : '';
 }
 function buildOptionsTabs(data, crashScore, ticker) {
@@ -2497,6 +2516,15 @@ function formatForClaude(d) {
       if (_optD.atm_iv != null && _optD.hv30 != null) {
         L.push('  ATM IV ' + _optD.atm_iv.toFixed(1) + '% vs 30d HV ' + _optD.hv30.toFixed(1) + '%');
       }
+    }
+    // Vol rank (HV percentile) — primary premium driver
+    if (_optD.vol_rank != null) {
+      const vr = _optD.vol_rank;
+      const vlbl = vr >= 70 ? "high — vol elevated vs this stock's own 1yr range"
+        : vr >= 40 ? 'moderate'
+        : 'low — vol subdued vs its own 1yr range';
+      L.push('');
+      L.push('VOL RANK (30d HV vs 1yr): ' + vr.toFixed(0) + '/100 (' + vlbl + ') — drives premium grade');
     }
     // Liquidity score
     if (_optD.liquidity) {

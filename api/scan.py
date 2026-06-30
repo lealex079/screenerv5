@@ -1270,44 +1270,64 @@ async function loadLibrary() {
     });
 }
 
+// Global tracker to ensure we don't double-initialize
+const chartLoadQueue = {};
+
 async function initChart(ticker) {
-  const el = document.getElementById('chart-' + ticker);
-  if (!el || chartInstances[ticker]) return;
+    const el = document.getElementById('chart-' + ticker);
+    if (!el || chartInstances[ticker]) return;
 
-  // Wait for library load
-  el.innerHTML = '<div style="padding:20px; color:#64748b; font-family:monospace; font-size:12px;">Loading library...</div>';
-  await loadLibrary();
+    // 1. Force the library to load if it's not present
+    if (typeof LightweightCharts === 'undefined') {
+        el.innerHTML = '<div style="padding:20px; color:#64748b; font-size:12px;">Waiting for library...</div>';
+        try {
+            await new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
+                script.onload = resolve;
+                script.onerror = reject;
+                document.head.appendChild(script);
+            });
+        } catch (e) {
+            el.innerHTML = '<div style="color:#ef4444;">Failed to load charting library.</div>';
+            return;
+        }
+    }
 
-  const d = scanResults.find(r => r.ticker === ticker);
-  if (!d || !d.chart_data) return;
+    const d = scanResults.find(r => r.ticker === ticker);
+    if (!d || !d.chart_data) return;
 
-  try {
-    const chart = LightweightCharts.createChart(el, {
-      width: el.clientWidth || 700,
-      height: 220,
-      layout: { background: { color: '#0f1419' }, textColor: '#475569' },
-      grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
-      timeScale: { timeVisible: true, secondsVisible: false },
-    });
+    try {
+        // 2. Explicitly verify the library is defined before calling
+        if (typeof LightweightCharts === 'undefined') throw new Error("Library failed to attach");
 
-    const candleSeries = chart.addCandlestickSeries({
-        upColor: '#22c55e', downColor: '#ef4444', 
-        borderUpColor: '#22c55e', borderDownColor: '#ef4444', 
-        wickUpColor: '#22c55e', wickDownColor: '#ef4444'
-    });
-    
-    chartInstances[ticker] = { 
-        chart, 
-        candleSeries, 
-        volSeries: chart.addHistogramSeries({ color: '#1e2a35', priceScaleId: 'vol' }),
-        ma50Series: chart.addLineSeries({ color: '#22c55e', lineWidth: 1 }),
-        ma200Series: chart.addLineSeries({ color: '#3b82f6', lineWidth: 1 })
-    };
+        const chart = LightweightCharts.createChart(el, {
+            width: el.clientWidth || 700,
+            height: 220,
+            layout: { background: { color: '#0f1419' }, textColor: '#475569' },
+            grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } }
+        });
 
-    applyTF(ticker, '1D');
-  } catch (err) {
-    el.innerHTML = '<div style="padding:20px; color:#ef4444;">Error: ' + err.message + '</div>';
-  }
+        // 3. Defensive Series Creation
+        const candleSeries = chart.addCandlestickSeries({
+            upColor: '#22c55e', downColor: '#ef4444',
+            borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+            wickUpColor: '#22c55e', wickDownColor: '#ef4444'
+        });
+
+        chartInstances[ticker] = { 
+            chart, 
+            candleSeries, 
+            volSeries: chart.addHistogramSeries({ color: '#1e2a35', priceScaleId: 'vol' }),
+            ma50Series: chart.addLineSeries({ color: '#22c55e', lineWidth: 1 }),
+            ma200Series: chart.addLineSeries({ color: '#3b82f6', lineWidth: 1 })
+        };
+
+        applyTF(ticker, '1D');
+    } catch (err) {
+        console.error(err);
+        el.innerHTML = '<div style="padding:20px; color:#ef4444; font-size:12px;">' + err.message + '</div>';
+    }
 }
 
 function applyTF(ticker, tfLabel) {

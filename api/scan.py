@@ -940,7 +940,11 @@ def scan_ticker(ticker):
         "confluences": confluences,
         "earnings_date": earnings_date,
         "earnings_in_window": earnings_within_window,
-        "chart_data": chart_data,
+        "chart_data": {
+        "daily": chart_data["daily"], 
+        "weekly": chart_data["weekly"],
+        "h1": chart_data["h4"] # Ensure this matches your JS TF_CONFIGS key
+    }
     }
 
 
@@ -1283,44 +1287,66 @@ async function initChart(ticker) {
     const el = document.getElementById('chart-' + ticker);
     if (!el) return;
 
-    // Standard CDN load - this is the most reliable way to get the library
+    // 1. Foolproof Library Loading
     if (typeof LightweightCharts === 'undefined') {
+        el.innerHTML = '<div style="padding:20px; color:#64748b; font-family:monospace; font-size:12px;">Loading library...</div>';
         const script = document.createElement('script');
         script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
         document.head.appendChild(script);
-        // Wait for it to load
         await new Promise(resolve => script.onload = resolve);
     }
 
     const d = scanResults.find(r => r.ticker === ticker);
-    if (!d || !d.chart_data) return;
+    if (!d || !d.chart_data || !d.chart_data.daily) {
+        el.innerHTML = '<div style="padding:20px; color:#ef4444;">No data available.</div>';
+        return;
+    }
 
-    // Force explicit dimensions for the first paint
-    el.style.width = '700px'; 
-    el.style.height = '220px';
+    // 2. Clear element before drawing
+    el.innerHTML = '';
 
-    const chart = LightweightCharts.createChart(el, {
-        width: 700,
-        height: 220,
-        layout: { background: { color: '#0f1419' } }
-    });
+    try {
+        const chart = LightweightCharts.createChart(el, {
+            width: 700,
+            height: 220,
+            layout: { background: { color: '#0f1419' }, textColor: '#475569' },
+            grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } }
+        });
 
-    const candleSeries = chart.addCandlestickSeries();
-    
-    // Only send the daily data
-    const bars = d.chart_data.daily || [];
-    const formattedData = bars.map(b => ({
-        time: new Date(b.t * 1000).toISOString().split('T')[0],
-        open: b.o, high: b.h, low: b.l, close: b.c
-    }));
+        const candleSeries = chart.addCandlestickSeries({
+            upColor: '#22c55e', downColor: '#ef4444',
+            borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+            wickUpColor: '#22c55e', wickDownColor: '#ef4444'
+        });
 
-    candleSeries.setData(formattedData);
+        // 3. Sanitized Data Pipeline
+        const seen = new Set();
+        const formattedData = d.chart_data.daily
+            .sort((a, b) => a.t - b.t) // Ensure chronological order
+            .map(b => {
+                const d = new Date(b.t * 1000);
+                const isoDate = d.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+                return { time: isoDate, open: b.o, high: b.h, low: b.l, close: b.c };
+            })
+            .filter(b => {
+                if (seen.has(b.time)) return false; // Remove duplicates
+                seen.add(b.time);
+                return true;
+            });
+
+        candleSeries.setData(formattedData);
+        chart.timeScale().fitContent();
+
+    } catch (err) {
+        console.error("Chart Render Error:", err);
+        el.innerHTML = '<div style="padding:20px; color:#ef4444;">Render Error: ' + err.message + '</div>';
+    }
 }
 
 function applyTF(ticker, tfLabel) {
-  const inst = chartInstances[ticker];
-  const el = document.getElementById('chart-' + ticker);
   const d = scanResults.find(r => r.ticker === ticker);
+  console.log("DEBUG: Processing", ticker, "TF:", tfLabel, "Data:", d.chart_data[cfg.key]); // ADD THIS
+   
   if (!inst || !d || !d.chart_data) return;
 
   const cfg = TF_CONFIGS.find(t => t.label === tfLabel);

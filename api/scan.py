@@ -285,18 +285,17 @@ def fetch_volume_profile(ticker, tf="1d"):
 # ── Options chain ─────────────────────────────────────────────────────────────
 
 # ── Yahoo-style chart endpoint: range + interval, lazy-loaded per card ────────
-CHART_RANGE_PERIOD = {
-    "1D": "1d", "5D": "5d", "1M": "1mo", "3M": "3mo", "6M": "6mo",
-    "YTD": "ytd", "1Y": "1y", "5Y": "5y", "All": "max",
-}
+# Range sets only the INITIAL visible window. We fetch the maximum history the
+# interval allows so the user can scroll back through full history and the
+# moving averages stay fully populated all the way back (Yahoo's behavior).
 CHART_RANGE_INTERVALS = {
     "1D":  ["1m", "2m", "5m"],
     "5D":  ["1m", "5m", "15m", "30m"],
-    "1M":  ["15m", "30m", "1h", "1d"],
-    "3M":  ["1h", "1d"],
-    "6M":  ["1h", "1d"],
-    "YTD": ["1d", "1wk"],
-    "1Y":  ["1d", "1wk"],
+    "1M":  ["15m", "30m", "1h", "4h", "1d"],
+    "3M":  ["1h", "4h", "1d"],
+    "6M":  ["1h", "4h", "1d"],
+    "YTD": ["4h", "1d", "1wk"],
+    "1Y":  ["4h", "1d", "1wk"],
     "5Y":  ["1d", "1wk", "1mo"],
     "All": ["1wk", "1mo"],
 }
@@ -304,23 +303,34 @@ CHART_RANGE_DEFAULT_IV = {
     "1D": "1m", "5D": "5m", "1M": "30m", "3M": "1d", "6M": "1d",
     "YTD": "1d", "1Y": "1d", "5Y": "1wk", "All": "1mo",
 }
+# Max history to pull per interval (capped by Yahoo's intraday-history limits).
+INTERVAL_FETCH_PERIOD = {
+    "1m": "7d", "2m": "60d", "5m": "60d", "15m": "60d", "30m": "60d",
+    "1h": "730d", "4h": "730d",   # 4h is resampled from 1h
+    "1d": "max", "1wk": "max", "1mo": "max",
+}
+# Initial visible window per range, in calendar days (None = show all = "All").
+RANGE_LOOKBACK_DAYS = {
+    "1D": 1, "5D": 5, "1M": 31, "3M": 92, "6M": 183,
+    "1Y": 366, "5Y": 1827, "All": None,
+}
 
 
 def fetch_chart(ticker, rng, interval):
-    """Yahoo-style chart data: a date range at a chosen candle interval.
-    Range and interval are independent; interval is validated against the
-    range's allowed list (Yahoo's intraday-history limits) and falls back to
-    the range default if not permitted. MAs are computed on the displayed
-    interval, matching Yahoo's behavior."""
-    rng = rng if rng in CHART_RANGE_PERIOD else "1Y"
+    """Yahoo-style chart data. Fetches max history for the chosen interval (so
+    MAs are full and the user can scroll back), and returns visible_from so the
+    frontend sets the initial viewport to just the requested range."""
+    rng = rng if rng in CHART_RANGE_INTERVALS else "1Y"
     allowed = CHART_RANGE_INTERVALS[rng]
     if interval not in allowed:
         interval = CHART_RANGE_DEFAULT_IV[rng]
-    period = CHART_RANGE_PERIOD[rng]
-    yf_iv = "60m" if interval == "1h" else interval
+
+    fetch_period = INTERVAL_FETCH_PERIOD.get(interval, "max")
+    is_4h = (interval == "4h")
+    yf_iv = "60m" if interval in ("1h", "4h") else interval
 
     try:
-        df = yf.download(ticker, period=period, interval=yf_iv,
+        df = yf.download(ticker, period=fetch_period, interval=yf_iv,
                          auto_adjust=True, progress=False)
     except Exception as e:
         return {"error": "Download failed: %s" % e}
@@ -329,12 +339,24 @@ def fetch_chart(ticker, rng, interval):
         return {"error": "No data for %s (%s / %s)" % (ticker, rng, interval)}
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
+    # Resample 1h -> 4h when 4h is requested.
+    if is_4h:
+        try:
+            df = df.resample("4h").agg({
+                "Open": "first", "High": "max", "Low": "min",
+                "Close": "last", "Volume": "sum",
+            })
+        except Exception:
+            pass
+
     df = df.dropna(subset=["Close"])
     n = len(df)
     if n == 0:
         return {"error": "No data for %s (%s / %s)" % (ticker, rng, interval)}
 
     close = df["Close"]
+    # MAs computed on the FULL fetched series -> fully populated lines.
     ma50_v  = close.rolling(min(50, n)).mean().values
     ma200_v = close.rolling(min(200, n)).mean().values
     o_v = df["Open"].values
@@ -365,8 +387,26 @@ def fetch_chart(ticker, rng, interval):
         except Exception:
             pass
 
+    if not bars:
+        return {"error": "No usable bars for %s (%s / %s)" % (ticker, rng, interval)}
+
+    # Initial visible window: range sets the viewport, not the data extent.
+    last_t = bars[-1]["t"]
+    lookback_days = RANGE_LOOKBACK_DAYS.get(rng)
+    if rng == "YTD":
+        try:
+            jan1 = pd.Timestamp(year=pd.Timestamp.utcnow().year, month=1, day=1, tz="UTC")
+            visible_from = int(jan1.timestamp())
+        except Exception:
+            visible_from = last_t - 200 * 86400
+    elif lookback_days is None:
+        visible_from = None   # "All" -> show everything
+    else:
+        visible_from = last_t - lookback_days * 86400
+
     return {"ticker": ticker.upper(), "range": rng, "interval": interval,
-            "intraday": intraday, "bars": bars}
+            "intraday": intraday, "bars": bars,
+            "visible_from": visible_from, "visible_to": last_t}
 
 
 def fetch_options(ticker):
@@ -1331,15 +1371,16 @@ function renderCard(d) {
 const chartInstances = {};   // ticker -> instance object
 const chartState     = {};   // ticker -> { range, interval }
 
-// Yahoo-style range -> allowed intervals (mirrors server fetch_chart gating).
+// Yahoo-style range -> allowed intervals. Range sets only the INITIAL viewport;
+// full history for the interval is fetched so the user can scroll back.
 const RANGE_INTERVALS = {
   '1D':  ['1m','2m','5m'],
   '5D':  ['1m','5m','15m','30m'],
-  '1M':  ['15m','30m','1h','1d'],
-  '3M':  ['1h','1d'],
-  '6M':  ['1h','1d'],
-  'YTD': ['1d','1wk'],
-  '1Y':  ['1d','1wk'],
+  '1M':  ['15m','30m','1h','4h','1d'],
+  '3M':  ['1h','4h','1d'],
+  '6M':  ['1h','4h','1d'],
+  'YTD': ['4h','1d','1wk'],
+  '1Y':  ['4h','1d','1wk'],
   '5Y':  ['1d','1wk','1mo'],
   'All': ['1wk','1mo'],
 };
@@ -1422,7 +1463,6 @@ function initChart(ticker, _attempt) {
     volSeries   = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 } });
   } catch(e) { console.error('[chart] addSeries threw', ticker, e); return; }
 
-  // Volume-profile overlay canvas (absolute, on top of the plot area).
   let vpCanvas = null, vpCtx = null;
   try {
     vpCanvas = document.createElement('canvas');
@@ -1441,6 +1481,11 @@ function initChart(ticker, _attempt) {
   try {
     const ro = new ResizeObserver(function() { resizeVPCanvas(ticker); drawVP(ticker); });
     ro.observe(el);
+  } catch(e) {}
+
+  // Recompute the visible-range volume profile whenever the user scrolls/zooms.
+  try {
+    chart.timeScale().subscribeVisibleLogicalRangeChange(function() { drawVP(ticker); });
   } catch(e) {}
 
   const iv = buildIntervalOptions(ticker, DEFAULT_RANGE, RANGE_DEFAULT_IV[DEFAULT_RANGE]);
@@ -1500,11 +1545,22 @@ async function loadChart(ticker, range, interval) {
       }
     } catch(e) {}
 
-    try { inst.chart.timeScale().fitContent(); } catch(e) {}
-
     inst.vpBars = bars;
     computeVPRef(ticker);
     resizeVPCanvas(ticker);
+
+    // Range sets the INITIAL viewport only; full history remains scrollable.
+    try {
+      const vf = data.visible_from;
+      if (vf == null) {
+        inst.chart.timeScale().fitContent();
+      } else {
+        let idx = 0;
+        for (let i = 0; i < bars.length; i++) { if (bars[i].t >= vf) { idx = i; break; } }
+        inst.chart.timeScale().setVisibleLogicalRange({ from: idx - 0.5, to: bars.length - 0.5 });
+      }
+    } catch(e) { try { inst.chart.timeScale().fitContent(); } catch(e2) {} }
+
     drawVP(ticker);
     if (loadingEl) loadingEl.style.display = 'none';
   } catch(e) {
@@ -1519,7 +1575,7 @@ function computeVPRef(ticker) {
   if (!inst || !inst.vpBars || !inst.vpBars.length) return;
   let hi = -Infinity;
   for (let i = 0; i < inst.vpBars.length; i++) { if (inst.vpBars[i].h > hi) hi = inst.vpBars[i].h; }
-  inst.vpRefPrice = hi;   // sentinel: redraw VP whenever this price's y-coordinate moves
+  inst.vpRefPrice = hi;   // sentinel: redraw when this price's y-coordinate moves
 }
 
 function resizeVPCanvas(ticker) {
@@ -1545,7 +1601,20 @@ function drawVP(ticker) {
   const W = el.clientWidth, H = el.clientHeight;
   ctx.clearRect(0, 0, W, H);
 
-  const bars = inst.vpBars;
+  // Profile is computed over the currently VISIBLE candles (true VRVP).
+  const allBars = inst.vpBars;
+  let i0 = 0, i1 = allBars.length - 1;
+  try {
+    const vr = inst.chart.timeScale().getVisibleLogicalRange();
+    if (vr) {
+      i0 = Math.max(0, Math.floor(vr.from));
+      i1 = Math.min(allBars.length - 1, Math.ceil(vr.to));
+    }
+  } catch(e) {}
+  if (i1 < i0) return;
+  const bars = allBars.slice(i0, i1 + 1);
+  if (!bars.length) return;
+
   let lo = Infinity, hi = -Infinity;
   for (let i = 0; i < bars.length; i++) { if (bars[i].l < lo) lo = bars[i].l; if (bars[i].h > hi) hi = bars[i].h; }
   if (!(hi > lo)) return;

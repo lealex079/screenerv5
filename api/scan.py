@@ -123,7 +123,7 @@ SECTOR_METRICS = {
 
 def fetch_mtf_inline(ticker, price):
     configs = [
-        ("1h",  "1h",  "60d"),    # Changed from 4h to 1h
+        ("4h",  "4h",  "60d"),    # 4h: 60d max from yfinance
         ("1d",  "1d",  "max"),
         ("1wk", "1wk", "max"),
         ("1mo", "1mo", "max"),
@@ -173,7 +173,7 @@ def fetch_mtf_inline(ticker, price):
                         pass
         except Exception:
             result[label] = {"ma50": None, "ma200": None}
-    result["_ohlcv_1h"] = ohlcv_4h
+    result["_ohlcv_4h"] = ohlcv_4h
     return result
 
 
@@ -886,8 +886,7 @@ def scan_ticker(ticker):
             except Exception:
                 pass
         # Attach 4h bars from mtf fetch
-        # Attach 1h bars from mtf fetch
-        chart_data["h1"] = mtf.pop("_ohlcv_1h", [])
+        chart_data["h4"] = mtf.pop("_ohlcv_4h", [])
     except Exception:
         chart_data = {"daily": [], "weekly": [], "h4": []}
     # ─────────────────────────────────────────────────────────────────────────
@@ -940,11 +939,7 @@ def scan_ticker(ticker):
         "confluences": confluences,
         "earnings_date": earnings_date,
         "earnings_in_window": earnings_within_window,
-        "chart_data": {
-        "daily": chart_data["daily"], 
-        "weekly": chart_data["weekly"],
-        "h1": chart_data["h4"] # Ensure this matches your JS TF_CONFIGS key
-    }
+        "chart_data": chart_data,
     }
 
 
@@ -1238,15 +1233,16 @@ const chartTFState   = {};   // ticker → current TF string
 
 // Timeframe config: [label, key in chart_data, bars to show]
 const TF_CONFIGS = [
-  { label: "1H",  key: "h1",     bars: 120  }, // Updated to 1H
+  { label: "4H",  key: "h4",     bars: 120  },
   { label: "1D",  key: "daily",  bars: 30   },
-  { label: "1W",  key: "daily",  bars: 5    },   
+  { label: "1W",  key: "daily",  bars: 5    },   // ~5 trading days
   { label: "1M",  key: "daily",  bars: 21   },
   { label: "3M",  key: "daily",  bars: 63   },
   { label: "6M",  key: "daily",  bars: 126  },
   { label: "1Y",  key: "daily",  bars: 252  },
   { label: "2Y",  key: "weekly", bars: 104  },
 ];
+
 function renderChart(d) {
   const cd = d.chart_data;
   if (!cd || (!cd.daily || !cd.daily.length)) return '';
@@ -1264,175 +1260,59 @@ function renderChart(d) {
   '</div>';
 }
 
-// 1. Centralized loading state
-const libraryLoading = {
-    promise: null,
-    isLoaded: false
-};
-
-// Add a version parameter to the URL to force a cache-bust
-async function loadLibrary() {
-    if (typeof LightweightCharts !== 'undefined') return true;
-    return new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        // Force the latest production build and append a timestamp to prevent cache
-        script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js?v=" + Date.now();
-        script.onload = () => resolve(true);
-        script.onerror = reject;
-        document.head.appendChild(script);
-    });
-}
-
-async function initChart(ticker) {
-    const el = document.getElementById('chart-' + ticker);
-    if (!el) return;
-
-    // 1. Foolproof Library Loading
-    if (typeof LightweightCharts === 'undefined') {
-        el.innerHTML = '<div style="padding:20px; color:#64748b; font-family:monospace; font-size:12px;">Loading library...</div>';
-        const script = document.createElement('script');
-        script.src = "https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js";
-        document.head.appendChild(script);
-        await new Promise(resolve => script.onload = resolve);
-    }
-
-    const d = scanResults.find(r => r.ticker === ticker);
-    if (!d || !d.chart_data || !d.chart_data.daily) {
-        el.innerHTML = '<div style="padding:20px; color:#ef4444;">No data available.</div>';
-        return;
-    }
-
-    // 2. Clear element before drawing
-    el.innerHTML = '';
-
-    try {
-        const chart = LightweightCharts.createChart(el, {
-            width: 700,
-            height: 220,
-            layout: { background: { color: '#0f1419' }, textColor: '#475569' },
-            grid: { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } }
-        });
-
-        const candleSeries = chart.addCandlestickSeries({
-            upColor: '#22c55e', downColor: '#ef4444',
-            borderUpColor: '#22c55e', borderDownColor: '#ef4444',
-            wickUpColor: '#22c55e', wickDownColor: '#ef4444'
-        });
-
-        // 3. Sanitized Data Pipeline
-        const seen = new Set();
-        const formattedData = d.chart_data.daily
-            .sort((a, b) => a.t - b.t) // Ensure chronological order
-            .map(b => {
-                const d = new Date(b.t * 1000);
-                const isoDate = d.toISOString().split('T')[0]; // Format: YYYY-MM-DD
-                return { time: isoDate, open: b.o, high: b.h, low: b.l, close: b.c };
-            })
-            .filter(b => {
-                if (seen.has(b.time)) return false; // Remove duplicates
-                seen.add(b.time);
-                return true;
-            });
-
-        candleSeries.setData(formattedData);
-        chart.timeScale().fitContent();
-
-    } catch (err) {
-        console.error("Chart Render Error:", err);
-        el.innerHTML = '<div style="padding:20px; color:#ef4444;">Render Error: ' + err.message + '</div>';
-    }
-}
-
-function applyTF(ticker, tfLabel) {
+function initChart(ticker) {
+  const el = document.getElementById('chart-' + ticker);
+  if (!el || chartInstances[ticker]) return;
   const d = scanResults.find(r => r.ticker === ticker);
-  console.log("DEBUG: Processing", ticker, "TF:", tfLabel, "Data:", d.chart_data[cfg.key]); // ADD THIS
-   
-  if (!inst || !d || !d.chart_data) return;
+  if (!d || !d.chart_data) return;
 
-  const cfg = TF_CONFIGS.find(t => t.label === tfLabel);
-  if (!cfg) return;
-
-  try {
-    let rawBars = (d.chart_data[cfg.key] || []);
-    if (!rawBars.length) return; 
-
-    const isIntraday = (cfg.label === '1H' || cfg.label === '4H');
-    
-    // 2. Ironclad Data Sanitization
-    // Sort raw data by Unix timestamp first
-    rawBars.sort((a, b) => a.t - b.t);
-    
-    let processedCandles = [];
-    let processedVols = [];
-    let processedM50 = [];
-    let processedM200 = [];
-    
-    let seenTimes = new Set();
-    let lastTimeMs = 0;
-
-    for (let b of rawBars) {
-        // Skip invalid rows from yfinance
-        if (b.t == null || isNaN(b.o) || b.o == null) continue;
-        
-        let t;
-        let timeMs;
-        
-        if (isIntraday) {
-            t = b.t; // Intraday requires pure Unix timestamp
-            timeMs = b.t * 1000;
-        } else {
-            // Daily requires strict YYYY-MM-DD. Use UTC to prevent browser timezone drift.
-            const date = new Date(b.t * 1000);
-            const y = date.getUTCFullYear();
-            const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-            const day = String(date.getUTCDate()).padStart(2, '0');
-            t = `${y}-${m}-${day}`;
-            timeMs = new Date(t).getTime();
-        }
-
-        // 3. FATAL RULE PREVENTION: Must be strictly increasing and unique
-        if (seenTimes.has(t) || timeMs <= lastTimeMs) continue; 
-        
-        seenTimes.add(t);
-        lastTimeMs = timeMs;
-        
-        processedCandles.push({ time: t, open: b.o, high: b.h, low: b.l, close: b.c });
-        processedVols.push({ time: t, value: b.v || 0, color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)' });
-        if (b.m50 != null) processedM50.push({ time: t, value: b.m50 });
-        if (b.m200 != null) processedM200.push({ time: t, value: b.m200 });
-    }
-
-    // Slice to the UI timeframe length
-    processedCandles = processedCandles.slice(-cfg.bars);
-    processedVols = processedVols.slice(-cfg.bars);
-    processedM50 = processedM50.slice(-cfg.bars);
-    processedM200 = processedM200.slice(-cfg.bars);
-
-    // Set Data
-    inst.candleSeries.setData(processedCandles);
-    inst.volSeries.setData(processedVols);
-    inst.ma50Series.setData(processedM50);
-    inst.ma200Series.setData(processedM200);
-
-    // Volume Profile Overlays
-    if (d.vp && inst.pocLine) {
-        inst.candleSeries.removePriceLine(inst.pocLine);
-        inst.candleSeries.removePriceLine(inst.vahLine);
-        inst.candleSeries.removePriceLine(inst.valLine);
-    }
-    if (d.vp) {
-        inst.pocLine = inst.candleSeries.createPriceLine({ price: d.vp.poc, color: '#a78bfa', lineWidth: 2, lineStyle: 0 });
-        inst.vahLine = inst.candleSeries.createPriceLine({ price: d.vp.vah, color: '#3b82f6', lineWidth: 1, lineStyle: 1 });
-        inst.valLine = inst.candleSeries.createPriceLine({ price: d.vp.val, color: '#3b82f6', lineWidth: 1, lineStyle: 1 });
-    }
-
-    inst.chart.timeScale().fitContent();
-    chartTFState[ticker] = tfLabel;
-    
-  } catch (err) {
-    // If data mapping fails, print the exact JS error over the canvas
-    if (el) el.innerHTML = `<div style="padding:20px; color:#ef4444; font-family:monospace; font-size:12px; z-index:99; position:relative;">Data Error (${tfLabel}): ${err.message}</div>`;
+  // Wait until the element has a real width before creating the chart.
+  const w = el.clientWidth || el.offsetWidth;
+  if (!w || w < 50) {
+    // Element not painted yet — retry on next frame
+    requestAnimationFrame(function() { initChart(ticker); });
+    return;
   }
+
+  const chart = LightweightCharts.createChart(el, {
+    width:  w,
+    height: 220,
+    layout: { background: { color: '#0f1419' }, textColor: '#475569' },
+    grid:   { vertLines: { color: '#1e2a35' }, horzLines: { color: '#1e2a35' } },
+    crosshair: { mode: 0 },
+    rightPriceScale: { borderColor: '#1e2a35' },
+    timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
+  });
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#22c55e', downColor: '#ef4444',
+    borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+    wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+  });
+  const ma50Series = chart.addLineSeries({
+    color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+  });
+  const ma200Series = chart.addLineSeries({
+    color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+  });
+  const volSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 },
+  });
+
+  chartInstances[ticker] = { chart, candleSeries, volSeries, ma50Series, ma200Series };
+  chartTFState[ticker] = '1D';
+
+  // Load default timeframe data immediately
+  applyTF(ticker, '1D');
+
+  // Keep chart width in sync with the container on window resize
+  window.addEventListener('resize', function() {
+    if (chartInstances[ticker]) {
+      const nw = el.clientWidth || el.offsetWidth;
+      if (nw > 50) chartInstances[ticker].chart.applyOptions({ width: nw });
+    }
+  });
 }
 
 function applyTF(ticker, tfLabel) {
@@ -1443,92 +1323,50 @@ function applyTF(ticker, tfLabel) {
   const cfg  = TF_CONFIGS.find(t => t.label === tfLabel);
   if (!cfg) return;
 
-  let rawBars = (d.chart_data[cfg.key] || []);
-  if (!rawBars.length) return;
+  let bars = (d.chart_data[cfg.key] || []);
+  // Slice to the number of bars for this TF
+  bars = bars.slice(-cfg.bars);
+  if (!bars.length) return;
 
-  const isIntraday = (cfg.label === '1H' || cfg.label === '4H');
-  
-  const formatTime = (unixSeconds) => {
-      if (isIntraday) return unixSeconds; // LWC intraday requires unix seconds
-      
-      // LWC Daily requires exact 'YYYY-MM-DD' strings.
-      // Using UTC conversion to avoid local browser timezone shifts shifting days.
-      const date = new Date(unixSeconds * 1000);
-      const y = date.getUTCFullYear();
-      const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-      const day = String(date.getUTCDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-  };
+  // Candlestick data
+  const candles = bars.map(b => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }));
+  inst.candleSeries.setData(candles);
 
-  // 1. Map to LWC format and deduplicate based on FORMATTED time
-  let processedCandles = [];
-  let processedVols = [];
-  let processedM50 = [];
-  let processedM200 = [];
-  let seenTimes = new Set();
+  // Volume
+  const vols = bars.map(b => ({
+    time: b.t, value: b.v,
+    color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)',
+  }));
+  inst.volSeries.setData(vols);
 
-  // Ensure chronological order
-  rawBars.sort((a, b) => a.t - b.t);
+  // MAs — only show points that have values
+  const m50  = bars.filter(b => b.m50  != null).map(b => ({ time: b.t, value: b.m50  }));
+  const m200 = bars.filter(b => b.m200 != null).map(b => ({ time: b.t, value: b.m200 }));
+  inst.ma50Series.setData(m50);
+  inst.ma200Series.setData(m200);
 
-  for (let b of rawBars) {
-      if (b.t == null || b.o == null) continue; // Skip invalid bars
-      
-      let t = formatTime(b.t);
-      
-      // Strict deduplication: LWC throws a fatal error if two data points share the same time
-      if (!seenTimes.has(t)) {
-          seenTimes.add(t);
-          
-          processedCandles.push({ time: t, open: b.o, high: b.h, low: b.l, close: b.c });
-          processedVols.push({ 
-              time: t, value: b.v || 0, 
-              color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)' 
-          });
-          
-          if (b.m50 != null) processedM50.push({ time: t, value: b.m50 });
-          if (b.m200 != null) processedM200.push({ time: t, value: b.m200 });
+  // Add earnings marker if within the visible range
+  const ed = d.earnings_date;
+  if (ed) {
+    try {
+      const edTs = Math.floor(new Date(ed).getTime() / 1000);
+      const inRange = bars.some(b => Math.abs(b.t - edTs) < 7 * 86400);
+      if (inRange) {
+        inst.candleSeries.setMarkers([{
+          time: edTs,
+          position: 'aboveBar',
+          color: d.earnings_in_window ? '#ef4444' : '#f59e0b',
+          shape: 'arrowDown',
+          text: 'ERN',
+        }]);
+      } else {
+        inst.candleSeries.setMarkers([]);
       }
+    } catch(e) {}
   }
 
-  // 2. Slice to requested timeframe length
-  processedCandles = processedCandles.slice(-cfg.bars);
-  processedVols = processedVols.slice(-cfg.bars);
-  processedM50 = processedM50.slice(-cfg.bars);
-  processedM200 = processedM200.slice(-cfg.bars);
-
-  try {
-    // 3. Mount Data
-    inst.candleSeries.setData(processedCandles);
-    inst.volSeries.setData(processedVols);
-    inst.ma50Series.setData(processedM50);
-    inst.ma200Series.setData(processedM200);
-
-    // 4. Mount VP Overlays (If loaded)
-    if (d.vp) {
-      if (inst.pocLine) inst.candleSeries.removePriceLine(inst.pocLine);
-      if (inst.vahLine) inst.candleSeries.removePriceLine(inst.vahLine);
-      if (inst.valLine) inst.candleSeries.removePriceLine(inst.valLine);
-
-      inst.pocLine = inst.candleSeries.createPriceLine({
-        price: d.vp.poc, color: '#a78bfa', lineWidth: 2, lineStyle: 0,
-        axisLabelVisible: true, title: 'POC',
-      });
-      inst.vahLine = inst.candleSeries.createPriceLine({
-        price: d.vp.vah, color: '#3b82f6', lineWidth: 1, lineStyle: 1,
-        axisLabelVisible: true, title: 'VAH',
-      });
-      inst.valLine = inst.candleSeries.createPriceLine({
-        price: d.vp.val, color: '#3b82f6', lineWidth: 1, lineStyle: 1,
-        axisLabelVisible: true, title: 'VAL',
-      });
-    }
-
-    // 5. Adjust Viewport
-    inst.chart.timeScale().fitContent();
-    chartTFState[ticker] = tfLabel;
-  } catch (e) {
-    console.error("LightweightCharts Rendering Error:", e);
-  }
+  inst.chart.timeScale().fitContent();
+  chartTFState[ticker] = tfLabel;
 }
 
 function setChartTFBtn(btnEl) {
@@ -1682,15 +1520,9 @@ async function loadVP(ticker) {
     const res = await fetch('/api/scan?vp=' + encodeURIComponent(ticker));
     const vp = await res.json();
     if (vp.error) { el.innerHTML = '<span class="c-red">' + vp.error + '</span>'; return; }
-    
     const d = scanResults.find(r => r.ticker === ticker);
     if (d) d.vp = vp;
     el.innerHTML = renderVPContent(vp, d ? d.price : 0);
-    
-    // CRITICAL: Redraw the chart to apply the VP price lines now that data exists
-    if (chartInstances[ticker] && chartInstances[ticker]._loaded) {
-        applyTF(ticker, chartTFState[ticker] || '1D');
-    }
   } catch(e) {
     el.innerHTML = '<span class="c-red">Error: ' + e.message + '</span>';
   }
@@ -2128,26 +1960,6 @@ function copyOne(ticker, btnEl) { const d = scanResults.find(r => r.ticker === t
 function copyAll(btnEl) {
   const all = scanResults.map(formatForClaude).join('\n\n' + '='.repeat(60) + '\n\n');
   btnEl.dataset.label = 'Copy all for Claude'; copyText(all, btnEl);
-}
-const observer = new MutationObserver((mutations) => {
-    mutations.forEach((mutation) => {
-        mutation.addedNodes.forEach((node) => {
-            // Check if the added node is a card
-            if (node.nodeType === 1 && node.id && node.id.startsWith('card-')) {
-                const ticker = node.id.replace('card-', '');
-                // Wait for the next browser paint so the div has dimensions
-                requestAnimationFrame(() => {
-                    initChart(ticker);
-                });
-            }
-        });
-    });
-});
-
-// Start watching the results container
-const resultsContainer = document.getElementById('results');
-if (resultsContainer) {
-    observer.observe(resultsContainer, { childList: true });
 }
 </script>
 </body>

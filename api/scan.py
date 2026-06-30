@@ -2414,8 +2414,9 @@ function formatForClaude(d) {
   // Earnings
   if (d.earnings_date) {
     L.push('');
+    const edays = d.earnings_days != null ? ' (in ' + d.earnings_days + ' day' + (d.earnings_days === 1 ? '' : 's') + ')' : '';
     const ewarn = d.earnings_in_window ? ' ⚠️  WITHIN OPTIONS WINDOW — do not sell puts through earnings' : '';
-    L.push('EARNINGS DATE: ' + d.earnings_date + ewarn);
+    L.push('EARNINGS DATE: ' + d.earnings_date + edays + ewarn);
   }
 
   // AVWAP
@@ -2484,6 +2485,41 @@ function formatForClaude(d) {
       L.push('');
       L.push('IV RANK: ' + ivr.toFixed(0) + '/100 (' + ivrLabel + ')');
       L.push('  (Cross-sectional proxy from current chain IV range — not time-series)');
+    }
+    // IV/HV ratio
+    if (_optD.iv_hv != null) {
+      const rr = _optD.iv_hv;
+      const lbl = rr >= 1.2 ? 'options rich vs realized — favorable for selling'
+        : rr >= 0.9 ? 'fairly priced'
+        : 'options cheap vs realized — selling less attractive';
+      L.push('');
+      L.push('IV/HV RATIO: ' + rr.toFixed(2) + 'x (' + lbl + ')');
+      if (_optD.atm_iv != null && _optD.hv30 != null) {
+        L.push('  ATM IV ' + _optD.atm_iv.toFixed(1) + '% vs 30d HV ' + _optD.hv30.toFixed(1) + '%');
+      }
+    }
+    // Liquidity score
+    if (_optD.liquidity) {
+      const lq = _optD.liquidity;
+      L.push('');
+      L.push('LIQUIDITY SCORE: ' + lq.score.toFixed(0) + '/100 (grade ' + lq.grade + ')');
+      const bits = [];
+      if (lq.avg_volume != null) bits.push('avg vol ' + (lq.avg_volume/1e6).toFixed(1) + 'M');
+      if (lq.total_chain_oi != null) bits.push('chain OI ' + lq.total_chain_oi.toLocaleString());
+      if (lq.median_spread_pct != null) bits.push('median spread ' + lq.median_spread_pct.toFixed(1) + '%');
+      if (lq.median_spread_width != null) bits.push('$' + lq.median_spread_width.toFixed(2) + ' wide');
+      if (bits.length) L.push('  ' + bits.join(' | '));
+    }
+    // Trade grades
+    if (_optD.grades) {
+      const g = _optD.grades;
+      L.push('');
+      L.push('TRADE GRADES (starting weights — not yet validated against outcomes)');
+      [['Sell Put','sell_put'],['Wheel','wheel'],['Buy Shares','buy_shares'],['Sell Call','sell_call']].forEach(function(p){
+        const v = g[p[1]];
+        if (!v) return;
+        L.push('  ' + (p[0]+':').padEnd(12) + v.grade + ' (' + v.score.toFixed(0) + '/100) — ' + (v.reasons||[]).join(', '));
+      });
     }
     // ── CHANGE 3 in Copy for Claude: unusual OI ───────────────────────────────
     if (_optD.unusual_oi) {

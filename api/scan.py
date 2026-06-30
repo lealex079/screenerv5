@@ -1246,13 +1246,12 @@ const TF_CONFIGS = [
 function renderChart(d) {
   const cd = d.chart_data;
   if (!cd || (!cd.daily || !cd.daily.length)) return '';
+  const tfButtons = TF_CONFIGS.map(function(tf) {
+    const active = tf.label === '1D' ? ' active' : '';
+    return '<button class="tf-btn' + active + '" data-ticker="' + d.ticker + '" data-tf="' + tf.label + '" onclick="setChartTFBtn(this)">' + tf.label + '</button>';
+  }).join('');
   return '<div class="chart-section">' +
-    '<div class="chart-tf-bar" id="tf-bar-' + d.ticker + '">' +
-    TF_CONFIGS.map(function(tf) {
-      const active = tf.label === '1D' ? ' active' : '';
-      return '<button class="tf-btn' + active + '" onclick="setChartTF('' + d.ticker + '','' + tf.label + '',this)">' + tf.label + '</button>';
-    }).join('') +
-    '</div>' +
+    '<div class="chart-tf-bar" id="tf-bar-' + d.ticker + '">' + tfButtons + '</div>' +
     '<div class="chart-wrap" id="chart-' + d.ticker + '"></div>' +
     '<div class="chart-legend">' +
       '<div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>50 MA</div>' +
@@ -1363,11 +1362,19 @@ function applyTF(ticker, tfLabel) {
   chartTFState[ticker] = tfLabel;
 }
 
-function setChartTF(ticker, tfLabel, btnEl) {
-  // Update active button
+function setChartTFBtn(btnEl) {
+  const ticker  = btnEl.getAttribute('data-ticker');
+  const tfLabel = btnEl.getAttribute('data-tf');
   const bar = document.getElementById('tf-bar-' + ticker);
   if (bar) bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
   btnEl.classList.add('active');
+  applyTF(ticker, tfLabel);
+}
+
+function setChartTF(ticker, tfLabel, btnEl) {
+  const bar = document.getElementById('tf-bar-' + ticker);
+  if (bar) bar.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+  if (btnEl) btnEl.classList.add('active');
   applyTF(ticker, tfLabel);
 }
 

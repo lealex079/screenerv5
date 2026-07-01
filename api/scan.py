@@ -1576,6 +1576,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .rng-btn.active { background: #1e2a35; color: #22c55e; border-color: #22c55e; }
   .chart-interval { font-size: 10px; color: #475569; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .iv-select { background: #0f1419; border: 0.5px solid #1e2a35; color: #94a3b8; padding: 3px 6px; border-radius: 4px; font-size: 10px; font-family: inherit; cursor: pointer; }
+  .chart-snap-btn { background: #1a2332; border: 0.5px solid #2a3a4e; color: #94a3b8; padding: 3px 10px; border-radius: 4px; font-size: 10px; cursor: pointer; font-family: inherit; white-space: nowrap; transition: all 0.12s; }
+  .chart-snap-btn:hover { border-color: #22c55e; color: #e2e8f0; }
   .chart-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #475569; background: #0f1419; z-index: 3; }
   .vp-overlay { position: absolute; top: 0; right: 0; pointer-events: none; z-index: 2; }
   .legend-vp { color: #475569; }
@@ -1797,6 +1799,7 @@ function renderChart(d) {
       '<div class="chart-interval">Interval: ' +
         '<select class="iv-select" id="iv-sel-' + d.ticker + '" data-ticker="' + d.ticker + '" onchange="onIntervalChange(this)"></select>' +
       '</div>' +
+      '<button class="chart-snap-btn" onclick="downloadChartSnapshot(\'' + d.ticker + '\')" title="Download chart PNG (candles + 50/200 MA + volume profile)">\u2913 PNG</button>' +
     '</div>' +
     '<div class="chart-wrap" id="chart-' + d.ticker + '"><div class="chart-loading" id="chart-loading-' + d.ticker + '">Loading chart...</div></div>' +
     '<div class="chart-legend">' +
@@ -1818,6 +1821,77 @@ function buildIntervalOptions(ticker, range, preferred) {
     }).join('');
   }
   return chosen;
+}
+
+function downloadChartSnapshot(ticker) {
+  const inst = chartInstances[ticker];
+  const el = document.getElementById('chart-' + ticker);
+  if (!inst || !inst.chart || !el) { alert('Load the chart first, then download.'); return; }
+  let shot;
+  try { shot = inst.chart.takeScreenshot(); }
+  catch (e) { console.error('[snap] takeScreenshot failed', e); alert('Chart snapshot is not supported in this browser.'); return; }
+  try { drawVP(ticker); } catch (e) {}
+
+  const W = el.clientWidth || shot.width;
+  const H = el.clientHeight || shot.height;
+  const S = 2;            // export at 2x for a crisp PNG
+  const titleH = 56;
+  const out = document.createElement('canvas');
+  out.width  = Math.round(W * S);
+  out.height = Math.round((H + titleH) * S);
+  const g = out.getContext('2d');
+  g.scale(S, S);
+
+  g.fillStyle = '#0f1419';
+  g.fillRect(0, 0, W, H + titleH);
+
+  const st = chartState[ticker] || {};
+  const bars = inst.vpBars || [];
+  const last = bars.length ? bars[bars.length - 1] : null;
+  const px = last ? ('$' + Number(last.c).toFixed(2)) : '';
+  const now = new Date();
+  const pad = function(n){ return (n < 10 ? '0' : '') + n; };
+  const dstr = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+  const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
+  // title line
+  g.textBaseline = 'alphabetic';
+  g.fillStyle = '#e2e8f0';
+  g.font = '600 15px ' + FONT;
+  g.fillText(ticker + (px ? '   ' + px : ''), 12, 22);
+  g.fillStyle = '#64748b';
+  g.font = '11px ' + FONT;
+  g.textAlign = 'right';
+  g.fillText('screenerv51 \u00b7 ' + dstr, W - 12, 22);
+  g.textAlign = 'left';
+
+  // second line: range/interval + colour legend
+  let lx = 12;
+  g.fillStyle = '#64748b';
+  g.font = '11px ' + FONT;
+  const rngtxt = (st.range || '') + ' / ' + (st.interval || '');
+  g.fillText(rngtxt, lx, 42);
+  lx += g.measureText(rngtxt).width + 18;
+  const legends = [['50 MA', '#22c55e'], ['200 MA', '#3b82f6'], ['POC / vol profile', '#f59e0b']];
+  legends.forEach(function(it) {
+    g.fillStyle = it[1]; g.fillRect(lx, 34, 8, 8);
+    g.fillStyle = '#94a3b8'; g.fillText(it[0], lx + 12, 42);
+    lx += 12 + g.measureText(it[0]).width + 16;
+  });
+
+  // composite: LWC chart, then the VP overlay on top
+  try { g.drawImage(shot, 0, titleH, W, H); } catch (e) { console.error('[snap] draw chart', e); }
+  try { if (inst.vpCanvas) g.drawImage(inst.vpCanvas, 0, titleH, W, H); } catch (e) { console.error('[snap] draw VP', e); }
+
+  out.toBlob(function(blob) {
+    if (!blob) { alert('Snapshot failed to encode.'); return; }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = ticker + '_' + (st.range || 'chart') + '_' + (st.interval || '') + '_' + dstr + '.png';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1500);
+  }, 'image/png');
 }
 
 function initChart(ticker, _attempt) {

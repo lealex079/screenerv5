@@ -1269,24 +1269,74 @@ def scan_ticker(ticker):
     earnings_within_window = False
     try:
         import datetime as _dt
-        _cal = yf.Ticker(ticker).calendar
-        if _cal is not None and not _cal.empty:
-            _col = None
-            for _c in ['Earnings Date', 'earnings_date', 'Earnings date']:
+        _today = _dt.date.today()
+        _tk = yf.Ticker(ticker)
+
+        def _coerce(x):
+            if x is None:
+                return None
+            if isinstance(x, _dt.date) and not hasattr(x, "hour"):
+                return x
+            if hasattr(x, "date"):
+                try:
+                    return x.date()
+                except Exception:
+                    return None
+            if isinstance(x, str):
+                try:
+                    return _dt.date.fromisoformat(x[:10])
+                except Exception:
+                    return None
+            return None
+
+        _cands = []
+        # Source 1: .calendar — dict in modern yfinance, DataFrame in older
+        try:
+            _cal = _tk.calendar
+        except Exception:
+            _cal = None
+        if isinstance(_cal, dict):
+            _v = _cal.get("Earnings Date") or _cal.get("earnings_date")
+            _seq = _v if isinstance(_v, (list, tuple)) else [_v]
+            for _x in _seq:
+                _d = _coerce(_x)
+                if _d:
+                    _cands.append(_d)
+        elif _cal is not None and hasattr(_cal, "columns"):
+            for _c in ["Earnings Date", "earnings_date", "Earnings date"]:
                 if _c in _cal.columns:
-                    _col = _c
+                    try:
+                        for _x in list(_cal[_c].dropna())[:4]:
+                            _d = _coerce(_x)
+                            if _d:
+                                _cands.append(_d)
+                    except Exception:
+                        pass
                     break
-            if _col and len(_cal[_col]) > 0:
-                _ed = _cal[_col].iloc[0]
-                if hasattr(_ed, 'date'):
-                    _ed = _ed.date()
-                elif isinstance(_ed, str):
-                    _ed = _dt.date.fromisoformat(_ed[:10])
-                _today = _dt.date.today()
-                if _ed >= _today:
-                    earnings_date = str(_ed)
-                    earnings_days = (_ed - _today).days
-                    earnings_within_window = earnings_days <= 45
+        # Source 2: get_earnings_dates() fallback (indexed by timestamp)
+        if not any(_d >= _today for _d in _cands):
+            try:
+                _edf = _tk.get_earnings_dates(limit=8)
+                if _edf is not None and hasattr(_edf, "index"):
+                    for _ts in _edf.index:
+                        _d = _coerce(_ts)
+                        if _d:
+                            _cands.append(_d)
+            except Exception:
+                pass
+
+        _future = sorted(d for d in _cands if d >= _today)
+        if _future:
+            _ed = _future[0]
+            earnings_date = str(_ed)
+            earnings_days = (_ed - _today).days
+            earnings_within_window = 0 <= earnings_days <= 45
+        elif _cands:
+            # only past dates known -> report most recent so the field is never blank
+            _past = sorted(_cands)[-1]
+            earnings_date = str(_past)
+            earnings_days = (_past - _today).days   # negative = already reported
+            earnings_within_window = False
     except Exception:
         pass
 
@@ -2038,15 +2088,22 @@ function renderVolumeBadge(d) {
 }
 
 function renderEarningsFlag(d) {
-  if (!d.earnings_date) return '';
-  const inWindow = d.earnings_in_window;
   const days = d.earnings_days;
+  // No date at all from the data source
+  if (!d.earnings_date && days == null) {
+    return '<div style="background:#1e2a35;border:1px solid #334155;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#64748b">\ud83d\udcc5 Earnings date: not provided by data source</div>';
+  }
+  const inWindow = d.earnings_in_window;
+  // Already reported (days negative): show informationally, no warning
+  if (days != null && days < 0) {
+    return '<div style="background:#1e2a35;border:1px solid #334155;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#94a3b8">\ud83d\udcc5 Last earnings: ' + d.earnings_date + ' (reported ' + Math.abs(days) + ' day' + (days === -1 ? '' : 's') + ' ago; next date not yet published)</div>';
+  }
   const soon = days != null && days <= 7;
   const bg = inWindow ? 'background:#7c2d12;border:1px solid #dc2626' : 'background:#1e2a35;border:1px solid #334155';
-  const icon = inWindow ? '⚠️ ' : '📅 ';
+  const icon = inWindow ? '\u26a0\ufe0f ' : '\ud83d\udcc5 ';
   const inDays = days != null ? ' (in ' + days + ' day' + (days === 1 ? '' : 's') + ')' : '';
   const label = inWindow
-    ? 'EARNINGS ' + d.earnings_date + inDays + ' — within options window. Do not sell puts through earnings.'
+    ? 'EARNINGS ' + d.earnings_date + inDays + ' \u2014 within options window. Do not sell puts through earnings.'
     : 'Next earnings: ' + d.earnings_date + inDays;
   const col = inWindow ? '#fca5a5' : (soon ? '#fbbf24' : '#94a3b8');
   return '<div style="' + bg + ';border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + col + '">' +
@@ -2475,12 +2532,19 @@ function formatForClaude(d) {
     });
   }
 
-  // Earnings
-  if (d.earnings_date) {
-    L.push('');
-    const edays = d.earnings_days != null ? ' (in ' + d.earnings_days + ' day' + (d.earnings_days === 1 ? '' : 's') + ')' : '';
-    const ewarn = d.earnings_in_window ? ' ⚠️  WITHIN OPTIONS WINDOW — do not sell puts through earnings' : '';
-    L.push('EARNINGS DATE: ' + d.earnings_date + edays + ewarn);
+  // Earnings (always emitted, in or out of the options window)
+  L.push('');
+  {
+    const days = d.earnings_days;
+    if (!d.earnings_date && days == null) {
+      L.push('EARNINGS DATE: not provided by data source');
+    } else if (days != null && days < 0) {
+      L.push('EARNINGS DATE: ' + d.earnings_date + ' (reported ' + Math.abs(days) + ' day' + (days === -1 ? '' : 's') + ' ago; next date not yet published)');
+    } else {
+      const edays = days != null ? ' (in ' + days + ' day' + (days === 1 ? '' : 's') + ')' : '';
+      const ewarn = d.earnings_in_window ? ' \u26a0\ufe0f  WITHIN OPTIONS WINDOW \u2014 do not sell puts through earnings' : '';
+      L.push('EARNINGS DATE: ' + d.earnings_date + edays + ewarn);
+    }
   }
 
   // AVWAP

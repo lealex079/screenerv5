@@ -489,64 +489,108 @@ def premium_score(vol_rank, iv_hv):
     return sum(p * w for p, w in zip(parts, weights)) / sum(weights)
 
 
+def compute_structure_score(mtf, cmf, obv_roc):
+    """0-100 trend-structure score: fraction of the multi-timeframe MA stack
+    (4h/1D/1W/1M x 50/200) that price sits ABOVE (70%), blended with money flow
+    (30%). This is the down-move analogue of CrashScore: CrashScore only sees
+    parabolic UP-moves, so a stock in a waterfall downtrend below its whole MA
+    stack can clear the crash gate yet still be a falling knife. structure_score
+    catches that. ~0 = below everything (NKE-type knife); ~100 = above everything
+    (intact uptrend). Starting weights, NOT yet validated against outcomes."""
+    above, total = 0, 0
+    for tf in ("4h", "1d", "1wk", "1mo"):
+        leg = (mtf or {}).get(tf, {}) or {}
+        for k in ("ma50_dist", "ma200_dist"):
+            d = leg.get(k)
+            if d is None:
+                continue
+            total += 1
+            if d > 0:
+                above += 1
+    ma_frac = (above / total * 100.0) if total else 50.0
+    _obv = _clamp(obv_roc if obv_roc is not None else 0.0, -100.0, 100.0)
+    flow = _clamp(50.0 + _obv * 0.3 + (cmf if cmf is not None else 0.0) * 100.0)
+    return round(_clamp(0.70 * ma_frac + 0.30 * flow), 0)
+
+
 def _g(ctx, key, default):
     v = ctx.get(key) if ctx else None
     return default if v is None else v
 
 
 def compute_trade_grades(ctx, opt):
-    """Returns {sell_put, wheel, buy_shares, sell_call} each {score, grade, reasons}.
-    ctx = scan-level scalars; opt = options-level scalars."""
+    """Returns {sell_put, wheel, buy_shares, sell_call}, each {score, grade, reasons}.
+    ctx = scan-level scalars; opt = options-level scalars.
+
+    Cross-sector revision: a trend-structure term stops downtrending names from
+    over-scoring on put-selling (CrashScore is blind to waterfalls); fundamentals
+    can no longer rescue broken structure on the Wheel (value-trap guard); hard
+    floors for waterfall structure and unsellable liquidity. Starting weights,
+    NOT yet validated against the SA outcome dataset."""
     ctx = ctx or {}
     opt = opt or {}
     trend   = _clamp(_g(ctx, "trend_score", 50))
     crash   = _clamp(_g(ctx, "crash_score", 50))
     support = _clamp(_g(ctx, "support_strength", 30))
     resist  = _clamp(_g(ctx, "resistance_strength", 30))
+    struct  = _clamp(_g(ctx, "structure_score", 50))
     fund    = _g(ctx, "fundamental_score", None)
     fund_v  = _clamp(fund if fund is not None else 50)
     rsi     = _g(ctx, "rsi", 50)
-    ma_dist = _g(ctx, "ma_distance", 0)        # % above 200MA
     cmf     = _g(ctx, "cmf", 0)
     obv     = _g(ctx, "obv_roc", 0)
-    drawdown = _g(ctx, "drawdown", 0)          # % from 52w high (<=0)
+    rally20 = _g(ctx, "rally_20d", None)
 
     liq  = _clamp(_g(opt, "liquidity_score", 50))
     prem = premium_score(opt.get("vol_rank"), opt.get("iv_hv"))
     ed   = opt.get("earnings_days")
     risk_free = _clamp(100 - crash)            # lower crash = safer timing
 
-    # flow component 0-100
-    flow = 50 + (cmf * 200) + (obv * 1.5)
-    flow = _clamp(flow)
-    # MA-structure component for share buying (above 200MA good, extended capped)
-    ma_struct = _clamp(50 + ma_dist * 2.0)
+    flow = _clamp(50 + (cmf * 200) + (obv * 1.5))
+
+    # Shared hard gates for the two put-selling grades (Sell Put, Wheel).
+    def apply_put_caps(score, reasons):
+        if crash >= 60:
+            note = "CrashScore %d gate (no puts)" % crash
+            if rally20 is not None:
+                note += "; 20d move %+.0f%%" % rally20
+            score = min(score, 35.0); reasons.append(note)
+        if struct < 25:
+            score = min(score, 54.0)
+            reasons.append("waterfall: price below MA stack (structure %d)" % struct)
+        if liq < 35:
+            score = min(score, 54.0)
+            reasons.append("thin chain (liquidity %d)" % liq)
+        if ed is not None and 0 <= ed <= 45:
+            score = min(score, 45.0); reasons.append("earnings in %d d" % ed)
+        return score, reasons
 
     # ── Sell Put ──────────────────────────────────────────────────────────────
-    sp = (0.25 * trend + 0.20 * support + 0.20 * prem + 0.15 * liq + 0.20 * risk_free)
-    sp_reasons = ["trend %d" % trend, "support %d" % support,
+    sp_base = (0.18 * trend + 0.20 * struct + 0.12 * support
+               + 0.20 * prem + 0.15 * liq + 0.15 * risk_free)
+    sp_reasons = ["trend %d" % trend, "structure %d" % struct, "support %d" % support,
                   "premium %d" % prem, "liquidity %d" % liq]
-    if crash >= 60:
-        sp = min(sp, 35.0); sp_reasons.append("CrashScore %d gate (no puts)" % crash)
-    if ed is not None and 0 <= ed <= 45:
-        sp = min(sp, 45.0); sp_reasons.append("earnings in %d d" % ed)
+    sp, sp_reasons = apply_put_caps(sp_base, sp_reasons)
 
-    # ── Wheel (sell put, but willing to own -> fundamentals matter) ───────────
-    wh = 0.78 * sp + 0.22 * fund_v
-    wh_reasons = list(sp_reasons) + ["fundamentals %d" % fund_v]
-    if crash >= 60: wh = min(wh, 35.0)
-    if ed is not None and 0 <= ed <= 45: wh = min(wh, 45.0)
+    # ── Wheel: put + willing to own, so fundamentals matter -- but they cannot
+    #    lift broken structure. A cheap falling knife is still a falling knife. ──
+    wh = 0.70 * sp_base + 0.30 * fund_v
+    wh_reasons = ["trend %d" % trend, "structure %d" % struct, "support %d" % support,
+                  "premium %d" % prem, "liquidity %d" % liq, "fundamentals %d" % fund_v]
+    if struct < 30 and fund_v > 60:
+        wh = min(wh, sp_base)
+        wh_reasons.append("value-trap guard: fundamentals capped by broken structure")
+    wh, wh_reasons = apply_put_caps(wh, wh_reasons)
 
-    # ── Buy Shares ────────────────────────────────────────────────────────────
-    bs = (0.30 * trend + 0.28 * fund_v + 0.22 * ma_struct + 0.20 * flow)
-    bs_reasons = ["trend %d" % trend, "fundamentals %d" % fund_v,
-                  "MA structure %d" % ma_struct, "flow %d" % flow]
+    # ── Buy Shares: trend + value + structure; blow-off capped ────────────────
+    bs = (0.34 * trend + 0.33 * fund_v + 0.33 * struct)
+    bs_reasons = ["trend %d" % trend, "fundamentals %d" % fund_v, "structure %d" % struct]
     if crash >= 70:
         bs = min(bs, 45.0); bs_reasons.append("blow-off risk (CrashScore %d)" % crash)
 
-    # ── Sell Call (best when overhead resistance + rich IV + flat/weak trend) ──
-    trend_inv = _clamp(100 - trend)
-    overbought = _clamp((rsi - 50) * 2)        # RSI>50 adds
+    # ── Sell Call: overhead resistance + rich IV + flat/weak trend ────────────
+    trend_inv  = _clamp(100 - trend)
+    overbought = _clamp((rsi - 50) * 2)
     sc = (0.35 * resist + 0.25 * prem + 0.20 * trend_inv + 0.10 * liq + 0.10 * overbought)
     sc_reasons = ["resistance %d" % resist, "premium %d" % prem,
                   "trend-fade %d" % trend_inv, "liquidity %d" % liq]
@@ -561,7 +605,6 @@ def compute_trade_grades(ctx, opt):
         "buy_shares": pack(bs, bs_reasons),
         "sell_call":  pack(sc, sc_reasons),
     }
-
 
 def compute_liquidity(all_puts, all_calls, spot, total_chain_oi, avg_volume, today_chain_vol=None):
     """LiquidityScore 0-100 from underlying volume, chain OI, bid/ask spread, and
@@ -1219,6 +1262,7 @@ def scan_ticker(ticker):
         roic,
         rev_growth * 100 if rev_growth else None,
     )
+    structure_score = compute_structure_score(mtf, cmf, obv_roc)
 
     earnings_date = None
     earnings_days = None
@@ -1356,6 +1400,7 @@ def scan_ticker(ticker):
         "support_strength": support_strength,
         "resistance_strength": resistance_strength,
         "fundamental_score": fundamental_score,
+        "structure_score": structure_score,
         "chart_data": chart_data,
     }
 
@@ -2172,7 +2217,7 @@ async function loadOptions(ticker, crashScore, btnEl) {
   el.innerHTML = '<div class="c-dim" style="font-size:12px;padding:8px 0">Fetching chain...</div>';
   try {
     const d = scanResults.find(function(r){ return r.ticker === ticker; }) || {};
-    const ctx = { trend_score:d.trend_score, crash_score:d.crash_score, support_strength:d.support_strength, resistance_strength:d.resistance_strength, fundamental_score:d.fundamental_score, rsi:d.rsi, ma_distance:d.ma_distance, drawdown:d.drawdown, cmf:d.cmf, obv_roc:d.obv_roc, earnings_days:d.earnings_days };
+    const ctx = { trend_score:d.trend_score, crash_score:d.crash_score, support_strength:d.support_strength, resistance_strength:d.resistance_strength, fundamental_score:d.fundamental_score, rsi:d.rsi, ma_distance:d.ma_distance, drawdown:d.drawdown, cmf:d.cmf, obv_roc:d.obv_roc, earnings_days:d.earnings_days, structure_score:d.structure_score, rally_20d:d.rally_20d };
     let ctxParam = '';
     try { ctxParam = '&ctx=' + encodeURIComponent(btoa(JSON.stringify(ctx))); } catch(e) {}
     const res = await fetch('/api/scan?options=' + encodeURIComponent(ticker) + ctxParam);

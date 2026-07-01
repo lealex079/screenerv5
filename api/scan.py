@@ -1920,7 +1920,7 @@ function initChart(ticker, _attempt) {
     });
   } catch(e) { console.error('[chart] createChart threw', ticker, e); return; }
 
-  let candleSeries, ma50Series, ma200Series, volSeries;
+  let candleSeries, ma50Series, ma200Series;
   try {
     candleSeries = chart.addCandlestickSeries({
       upColor: '#22c55e', downColor: '#ef4444',
@@ -1929,7 +1929,6 @@ function initChart(ticker, _attempt) {
     });
     ma50Series  = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
     ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-    volSeries   = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 } });
   } catch(e) { console.error('[chart] addSeries threw', ticker, e); return; }
 
   let vpCanvas = null, vpCtx = null;
@@ -1941,7 +1940,7 @@ function initChart(ticker, _attempt) {
   } catch(e) { console.warn('[chart] VP canvas failed', e); }
 
   chartInstances[ticker] = {
-    chart: chart, candleSeries: candleSeries, volSeries: volSeries,
+    chart: chart, candleSeries: candleSeries,
     ma50Series: ma50Series, ma200Series: ma200Series,
     vpCanvas: vpCanvas, vpCtx: vpCtx, vpBars: null, vpRefPrice: null, vpLastTop: null,
   };
@@ -1995,9 +1994,6 @@ async function loadChart(ticker, range, interval) {
 
     try { inst.candleSeries.setData(bars.map(function(b){ return { time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }; })); }
     catch(e) { console.error('[chart] candle setData failed', ticker, e, 'first bar:', bars[0]); if (loadingEl) loadingEl.textContent = 'render error'; return; }
-
-    try { inst.volSeries.setData(bars.map(function(b){ return { time: b.t, value: b.v, color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)' }; })); }
-    catch(e) { console.error('[chart] vol setData failed', ticker, e); }
 
     try {
       inst.ma50Series.setData(bars.filter(function(b){ return b.m50 != null; }).map(function(b){ return { time: b.t, value: b.m50 }; }));

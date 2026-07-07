@@ -1506,8 +1506,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .price { font-size: 20px; font-weight: 500; }
   .drawdown { font-size: 11px; color: #64748b; }
   .scores { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 14px; }
-  .score-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 10px; color: #475569; margin: -8px 0 14px 2px; }
-  .score-legend b { color: #64748b; font-weight: 600; }
+  .score-legend { width: 100%; border-collapse: collapse; font-size: 10px; margin: -6px 0 14px; }
+  .score-legend td { padding: 3px 8px; border: 0.5px solid #1e2a35; white-space: nowrap; }
+  .score-legend .sl-h { color: #94a3b8; font-weight: 600; background: #0f1419; }
+  .score-legend .sl-cap { color: #475569; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; background: transparent; border: none; padding: 0 0 3px 2px; }
   .score-box { background: #0f1419; border-radius: 8px; padding: 12px; text-align: center; }
   .score-label { font-size: 11px; color: #64748b; margin-bottom: 4px; }
   .score-value { font-size: 22px; font-weight: 500; }
@@ -1729,10 +1731,11 @@ function renderCard(d) {
       '<div class="score-box"><div class="score-label">CrashScore</div><div class="score-value '+crashColor+'">'+d.crash_score.toFixed(0)+'</div></div>' +
       '<div class="score-box"><div class="score-label">Regime</div><div class="regime-value '+regimeColor+'">'+d.regime+'</div></div>' +
     '</div>' +
-    '<div class="score-legend">' +
-      '<span><b>Trend</b>: <span class="c-green">70+</span> strong &middot; <span class="c-muted">30–69</span> moderate &middot; <span class="c-dim">&lt;30</span> no signal</span>' +
-      '<span><b>Crash</b>: <span class="c-dim">&lt;30</span> low &middot; <span class="c-muted">30–59</span> moderate &middot; <span class="c-red">60+</span> elevated — no puts</span>' +
-    '</div>' +
+    '<table class="score-legend">' +
+      '<tr><td class="sl-cap" colspan="4">How to read the scores</td></tr>' +
+      '<tr><td class="sl-h">Trend</td><td class="c-green">70+ strong</td><td class="c-muted">30–69 moderate</td><td class="c-dim">&lt;30 no signal</td></tr>' +
+      '<tr><td class="sl-h">Crash</td><td class="c-dim">&lt;30 low</td><td class="c-muted">30–59 moderate</td><td class="c-red">60+ elevated · no puts</td></tr>' +
+    '</table>' +
 
     renderChart(d) +
 
@@ -2502,6 +2505,12 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<span style="color:#475569"> = </span>' +
         '<span style="color:#e2e8f0">' + (uoi.total_chain_oi || 0).toLocaleString() + ' total</span>' +
       '</div>' +
+      '<div style="font-size:11px;margin-bottom:4px">' +
+        '<span style="color:#64748b">Contracts (27–45 DTE): </span>' +
+        '<span class="c-red">' + ((data.puts || []).length).toLocaleString() + ' puts</span>' +
+        '<span style="color:#475569"> / </span>' +
+        '<span class="c-green">' + ((data.calls || []).length).toLocaleString() + ' calls</span>' +
+      '</div>' +
       '<div style="font-size:11px;margin-bottom:8px">' +
         '<span style="color:#64748b">Put/Call OI ratio: </span>' +
         '<span style="color:' + pcColor + '">' + pcRatio + '</span>' +
@@ -2520,6 +2529,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
           const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
           expRows += '<tr>' +
             '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)</td>' +
+            '<td style="text-align:right" class="c-dim">' + (e.calls||0) + '/' + (e.puts||0) + '</td>' +
             '<td style="text-align:right" class="c-green">' + (e.call_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right" class="c-red">' + (e.put_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right;color:#e2e8f0">' + (e.total_oi||0).toLocaleString() + '</td>' +
@@ -2528,7 +2538,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
         });
         return '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">OI by expiration</div>' +
           '<table class="opts-table">' +
-            '<thead><tr><th>Expiration</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
+            '<thead><tr><th>Expiration</th><th style="text-align:right"># C/P</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
             '<tbody>' + expRows + '</tbody>' +
           '</table>';
       })() +
@@ -2776,6 +2786,7 @@ function formatForClaude(d) {
       L.push('');
       L.push('OPEN INTEREST ANALYSIS');
       L.push('  Total chain OI: ' + (uoi.total_chain_oi || 0).toLocaleString() + ' (puts: ' + uoi.total_put_oi.toLocaleString() + ', calls: ' + uoi.total_call_oi.toLocaleString() + ')');
+      L.push('  Contracts (27-45 DTE): ' + ((_optD.puts||[]).length).toLocaleString() + ' puts / ' + ((_optD.calls||[]).length).toLocaleString() + ' calls');
       L.push('  Put/Call OI ratio: ' + (uoi.pc_oi_ratio != null ? uoi.pc_oi_ratio.toFixed(2) : 'N/A'));
       if (uoi.concentration_flag) {
         L.push('  ⚠️ UNUSUAL CONCENTRATION: Top strike holds ' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of chain OI — potential whale positioning');
@@ -2787,7 +2798,7 @@ function formatForClaude(d) {
         L.push('  OI by expiration:');
         _exps.forEach(function(e) {
           const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
-          L.push('    ' + e.exp + ' (' + e.dte + 'd): calls ' + (e.call_oi||0).toLocaleString() + ', puts ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
+          L.push('    ' + e.exp + ' (' + e.dte + 'd): ' + (e.calls||0) + ' call / ' + (e.puts||0) + ' put contracts; call OI ' + (e.call_oi||0).toLocaleString() + ', put OI ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
         });
       }
       L.push('  Top 3 strikes by OI:');

@@ -758,7 +758,16 @@ def fetch_options(ticker, ctx=None):
 
             all_puts.extend(exp_puts)
             all_calls.extend(exp_calls)
-            expirations_meta.append({"exp": exp_label, "dte": dte, "puts": len(exp_puts), "calls": len(exp_calls)})
+            _put_oi_exp  = sum(c["openInterest"] for c in exp_puts)
+            _call_oi_exp = sum(c["openInterest"] for c in exp_calls)
+            _tot_oi_exp  = _put_oi_exp + _call_oi_exp
+            _pc_oi_exp   = round(_put_oi_exp / _call_oi_exp, 3) if _call_oi_exp > 0 else None
+            expirations_meta.append({
+                "exp": exp_label, "dte": dte,
+                "puts": len(exp_puts), "calls": len(exp_calls),
+                "put_oi": _put_oi_exp, "call_oi": _call_oi_exp,
+                "total_oi": _tot_oi_exp, "pc_oi_ratio": _pc_oi_exp,
+            })
 
         except Exception:
             continue
@@ -1497,6 +1506,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .price { font-size: 20px; font-weight: 500; }
   .drawdown { font-size: 11px; color: #64748b; }
   .scores { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  .score-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 10px; color: #475569; margin: -8px 0 14px 2px; }
+  .score-legend b { color: #64748b; font-weight: 600; }
   .score-box { background: #0f1419; border-radius: 8px; padding: 12px; text-align: center; }
   .score-label { font-size: 11px; color: #64748b; margin-bottom: 4px; }
   .score-value { font-size: 22px; font-weight: 500; }
@@ -1718,6 +1729,10 @@ function renderCard(d) {
       '<div class="score-box"><div class="score-label">CrashScore</div><div class="score-value '+crashColor+'">'+d.crash_score.toFixed(0)+'</div></div>' +
       '<div class="score-box"><div class="score-label">Regime</div><div class="regime-value '+regimeColor+'">'+d.regime+'</div></div>' +
     '</div>' +
+    '<div class="score-legend">' +
+      '<span><b>Trend</b>: <span class="c-green">70+</span> strong &middot; <span class="c-muted">30–69</span> moderate &middot; <span class="c-dim">&lt;30</span> no signal</span>' +
+      '<span><b>Crash</b>: <span class="c-dim">&lt;30</span> low &middot; <span class="c-muted">30–59</span> moderate &middot; <span class="c-red">60+</span> elevated — no puts</span>' +
+    '</div>' +
 
     renderChart(d) +
 
@@ -1920,7 +1935,7 @@ function initChart(ticker, _attempt) {
     });
   } catch(e) { console.error('[chart] createChart threw', ticker, e); return; }
 
-  let candleSeries, ma50Series, ma200Series, volSeries;
+  let candleSeries, ma50Series, ma200Series;
   try {
     candleSeries = chart.addCandlestickSeries({
       upColor: '#22c55e', downColor: '#ef4444',
@@ -1929,7 +1944,6 @@ function initChart(ticker, _attempt) {
     });
     ma50Series  = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
     ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-    volSeries   = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol', scaleMargins: { top: 0.8, bottom: 0 } });
   } catch(e) { console.error('[chart] addSeries threw', ticker, e); return; }
 
   let vpCanvas = null, vpCtx = null;
@@ -1941,7 +1955,7 @@ function initChart(ticker, _attempt) {
   } catch(e) { console.warn('[chart] VP canvas failed', e); }
 
   chartInstances[ticker] = {
-    chart: chart, candleSeries: candleSeries, volSeries: volSeries,
+    chart: chart, candleSeries: candleSeries,
     ma50Series: ma50Series, ma200Series: ma200Series,
     vpCanvas: vpCanvas, vpCtx: vpCtx, vpBars: null, vpRefPrice: null, vpLastTop: null,
   };
@@ -1995,9 +2009,6 @@ async function loadChart(ticker, range, interval) {
 
     try { inst.candleSeries.setData(bars.map(function(b){ return { time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }; })); }
     catch(e) { console.error('[chart] candle setData failed', ticker, e, 'first bar:', bars[0]); if (loadingEl) loadingEl.textContent = 'render error'; return; }
-
-    try { inst.volSeries.setData(bars.map(function(b){ return { time: b.t, value: b.v, color: b.c >= b.o ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)' }; })); }
-    catch(e) { console.error('[chart] vol setData failed', ticker, e); }
 
     try {
       inst.ma50Series.setData(bars.filter(function(b){ return b.m50 != null; }).map(function(b){ return { time: b.t, value: b.m50 }; }));
@@ -2483,17 +2494,44 @@ function buildOptionsTabs(data, crashScore, ticker) {
           ? 'Unusual OI concentration detected — top strike holds >' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of chain. Potential whale positioning.'
           : 'No unusual OI concentration. Normal distribution across strikes.') +
       '</div>' +
+      '<div style="font-size:11px;margin-bottom:4px">' +
+        '<span style="color:#64748b">Chain-wide: </span>' +
+        '<span class="c-red">' + (uoi.total_put_oi || 0).toLocaleString() + ' put OI</span>' +
+        '<span style="color:#475569"> + </span>' +
+        '<span class="c-green">' + (uoi.total_call_oi || 0).toLocaleString() + ' call OI</span>' +
+        '<span style="color:#475569"> = </span>' +
+        '<span style="color:#e2e8f0">' + (uoi.total_chain_oi || 0).toLocaleString() + ' total</span>' +
+      '</div>' +
       '<div style="font-size:11px;margin-bottom:8px">' +
         '<span style="color:#64748b">Put/Call OI ratio: </span>' +
         '<span style="color:' + pcColor + '">' + pcRatio + '</span>' +
         '<span style="color:#475569"> — ' + pcLabel + '</span>' +
-        '<span style="color:#334155"> &middot; Total chain OI: ' + (uoi.total_chain_oi || 0).toLocaleString() + '</span>' +
       '</div>' +
       '<table class="opts-table">' +
         '<thead><tr><th>Strike</th><th style="text-align:right">Total OI</th><th style="text-align:right">% Chain</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th></tr></thead>' +
         '<tbody>' + topRows + '</tbody>' +
       '</table>' +
-      '<div style="font-size:10px;color:#334155;margin-top:4px">▲ = >15% of chain OI — unusual concentration</div>' +
+      '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of chain OI — unusual concentration</div>' +
+      (function(){
+        const exps = data.expirations || [];
+        if (!exps.length) return '';
+        let expRows = '';
+        exps.forEach(function(e){
+          const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
+          expRows += '<tr>' +
+            '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)</td>' +
+            '<td style="text-align:right" class="c-green">' + (e.call_oi||0).toLocaleString() + '</td>' +
+            '<td style="text-align:right" class="c-red">' + (e.put_oi||0).toLocaleString() + '</td>' +
+            '<td style="text-align:right;color:#e2e8f0">' + (e.total_oi||0).toLocaleString() + '</td>' +
+            '<td style="text-align:right" class="c-muted">' + r + '</td>' +
+          '</tr>';
+        });
+        return '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">OI by expiration</div>' +
+          '<table class="opts-table">' +
+            '<thead><tr><th>Expiration</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
+            '<tbody>' + expRows + '</tbody>' +
+          '</table>';
+      })() +
     '</div>';
   }
   // ─────────────────────────────────────────────────────────────────────────
@@ -2743,6 +2781,14 @@ function formatForClaude(d) {
         L.push('  ⚠️ UNUSUAL CONCENTRATION: Top strike holds ' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of chain OI — potential whale positioning');
       } else {
         L.push('  No unusual OI concentration detected.');
+      }
+      const _exps = _optD.expirations || [];
+      if (_exps.length) {
+        L.push('  OI by expiration:');
+        _exps.forEach(function(e) {
+          const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
+          L.push('    ' + e.exp + ' (' + e.dte + 'd): calls ' + (e.call_oi||0).toLocaleString() + ', puts ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
+        });
       }
       L.push('  Top 3 strikes by OI:');
       (uoi.top_strikes || []).forEach(function(s) {

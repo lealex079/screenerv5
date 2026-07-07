@@ -965,6 +965,54 @@ def fetch_options(ticker, ctx=None):
         except Exception:
             grades = None
 
+    # ── Full-chain OI across ALL listed expirations (not just 27-45 DTE) ──────
+    # The window loop above only sees 27-45 DTE. Sean/Franklin want the true
+    # whole-chain total plus OI labelled per available expiration. fetch_options
+    # is a lazy per-ticker call, so the extra option_chain fetches here only cost
+    # a few seconds when a single name's chain is opened.
+    full_chain_oi = None
+    all_exp_oi = []
+    try:
+        _fp = _fc = 0
+        for _es in expirations:
+            try:
+                _ed = datetime.date.fromisoformat(_es)
+            except Exception:
+                continue
+            _dte = (_ed - today).days
+            if _dte < 0:
+                continue
+            try:
+                _ch = yt.option_chain(_es)
+                _p = int(_ch.puts["openInterest"].fillna(0).sum())
+                _c = int(_ch.calls["openInterest"].fillna(0).sum())
+            except Exception:
+                continue
+            _fp += _p
+            _fc += _c
+            all_exp_oi.append({
+                "exp": _ed.strftime("%b %-d, %Y"),
+                "dte": _dte,
+                "put_oi": _p,
+                "call_oi": _c,
+                "total_oi": _p + _c,
+                "pc_oi_ratio": round(_p / _c, 3) if _c > 0 else None,
+                "in_window": 27 <= _dte <= 45,
+            })
+        all_exp_oi.sort(key=lambda x: x["dte"])
+        _ft = _fp + _fc
+        if _ft > 0:
+            full_chain_oi = {
+                "total_put_oi": _fp,
+                "total_call_oi": _fc,
+                "total_chain_oi": _ft,
+                "pc_oi_ratio": round(_fp / _fc, 3) if _fc > 0 else None,
+                "n_expirations": len(all_exp_oi),
+            }
+    except Exception:
+        full_chain_oi = None
+        all_exp_oi = []
+
     return {
         "spot": spot,
         "expirations": expirations_meta,
@@ -974,6 +1022,8 @@ def fetch_options(ticker, ctx=None):
         "skew": skew,
         "iv_rank": iv_rank,
         "unusual_oi": unusual_oi,
+        "full_chain_oi": full_chain_oi,
+        "all_exp_oi": all_exp_oi,
         "hv30": hv30,
         "atm_iv": atm_iv,
         "iv_hv": iv_hv,
@@ -2497,8 +2547,19 @@ function buildOptionsTabs(data, crashScore, ticker) {
           ? 'Unusual OI concentration detected — top strike holds >' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of chain. Potential whale positioning.'
           : 'No unusual OI concentration. Normal distribution across strikes.') +
       '</div>' +
+      (data.full_chain_oi
+        ? '<div style="font-size:11px;margin-bottom:4px">' +
+            '<span style="color:#64748b">Entire chain (' + data.full_chain_oi.n_expirations + ' expirations): </span>' +
+            '<span class="c-red">' + (data.full_chain_oi.total_put_oi || 0).toLocaleString() + ' put OI</span>' +
+            '<span style="color:#475569"> + </span>' +
+            '<span class="c-green">' + (data.full_chain_oi.total_call_oi || 0).toLocaleString() + ' call OI</span>' +
+            '<span style="color:#475569"> = </span>' +
+            '<span style="color:#e2e8f0">' + (data.full_chain_oi.total_chain_oi || 0).toLocaleString() + ' total</span>' +
+            '<span style="color:#475569"> · P/C ' + (data.full_chain_oi.pc_oi_ratio != null ? data.full_chain_oi.pc_oi_ratio.toFixed(2) : 'N/A') + '</span>' +
+          '</div>'
+        : '') +
       '<div style="font-size:11px;margin-bottom:4px">' +
-        '<span style="color:#64748b">Chain-wide: </span>' +
+        '<span style="color:#64748b">27–45 DTE window: </span>' +
         '<span class="c-red">' + (uoi.total_put_oi || 0).toLocaleString() + ' put OI</span>' +
         '<span style="color:#475569"> + </span>' +
         '<span class="c-green">' + (uoi.total_call_oi || 0).toLocaleString() + ' call OI</span>' +
@@ -2506,7 +2567,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<span style="color:#e2e8f0">' + (uoi.total_chain_oi || 0).toLocaleString() + ' total</span>' +
       '</div>' +
       '<div style="font-size:11px;margin-bottom:8px">' +
-        '<span style="color:#64748b">Put/Call OI ratio: </span>' +
+        '<span style="color:#64748b">Put/Call OI ratio (window): </span>' +
         '<span style="color:' + pcColor + '">' + pcRatio + '</span>' +
         '<span style="color:#475569"> — ' + pcLabel + '</span>' +
       '</div>' +
@@ -2514,22 +2575,23 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<thead><tr><th>Strike</th><th style="text-align:right">Total OI</th><th style="text-align:right">% Chain</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th></tr></thead>' +
         '<tbody>' + topRows + '</tbody>' +
       '</table>' +
-      '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of chain OI — unusual concentration</div>' +
+      '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of chain OI — unusual concentration (within 27–45 DTE window)</div>' +
       (function(){
-        const exps = data.expirations || [];
+        const exps = data.all_exp_oi || [];
         if (!exps.length) return '';
         let expRows = '';
         exps.forEach(function(e){
           const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
+          const mark = e.in_window ? ' <span style="color:#22c55e">•</span>' : '';
           expRows += '<tr>' +
-            '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)</td>' +
+            '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)' + mark + '</td>' +
             '<td style="text-align:right" class="c-green">' + (e.call_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right" class="c-red">' + (e.put_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right;color:#e2e8f0">' + (e.total_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right" class="c-muted">' + r + '</td>' +
           '</tr>';
         });
-        return '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">OI by expiration</div>' +
+        return '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">OI by expiration (entire chain · <span style="color:#22c55e">•</span> = 27–45 DTE tradeable window)</div>' +
           '<table class="opts-table">' +
             '<thead><tr><th>Expiration</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
             '<tbody>' + expRows + '</tbody>' +
@@ -2778,19 +2840,23 @@ function formatForClaude(d) {
       const uoi = _optD.unusual_oi;
       L.push('');
       L.push('OPEN INTEREST ANALYSIS');
-      L.push('  Total chain OI: ' + (uoi.total_chain_oi || 0).toLocaleString() + ' (puts: ' + uoi.total_put_oi.toLocaleString() + ', calls: ' + uoi.total_call_oi.toLocaleString() + ')');
-      L.push('  Put/Call OI ratio: ' + (uoi.pc_oi_ratio != null ? uoi.pc_oi_ratio.toFixed(2) : 'N/A'));
-      if (uoi.concentration_flag) {
-        L.push('  ⚠️ UNUSUAL CONCENTRATION: Top strike holds ' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of chain OI — potential whale positioning');
-      } else {
-        L.push('  No unusual OI concentration detected.');
+      if (_optD.full_chain_oi) {
+        const fc = _optD.full_chain_oi;
+        L.push('  Entire chain (' + fc.n_expirations + ' expirations): ' + (fc.total_chain_oi || 0).toLocaleString() + ' total OI (puts: ' + (fc.total_put_oi||0).toLocaleString() + ', calls: ' + (fc.total_call_oi||0).toLocaleString() + ', P/C ' + (fc.pc_oi_ratio != null ? fc.pc_oi_ratio.toFixed(2) : 'N/A') + ')');
       }
-      const _exps = _optD.expirations || [];
-      if (_exps.length) {
-        L.push('  OI by expiration:');
-        _exps.forEach(function(e) {
+      L.push('  27-45 DTE window OI: ' + (uoi.total_chain_oi || 0).toLocaleString() + ' (puts: ' + uoi.total_put_oi.toLocaleString() + ', calls: ' + uoi.total_call_oi.toLocaleString() + ')');
+      L.push('  Put/Call OI ratio (window): ' + (uoi.pc_oi_ratio != null ? uoi.pc_oi_ratio.toFixed(2) : 'N/A'));
+      if (uoi.concentration_flag) {
+        L.push('  ⚠️ UNUSUAL CONCENTRATION: Top strike holds ' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of window OI — potential whale positioning');
+      } else {
+        L.push('  No unusual OI concentration detected (within 27-45 DTE window).');
+      }
+      const _allExp = _optD.all_exp_oi || [];
+      if (_allExp.length) {
+        L.push('  OI by expiration (entire chain; * = 27-45 DTE tradeable window):');
+        _allExp.forEach(function(e) {
           const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
-          L.push('    ' + e.exp + ' (' + e.dte + 'd): call OI ' + (e.call_oi||0).toLocaleString() + ', put OI ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
+          L.push('    ' + (e.in_window ? '* ' : '  ') + e.exp + ' (' + e.dte + 'd): call OI ' + (e.call_oi||0).toLocaleString() + ', put OI ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
         });
       }
       L.push('  Top 3 strikes by OI:');

@@ -2505,12 +2505,6 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<span style="color:#475569"> = </span>' +
         '<span style="color:#e2e8f0">' + (uoi.total_chain_oi || 0).toLocaleString() + ' total</span>' +
       '</div>' +
-      '<div style="font-size:11px;margin-bottom:4px">' +
-        '<span style="color:#64748b">Contracts (27–45 DTE): </span>' +
-        '<span class="c-red">' + ((data.puts || []).length).toLocaleString() + ' puts</span>' +
-        '<span style="color:#475569"> / </span>' +
-        '<span class="c-green">' + ((data.calls || []).length).toLocaleString() + ' calls</span>' +
-      '</div>' +
       '<div style="font-size:11px;margin-bottom:8px">' +
         '<span style="color:#64748b">Put/Call OI ratio: </span>' +
         '<span style="color:' + pcColor + '">' + pcRatio + '</span>' +
@@ -2529,7 +2523,6 @@ function buildOptionsTabs(data, crashScore, ticker) {
           const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
           expRows += '<tr>' +
             '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)</td>' +
-            '<td style="text-align:right" class="c-dim">' + (e.calls||0) + '/' + (e.puts||0) + '</td>' +
             '<td style="text-align:right" class="c-green">' + (e.call_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right" class="c-red">' + (e.put_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right;color:#e2e8f0">' + (e.total_oi||0).toLocaleString() + '</td>' +
@@ -2538,7 +2531,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
         });
         return '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">OI by expiration</div>' +
           '<table class="opts-table">' +
-            '<thead><tr><th>Expiration</th><th style="text-align:right"># C/P</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
+            '<thead><tr><th>Expiration</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
             '<tbody>' + expRows + '</tbody>' +
           '</table>';
       })() +
@@ -2786,7 +2779,6 @@ function formatForClaude(d) {
       L.push('');
       L.push('OPEN INTEREST ANALYSIS');
       L.push('  Total chain OI: ' + (uoi.total_chain_oi || 0).toLocaleString() + ' (puts: ' + uoi.total_put_oi.toLocaleString() + ', calls: ' + uoi.total_call_oi.toLocaleString() + ')');
-      L.push('  Contracts (27-45 DTE): ' + ((_optD.puts||[]).length).toLocaleString() + ' puts / ' + ((_optD.calls||[]).length).toLocaleString() + ' calls');
       L.push('  Put/Call OI ratio: ' + (uoi.pc_oi_ratio != null ? uoi.pc_oi_ratio.toFixed(2) : 'N/A'));
       if (uoi.concentration_flag) {
         L.push('  ⚠️ UNUSUAL CONCENTRATION: Top strike holds ' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of chain OI — potential whale positioning');
@@ -2798,7 +2790,7 @@ function formatForClaude(d) {
         L.push('  OI by expiration:');
         _exps.forEach(function(e) {
           const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
-          L.push('    ' + e.exp + ' (' + e.dte + 'd): ' + (e.calls||0) + ' call / ' + (e.puts||0) + ' put contracts; call OI ' + (e.call_oi||0).toLocaleString() + ', put OI ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
+          L.push('    ' + e.exp + ' (' + e.dte + 'd): call OI ' + (e.call_oi||0).toLocaleString() + ', put OI ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
         });
       }
       L.push('  Top 3 strikes by OI:');

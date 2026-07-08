@@ -536,16 +536,27 @@ def compute_trade_grades(ctx, opt):
     fund    = _g(ctx, "fundamental_score", None)
     fund_v  = _clamp(fund if fund is not None else 50)
     rsi     = _g(ctx, "rsi", 50)
-    cmf     = _g(ctx, "cmf", 0)
-    obv     = _g(ctx, "obv_roc", 0)
     rally20 = _g(ctx, "rally_20d", None)
 
     liq  = _clamp(_g(opt, "liquidity_score", 50))
     prem = premium_score(opt.get("vol_rank"), opt.get("iv_hv"))
     ed   = opt.get("earnings_days")
-    risk_free = _clamp(100 - crash)            # lower crash = safer timing
 
-    flow = _clamp(50 + (cmf * 200) + (obv * 1.5))
+    # vol_safety (0-100): the VALIDATED Sell-Put risk driver. Notebook 08 raced
+    # realized volatility vs structure_score out-of-sample against forward drawdown
+    # and realized vol won decisively (OOS rank-IC 0.21 vs 0.09, all 4 splits) —
+    # structure was largely a volatility proxy with no residual value. So low
+    # realized vol = low drawdown risk = safe to sell puts. Maps 30-day annualized
+    # realized vol (hv30, %) to a 0-100 safety score: ~20% vol -> 100, ~70% -> 0.
+    # Falls back to structure_score only if hv30 is unavailable (options path
+    # didn't compute it), preserving graceful degradation.
+    hv = _g(opt, "hv30", None)
+    if hv is not None and hv > 0:
+        vol_safety = _clamp((70.0 - hv) / (70.0 - 20.0) * 100.0)
+        vol_src = "vol %d%% ann" % round(hv)
+    else:
+        vol_safety = struct
+        vol_src = "vol n/a -> structure %d" % struct
 
     # Shared hard gates for the two put-selling grades (Sell Put, Wheel).
     def apply_put_caps(score, reasons):
@@ -565,28 +576,25 @@ def compute_trade_grades(ctx, opt):
         return score, reasons
 
     # ── Sell Put ──────────────────────────────────────────────────────────────
-    # structure_score is the VALIDATED risk driver (rank-IC +0.082 vs forward
-    # drawdown, t=6.5, holds OOS + placebo; validation notebooks 04/05). The
-    # hand-set blend did not beat structure alone out-of-sample, so structure now
-    # leads at ~half the weight. premium and liquidity remain as economic /
-    # executability inputs (are we paid, can we trade it) — they are NOT risk
-    # signals and correctly showed ~zero drawdown-ranking power. trend and
-    # risk_free are kept minimal (no validated drawdown signal); support is
-    # dropped (unvalidated, and the "floor of a knife" artifact — the structure<25
-    # cap already handles falling knives). Weights beyond structure remain
-    # provisional; see knowledge_2 / knowledge_8.
-    sp_base = (0.50 * struct + 0.20 * prem + 0.15 * liq
-               + 0.10 * trend + 0.05 * risk_free)
-    sp_reasons = ["structure %d (driver)" % struct, "premium %d" % prem,
-                  "liquidity %d" % liq, "trend %d" % trend]
+    # VALIDATED (notebook 08): realized volatility is the dominant predictor of
+    # forward drawdown — it ranks drawdown risk ~2.4x better than structure_score
+    # out-of-sample, and structure adds no residual value once vol is present. So
+    # vol_safety is now the primary risk driver. premium and liquidity remain as
+    # economic / executability inputs (are we paid, can we trade it — not risk
+    # signals). structure_score is NO LONGER a weighted term (redundant with vol);
+    # it survives only as (a) the structure<25 falling-knife cap and (b) displayed
+    # trend context. See knowledge_2 / knowledge_8 for the validation.
+    sp_base = (0.55 * vol_safety + 0.25 * prem + 0.20 * liq)
+    sp_reasons = ["%s (driver)" % vol_src, "premium %d" % prem,
+                  "liquidity %d" % liq, "structure %d" % struct]
     sp, sp_reasons = apply_put_caps(sp_base, sp_reasons)
 
     # ── Wheel: put + willing to own, so fundamentals matter -- but they cannot
     #    lift broken structure. A cheap falling knife is still a falling knife.
-    #    Inherits the structure-led sp_base above. ──
+    #    Inherits the volatility-led sp_base above. ──
     wh = 0.70 * sp_base + 0.30 * fund_v
-    wh_reasons = ["structure %d (driver)" % struct, "premium %d" % prem,
-                  "liquidity %d" % liq, "trend %d" % trend, "fundamentals %d" % fund_v]
+    wh_reasons = ["%s (driver)" % vol_src, "premium %d" % prem, "liquidity %d" % liq,
+                  "structure %d" % struct, "fundamentals %d" % fund_v]
     if struct < 30 and fund_v > 60:
         wh = min(wh, sp_base)
         wh_reasons.append("value-trap guard: fundamentals capped by broken structure")
@@ -960,6 +968,7 @@ def fetch_options(ticker, ctx=None):
                 "vol_rank": vol_rank,
                 "iv_rank": iv_rank,
                 "iv_hv": iv_hv,
+                "hv30": hv30,
                 "liquidity_score": liquidity["score"] if liquidity else None,
                 "earnings_days": ctx.get("earnings_days"),
                 "pc_oi_ratio": unusual_oi["pc_oi_ratio"] if unusual_oi else None,

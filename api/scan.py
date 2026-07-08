@@ -531,7 +531,6 @@ def compute_trade_grades(ctx, opt):
     opt = opt or {}
     trend   = _clamp(_g(ctx, "trend_score", 50))
     crash   = _clamp(_g(ctx, "crash_score", 50))
-    support = _clamp(_g(ctx, "support_strength", 30))
     resist  = _clamp(_g(ctx, "resistance_strength", 30))
     struct  = _clamp(_g(ctx, "structure_score", 50))
     fund    = _g(ctx, "fundamental_score", None)
@@ -566,17 +565,28 @@ def compute_trade_grades(ctx, opt):
         return score, reasons
 
     # ── Sell Put ──────────────────────────────────────────────────────────────
-    sp_base = (0.18 * trend + 0.20 * struct + 0.12 * support
-               + 0.20 * prem + 0.15 * liq + 0.15 * risk_free)
-    sp_reasons = ["trend %d" % trend, "structure %d" % struct, "support %d" % support,
-                  "premium %d" % prem, "liquidity %d" % liq]
+    # structure_score is the VALIDATED risk driver (rank-IC +0.082 vs forward
+    # drawdown, t=6.5, holds OOS + placebo; validation notebooks 04/05). The
+    # hand-set blend did not beat structure alone out-of-sample, so structure now
+    # leads at ~half the weight. premium and liquidity remain as economic /
+    # executability inputs (are we paid, can we trade it) — they are NOT risk
+    # signals and correctly showed ~zero drawdown-ranking power. trend and
+    # risk_free are kept minimal (no validated drawdown signal); support is
+    # dropped (unvalidated, and the "floor of a knife" artifact — the structure<25
+    # cap already handles falling knives). Weights beyond structure remain
+    # provisional; see knowledge_2 / knowledge_8.
+    sp_base = (0.50 * struct + 0.20 * prem + 0.15 * liq
+               + 0.10 * trend + 0.05 * risk_free)
+    sp_reasons = ["structure %d (driver)" % struct, "premium %d" % prem,
+                  "liquidity %d" % liq, "trend %d" % trend]
     sp, sp_reasons = apply_put_caps(sp_base, sp_reasons)
 
     # ── Wheel: put + willing to own, so fundamentals matter -- but they cannot
-    #    lift broken structure. A cheap falling knife is still a falling knife. ──
+    #    lift broken structure. A cheap falling knife is still a falling knife.
+    #    Inherits the structure-led sp_base above. ──
     wh = 0.70 * sp_base + 0.30 * fund_v
-    wh_reasons = ["trend %d" % trend, "structure %d" % struct, "support %d" % support,
-                  "premium %d" % prem, "liquidity %d" % liq, "fundamentals %d" % fund_v]
+    wh_reasons = ["structure %d (driver)" % struct, "premium %d" % prem,
+                  "liquidity %d" % liq, "trend %d" % trend, "fundamentals %d" % fund_v]
     if struct < 30 and fund_v > 60:
         wh = min(wh, sp_base)
         wh_reasons.append("value-trap guard: fundamentals capped by broken structure")

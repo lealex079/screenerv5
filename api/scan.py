@@ -519,7 +519,7 @@ def _g(ctx, key, default):
 
 
 def compute_trade_grades(ctx, opt):
-    """Returns {sell_put, wheel, buy_shares, sell_call}, each {score, grade, reasons}.
+    """Returns {sell_put, wheel, sell_call}, each {score, grade, reasons}.
     ctx = scan-level scalars; opt = options-level scalars.
 
     Cross-sector revision: a trend-structure term stops downtrending names from
@@ -582,12 +582,6 @@ def compute_trade_grades(ctx, opt):
         wh_reasons.append("value-trap guard: fundamentals capped by broken structure")
     wh, wh_reasons = apply_put_caps(wh, wh_reasons)
 
-    # ── Buy Shares: trend + value + structure; blow-off capped ────────────────
-    bs = (0.34 * trend + 0.33 * fund_v + 0.33 * struct)
-    bs_reasons = ["trend %d" % trend, "fundamentals %d" % fund_v, "structure %d" % struct]
-    if crash >= 70:
-        bs = min(bs, 45.0); bs_reasons.append("blow-off risk (CrashScore %d)" % crash)
-
     # ── Sell Call: overhead resistance + rich IV + flat/weak trend ────────────
     trend_inv  = _clamp(100 - trend)
     overbought = _clamp((rsi - 50) * 2)
@@ -602,7 +596,6 @@ def compute_trade_grades(ctx, opt):
     return {
         "sell_put":   pack(sp, sp_reasons),
         "wheel":      pack(wh, wh_reasons),
-        "buy_shares": pack(bs, bs_reasons),
         "sell_call":  pack(sc, sc_reasons),
     }
 
@@ -2434,7 +2427,7 @@ function gradeColor(g){
 function renderTradeGrades(data){
   const g = data.grades;
   if (!g) return '';
-  const order = [['Sell Put',g.sell_put],['Wheel',g.wheel],['Buy Shares',g.buy_shares],['Sell Call',g.sell_call]];
+  const order = [['Sell Put',g.sell_put],['Wheel',g.wheel],['Sell Call',g.sell_call]];
   const rows = order.map(function(p){
     const name=p[0], v=p[1];
     if(!v) return '';
@@ -2829,7 +2822,7 @@ function formatForClaude(d) {
       const g = _optD.grades;
       L.push('');
       L.push('TRADE GRADES (starting weights — not yet validated against outcomes)');
-      [['Sell Put','sell_put'],['Wheel','wheel'],['Buy Shares','buy_shares'],['Sell Call','sell_call']].forEach(function(p){
+      [['Sell Put','sell_put'],['Wheel','wheel'],['Sell Call','sell_call']].forEach(function(p){
         const v = g[p[1]];
         if (!v) return;
         L.push('  ' + (p[0]+':').padEnd(12) + v.grade + ' (' + v.score.toFixed(0) + '/100) — ' + (v.reasons||[]).join(', '));

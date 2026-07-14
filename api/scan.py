@@ -295,9 +295,9 @@ CHART_RANGE_INTERVALS = {
     "3M":  ["1h", "4h", "1d"],
     "6M":  ["1h", "4h", "1d"],
     "YTD": ["4h", "1d", "1wk"],
-    "1Y":  ["4h", "1d", "1wk"],
+    "1Y":  ["4h", "1d", "1wk", "1mo", "3mo"],
     "5Y":  ["1d", "1wk", "1mo"],
-    "All": ["1wk", "1mo"],
+    "All": ["1wk", "1mo", "3mo"],
 }
 CHART_RANGE_DEFAULT_IV = {
     "1D": "1m", "5D": "5m", "1M": "30m", "3M": "1d", "6M": "1d",
@@ -307,7 +307,7 @@ CHART_RANGE_DEFAULT_IV = {
 INTERVAL_FETCH_PERIOD = {
     "1m": "7d", "2m": "60d", "5m": "60d", "15m": "60d", "30m": "60d",
     "1h": "730d", "4h": "730d",   # 4h is resampled from 1h
-    "1d": "max", "1wk": "max", "1mo": "max",
+    "1d": "max", "1wk": "max", "1mo": "max", "3mo": "max",
 }
 # Initial visible window per range, in calendar days (None = show all = "All").
 RANGE_LOOKBACK_DAYS = {
@@ -358,6 +358,7 @@ def fetch_chart(ticker, rng, interval):
     close = df["Close"]
     # MAs computed on the FULL fetched series -> fully populated lines.
     ma50_v  = close.rolling(min(50, n)).mean().values
+    ma100_v = close.rolling(min(100, n)).mean().values
     ma200_v = close.rolling(min(200, n)).mean().values
     o_v = df["Open"].values
     h_v = df["High"].values
@@ -366,12 +367,13 @@ def fetch_chart(ticker, rng, interval):
     v_v = df["Volume"].values
     idx = df.index
 
-    intraday = interval not in ("1d", "1wk", "1mo")
+    intraday = interval not in ("1d", "1wk", "1mo", "3mo")
     bars = []
     for i in range(n):
         try:
             t_unix = int(pd.Timestamp(idx[i]).timestamp())
             m50 = float(ma50_v[i])
+            m100 = float(ma100_v[i])
             m200 = float(ma200_v[i])
             vol = float(v_v[i])
             bars.append({
@@ -382,6 +384,7 @@ def fetch_chart(ticker, rng, interval):
                 "c":   round(float(c_v[i]), 4),
                 "v":   int(vol) if not math.isnan(vol) else 0,
                 "m50":  round(m50, 4)  if not math.isnan(m50)  else None,
+                "m100": round(m100, 4) if not math.isnan(m100) else None,
                 "m200": round(m200, 4) if not math.isnan(m200) else None,
             })
         except Exception:
@@ -715,6 +718,10 @@ def fetch_options(ticker, ctx=None):
 
             theta = bs_theta(spot, strike, dte_days, iv, is_put=is_put)
             ann_yield = (bid / strike) * (365 / dte_days) * 100 if strike > 0 and dte_days > 0 else 0
+            # Daily premium: the total premium spread evenly across the contract's
+            # life ($/day). Sean's read for "what does this pay me per day held" —
+            # distinct from theta, which is the *modeled* instantaneous decay rate.
+            daily_prem = (bid / dte_days) if dte_days > 0 else 0
             be = (strike - bid) if is_put else (strike + bid)
 
             return {
@@ -728,6 +735,7 @@ def fetch_options(ticker, ctx=None):
                 "openInterest": oi,
                 "volume": vol,
                 "annYield": round(ann_yield, 1),
+                "dailyPrem": round(daily_prem, 3),
                 "breakeven": round(be, 2),
             }
         except Exception:
@@ -876,17 +884,27 @@ def fetch_options(ticker, ctx=None):
     try:
         # Unusual OI: aggregate OI by strike across all expirations
         # Build a per-strike OI map (put OI, call OI, total OI)
+        # Track OI per strike AND per (strike, expiration) so a concentrated
+        # strike can be labelled with the expiration(s) actually holding the OI.
+        # Without this, "$320: 821 OI" silently blends every expiration in the
+        # window and you can't tell which date the whale is positioned in.
         strike_oi = {}
+        strike_exp_oi = {}   # strike -> {exp_label: total_oi}
+
+        def _acc(c, side):
+            s = c['strike']
+            if s not in strike_oi:
+                strike_oi[s] = {'put_oi': 0, 'call_oi': 0}
+            strike_oi[s][side] += c['openInterest']
+            e = c.get('expiration')
+            if e:
+                strike_exp_oi.setdefault(s, {})
+                strike_exp_oi[s][e] = strike_exp_oi[s].get(e, 0) + c['openInterest']
+
         for c in all_puts:
-            s = c['strike']
-            if s not in strike_oi:
-                strike_oi[s] = {'put_oi': 0, 'call_oi': 0}
-            strike_oi[s]['put_oi'] += c['openInterest']
+            _acc(c, 'put_oi')
         for c in all_calls:
-            s = c['strike']
-            if s not in strike_oi:
-                strike_oi[s] = {'put_oi': 0, 'call_oi': 0}
-            strike_oi[s]['call_oi'] += c['openInterest']
+            _acc(c, 'call_oi')
 
         total_put_oi  = sum(v['put_oi']  for v in strike_oi.values())
         total_call_oi = sum(v['call_oi'] for v in strike_oi.values())
@@ -894,14 +912,21 @@ def fetch_options(ticker, ctx=None):
 
         pc_oi_ratio = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else None
 
-        # Top 3 strikes by total OI
+        def _exp_breakdown(s):
+            """Expirations holding this strike's OI, largest first."""
+            d = strike_exp_oi.get(s, {})
+            return [{"exp": e, "oi": o}
+                    for e, o in sorted(d.items(), key=lambda kv: -kv[1]) if o > 0]
+
+        # Top 3 strikes by total OI, each labelled with its expiration breakdown
         ranked = sorted(
             [{"strike": s,
               "put_oi": v['put_oi'],
               "call_oi": v['call_oi'],
               "total_oi": v['put_oi'] + v['call_oi'],
               "pct_of_chain": round((v['put_oi'] + v['call_oi']) / total_chain_oi * 100, 1)
-                              if total_chain_oi > 0 else 0}
+                              if total_chain_oi > 0 else 0,
+              "by_exp": _exp_breakdown(s)}
              for s, v in strike_oi.items()],
             key=lambda x: -x['total_oi']
         )[:3]
@@ -1426,6 +1451,7 @@ def scan_ticker(ticker):
             _cd.index = _cd.index.tz_localize(None)
         # Compute MAs on full history
         _cd["_m50"]  = _cd["Close"].rolling(50).mean()
+        _cd["_m100"] = _cd["Close"].rolling(100).mean()
         _cd["_m200"] = _cd["Close"].rolling(200).mean()
         # Daily bars — last 504 trading days (2 years) for 1Y view headroom
         for ts, row in _cd.tail(504).iterrows():
@@ -1438,6 +1464,7 @@ def scan_ticker(ticker):
                     "c":    round(float(row["Close"]),  2),
                     "v":    int(row["Volume"]),
                     "m50":  round(float(row["_m50"]),  2) if not math.isnan(float(row["_m50"]))  else None,
+                    "m100": round(float(row["_m100"]), 2) if not math.isnan(float(row["_m100"])) else None,
                     "m200": round(float(row["_m200"]), 2) if not math.isnan(float(row["_m200"])) else None,
                 })
             except Exception:
@@ -1448,6 +1475,7 @@ def scan_ticker(ticker):
             "Close": "last", "Volume": "sum"
         }).dropna()
         _wk["_m50"]  = _wk["Close"].rolling(50).mean()
+        _wk["_m100"] = _wk["Close"].rolling(100).mean()
         _wk["_m200"] = _wk["Close"].rolling(200).mean()
         for ts, row in _wk.tail(260).iterrows():   # 5 years weekly
             try:
@@ -1459,6 +1487,7 @@ def scan_ticker(ticker):
                     "c":    round(float(row["Close"]),  2),
                     "v":    int(row["Volume"]),
                     "m50":  round(float(row["_m50"]),  2) if not math.isnan(float(row["_m50"]))  else None,
+                    "m100": round(float(row["_m100"]), 2) if not math.isnan(float(row["_m100"])) else None,
                     "m200": round(float(row["_m200"]), 2) if not math.isnan(float(row["_m200"])) else None,
                 })
             except Exception:
@@ -1644,6 +1673,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chart-legend { display: flex; gap: 12px; margin-top: 4px; font-size: 10px; color: #475569; }
   .legend-item { display: flex; align-items: center; gap: 4px; }
   .legend-dot { width: 12px; height: 2px; border-radius: 1px; }
+  .legend-dash { width: 12px; height: 0; }
   .chart-controls { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
   .chart-range-bar { display: flex; gap: 4px; flex-wrap: wrap; }
   .rng-btn { background: #0f1419; border: 0.5px solid #1e2a35; color: #475569; padding: 3px 9px; border-radius: 4px; font-size: 10px; cursor: pointer; font-family: inherit; transition: all 0.12s; }
@@ -1857,13 +1887,19 @@ const RANGE_INTERVALS = {
   '3M':  ['1h','4h','1d'],
   '6M':  ['1h','4h','1d'],
   'YTD': ['4h','1d','1wk'],
-  '1Y':  ['4h','1d','1wk'],
+  '1Y':  ['4h','1d','1wk','1mo','3mo'],
   '5Y':  ['1d','1wk','1mo'],
-  'All': ['1wk','1mo'],
+  'All': ['1wk','1mo','3mo'],
 };
 const RANGE_DEFAULT_IV = {
   '1D':'1m', '5D':'5m', '1M':'30m', '3M':'1d', '6M':'1d',
   'YTD':'1d', '1Y':'1d', '5Y':'1wk', 'All':'1mo',
+};
+// Friendly labels for the interval dropdown (raw yfinance codes are cryptic).
+const INTERVAL_LABELS = {
+  '1m':'1 min', '2m':'2 min', '5m':'5 min', '15m':'15 min', '30m':'30 min',
+  '1h':'1 hour', '4h':'4 hour', '1d':'1 day', '1wk':'1 week',
+  '1mo':'1 month', '3mo':'3 month',
 };
 const RANGE_ORDER   = ['1D','5D','1M','3M','6M','YTD','1Y','5Y','All'];
 const DEFAULT_RANGE = '1Y';
@@ -1879,11 +1915,12 @@ function renderChart(d) {
       '<div class="chart-interval">Interval: ' +
         '<select class="iv-select" id="iv-sel-' + d.ticker + '" data-ticker="' + d.ticker + '" onchange="onIntervalChange(this)"></select>' +
       '</div>' +
-      '<button class="chart-snap-btn" onclick="downloadChartSnapshot(\'' + d.ticker + '\')" title="Download chart PNG (candles + 50/200 MA + volume profile)">\u2913 PNG</button>' +
+      '<button class="chart-snap-btn" onclick="downloadChartSnapshot(\'' + d.ticker + '\')" title="Download chart PNG (candles + 50/100/200 MA + volume profile)">\u2913 PNG</button>' +
     '</div>' +
     '<div class="chart-wrap" id="chart-' + d.ticker + '"><div class="chart-loading" id="chart-loading-' + d.ticker + '">Loading chart...</div></div>' +
     '<div class="chart-legend">' +
       '<div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>50 MA</div>' +
+      '<div class="legend-item"><div class="legend-dash" style="border-top:2px dashed #94a3b8"></div>100 MA</div>' +
       '<div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>200 MA</div>' +
       '<div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div>POC</div>' +
       '<div class="legend-item legend-vp">Vol profile (visible range, right)</div>' +
@@ -1897,7 +1934,8 @@ function buildIntervalOptions(ticker, range, preferred) {
   const chosen = (preferred && allowed.indexOf(preferred) !== -1) ? preferred : RANGE_DEFAULT_IV[range];
   if (sel) {
     sel.innerHTML = allowed.map(function(iv) {
-      return '<option value="' + iv + '"' + (iv === chosen ? ' selected' : '') + '>' + iv + '</option>';
+      const lbl = INTERVAL_LABELS[iv] || iv;
+      return '<option value="' + iv + '"' + (iv === chosen ? ' selected' : '') + '>' + lbl + '</option>';
     }).join('');
   }
   return chosen;
@@ -2000,7 +2038,7 @@ function initChart(ticker, _attempt) {
     });
   } catch(e) { console.error('[chart] createChart threw', ticker, e); return; }
 
-  let candleSeries, ma50Series, ma200Series;
+  let candleSeries, ma50Series, ma100Series, ma200Series;
   try {
     candleSeries = chart.addCandlestickSeries({
       upColor: '#22c55e', downColor: '#ef4444',
@@ -2008,6 +2046,8 @@ function initChart(ticker, _attempt) {
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
     });
     ma50Series  = chart.addLineSeries({ color: '#22c55e', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    // 100 MA: grey DASHED (lineStyle 2 = Dashed in lightweight-charts).
+    ma100Series = chart.addLineSeries({ color: '#94a3b8', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
     ma200Series = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
   } catch(e) { console.error('[chart] addSeries threw', ticker, e); return; }
 
@@ -2021,7 +2061,7 @@ function initChart(ticker, _attempt) {
 
   chartInstances[ticker] = {
     chart: chart, candleSeries: candleSeries,
-    ma50Series: ma50Series, ma200Series: ma200Series,
+    ma50Series: ma50Series, ma100Series: ma100Series, ma200Series: ma200Series,
     vpCanvas: vpCanvas, vpCtx: vpCtx, vpBars: null, vpRefPrice: null, vpLastTop: null,
   };
   chartState[ticker] = { range: DEFAULT_RANGE, interval: RANGE_DEFAULT_IV[DEFAULT_RANGE] };
@@ -2077,6 +2117,9 @@ async function loadChart(ticker, range, interval) {
 
     try {
       inst.ma50Series.setData(bars.filter(function(b){ return b.m50 != null; }).map(function(b){ return { time: b.t, value: b.m50 }; }));
+      if (inst.ma100Series) {
+        inst.ma100Series.setData(bars.filter(function(b){ return b.m100 != null; }).map(function(b){ return { time: b.t, value: b.m100 }; }));
+      }
       inst.ma200Series.setData(bars.filter(function(b){ return b.m200 != null; }).map(function(b){ return { time: b.t, value: b.m200 }; }));
     } catch(e) { console.error('[chart] MA setData failed', ticker, e); }
 
@@ -2540,11 +2583,20 @@ function buildOptionsTabs(data, crashScore, ticker) {
     const pcColor   = uoi.pc_oi_ratio > 1.5 ? '#fca5a5' : uoi.pc_oi_ratio < 0.7 ? '#86efac' : '#94a3b8';
     const pcLabel   = uoi.pc_oi_ratio > 1.5 ? 'elevated put demand' : uoi.pc_oi_ratio < 0.7 ? 'call-heavy positioning' : 'neutral';
 
+    // Expirations actually holding a strike's OI. A single date => that's where
+    // the position sits; several => show the split so the number isn't a blend.
+    const expLabel = function(s) {
+      const be = s.by_exp || [];
+      if (!be.length) return '<span class="c-dim">—</span>';
+      if (be.length === 1) return be[0].exp;
+      return be.map(function(e){ return e.exp + ': ' + e.oi.toLocaleString(); }).join('<br>');
+    };
     let topRows = '';
     (uoi.top_strikes || []).forEach(function(s) {
       const isFlag = s.pct_of_chain > 15;
       topRows += '<tr>' +
         '<td style="color:' + (isFlag ? '#fca5a5' : '#e2e8f0') + '">$' + s.strike.toFixed(0) + (isFlag ? ' ▲' : '') + '</td>' +
+        '<td class="c-muted" style="font-size:10px">' + expLabel(s) + '</td>' +
         '<td class="c-muted">' + s.total_oi.toLocaleString() + '</td>' +
         '<td class="c-muted">' + s.pct_of_chain.toFixed(1) + '%</td>' +
         '<td class="c-green">' + s.call_oi.toLocaleString() + '</td>' +
@@ -2556,7 +2608,15 @@ function buildOptionsTabs(data, crashScore, ticker) {
       '<div style="font-size:11px;font-weight:500;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">' + flagIcon + 'Open Interest Analysis</div>' +
       '<div style="font-size:11px;margin-bottom:6px;color:' + flagColor + '">' +
         (uoi.concentration_flag
-          ? 'Unusual OI concentration detected — top strike holds >' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of chain. Potential whale positioning.'
+          ? (function(){
+              const t = uoi.top_strikes[0];
+              const be = t.by_exp || [];
+              const where = be.length ? ' at $' + t.strike.toFixed(0) + ', ' +
+                (be.length === 1 ? be[0].exp
+                                 : 'mostly ' + be[0].exp + ' (' + be[0].oi.toLocaleString() + ' OI)') : '';
+              return 'Unusual OI concentration detected — top strike holds >' + t.pct_of_chain.toFixed(0) +
+                     '% of chain' + where + '. Potential whale positioning.';
+            })()
           : 'No unusual OI concentration. Normal distribution across strikes.') +
       '</div>' +
       (data.full_chain_oi
@@ -2584,7 +2644,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<span style="color:#475569"> — ' + pcLabel + '</span>' +
       '</div>' +
       '<table class="opts-table">' +
-        '<thead><tr><th>Strike</th><th style="text-align:right">Total OI</th><th style="text-align:right">% Chain</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th></tr></thead>' +
+        '<thead><tr><th>Strike</th><th>Expiration</th><th style="text-align:right">Total OI</th><th style="text-align:right">% Chain</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th></tr></thead>' +
         '<tbody>' + topRows + '</tbody>' +
       '</table>' +
       '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of chain OI — unusual concentration (within 27–45 DTE window)</div>' +
@@ -2656,15 +2716,17 @@ function buildOptsTable(contracts, isCall, crashScore, groupByExp) {
   let lastExp = null;
   sorted.forEach(c => {
     if (c.expiration !== lastExp) {
-      rows += '<tr class="exp-group-header"><td colspan="9">'+c.expiration+' ('+c.dte+'d)</td></tr>';
+      rows += '<tr class="exp-group-header"><td colspan="10">'+c.expiration+' ('+c.dte+'d)</td></tr>';
       lastExp = c.expiration;
     }
     const isOpt = !!c.optimal;
     const be = c.breakeven != null ? '$'+c.breakeven.toFixed(2) : 'N/A';
     const theta = c.theta != null ? '$'+c.theta.toFixed(3) : 'N/A';
+    const dprem = c.dailyPrem != null ? '$'+c.dailyPrem.toFixed(3) : 'N/A';
     rows += '<tr class="'+(isOpt?'optimal-row':'')+'">' +
       '<td>$'+c.strike.toFixed(0)+(isOpt?' \u25cf':'')+' <span style="font-size:9px;color:#334155">'+c.contractSymbol.slice(-9)+'</span></td>' +
       '<td>$'+c.bid.toFixed(2)+'</td><td>$'+c.ask.toFixed(2)+'</td>' +
+      '<td>'+dprem+'</td>' +
       '<td>'+c.delta.toFixed(2)+'</td><td>'+theta+'</td>' +
       '<td>'+(c.impliedVolatility*100).toFixed(0)+'%</td>' +
       '<td>'+c.openInterest.toLocaleString()+'</td>' +
@@ -2672,9 +2734,9 @@ function buildOptsTable(contracts, isCall, crashScore, groupByExp) {
     '</tr>';
   });
   return '<div class="opts-table-wrap"><table class="opts-table">' +
-    '<thead><tr><th>Strike</th><th>Bid</th><th>Ask</th><th>Delta</th><th>Theta/d</th><th>IV</th><th>OI</th><th>B/E</th><th>Ann yld</th></tr></thead>' +
+    '<thead><tr><th>Strike</th><th>Bid</th><th>Ask</th><th>Prem/d</th><th>Delta</th><th>Theta/d</th><th>IV</th><th>OI</th><th>B/E</th><th>Ann yld</th></tr></thead>' +
     '<tbody>'+rows+'</tbody></table></div>' +
-    '<div style="font-size:10px;color:#475569;margin-top:6px">\u25cf = ~20\u0394 optimal &middot; Sorted by strike</div>';
+    '<div style="font-size:10px;color:#475569;margin-top:6px">\u25cf = ~20\u0394 optimal &middot; Sorted by strike &middot; Prem/d = bid \u00f7 DTE (premium per day held)</div>';
 }
 
 // ── Copy for Claude ───────────────────────────────────────────────────────────
@@ -2859,7 +2921,10 @@ function formatForClaude(d) {
       L.push('  27-45 DTE window OI: ' + (uoi.total_chain_oi || 0).toLocaleString() + ' (puts: ' + uoi.total_put_oi.toLocaleString() + ', calls: ' + uoi.total_call_oi.toLocaleString() + ')');
       L.push('  Put/Call OI ratio (window): ' + (uoi.pc_oi_ratio != null ? uoi.pc_oi_ratio.toFixed(2) : 'N/A'));
       if (uoi.concentration_flag) {
-        L.push('  ⚠️ UNUSUAL CONCENTRATION: Top strike holds ' + uoi.top_strikes[0].pct_of_chain.toFixed(0) + '% of window OI — potential whale positioning');
+        const _t = uoi.top_strikes[0];
+        const _be = _t.by_exp || [];
+        const _w = _be.length ? (' at $' + _t.strike.toFixed(0) + ' (' + (_be.length === 1 ? _be[0].exp : 'mostly ' + _be[0].exp) + ')') : '';
+        L.push('  ⚠️ UNUSUAL CONCENTRATION: Top strike holds ' + _t.pct_of_chain.toFixed(0) + '% of window OI' + _w + ' — potential whale positioning');
       } else {
         L.push('  No unusual OI concentration detected (within 27-45 DTE window).');
       }
@@ -2871,9 +2936,13 @@ function formatForClaude(d) {
           L.push('    ' + (e.in_window ? '* ' : '  ') + e.exp + ' (' + e.dte + 'd): call OI ' + (e.call_oi||0).toLocaleString() + ', put OI ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
         });
       }
-      L.push('  Top 3 strikes by OI:');
+      L.push('  Top 3 strikes by OI (with the expiration(s) holding that OI):');
       (uoi.top_strikes || []).forEach(function(s) {
-        L.push('    $' + s.strike.toFixed(0) + ': ' + s.total_oi.toLocaleString() + ' total OI (' + s.pct_of_chain.toFixed(1) + '% of chain) — calls: ' + s.call_oi.toLocaleString() + ', puts: ' + s.put_oi.toLocaleString());
+        const be = s.by_exp || [];
+        const expStr = !be.length ? 'expiration n/a'
+          : (be.length === 1 ? be[0].exp
+             : be.map(function(e){ return e.exp + ' ' + e.oi.toLocaleString(); }).join(' / '));
+        L.push('    $' + s.strike.toFixed(0) + ' [' + expStr + ']: ' + s.total_oi.toLocaleString() + ' total OI (' + s.pct_of_chain.toFixed(1) + '% of chain) — calls: ' + s.call_oi.toLocaleString() + ', puts: ' + s.put_oi.toLocaleString());
       });
     }
     // Options chain
@@ -2881,22 +2950,22 @@ function formatForClaude(d) {
       L.push('');
       L.push('OPTIONS — All 27-45 DTE expirations | Spot $'+_optD.spot.toFixed(2));
       L.push('SELL PUTS (* = ~20 delta optimal per expiration)');
-      L.push('  Strike\tBid\tAsk\tDelta\tTheta/d\tIV\tOI\tB/E\tAnn Yld');
+      L.push('  Strike\tBid\tAsk\tPrem/d\tDelta\tTheta/d\tIV\tOI\tB/E\tAnn Yld');
       let lastExp = null;
       [..._optD.puts].sort((a,b)=>b.strike-a.strike).forEach(c => {
         if (c.expiration !== lastExp) { L.push('  -- '+c.expiration+' ('+c.dte+'d) --'); lastExp = c.expiration; }
         const opt = c.optimal ? ' *' : '';
         const theta = c.theta != null ? '$'+c.theta.toFixed(3) : 'N/A';
-        L.push('  $'+c.strike.toFixed(0)+opt+'\t$'+c.bid.toFixed(2)+'\t$'+c.ask.toFixed(2)+'\t'+c.delta.toFixed(2)+'\t'+theta+'\t'+(c.impliedVolatility*100).toFixed(0)+'%\t'+c.openInterest+'\t$'+c.breakeven.toFixed(2)+'\t'+c.annYield.toFixed(1)+'%');
+        L.push('  $'+c.strike.toFixed(0)+opt+'\t$'+c.bid.toFixed(2)+'\t$'+c.ask.toFixed(2)+'\t$'+(c.dailyPrem!=null?c.dailyPrem.toFixed(3):'0.000')+'\t'+c.delta.toFixed(2)+'\t'+theta+'\t'+(c.impliedVolatility*100).toFixed(0)+'%\t'+c.openInterest+'\t$'+c.breakeven.toFixed(2)+'\t'+c.annYield.toFixed(1)+'%');
       });
       L.push('SELL CALLS (* = ~20 delta optimal per expiration)');
-      L.push('  Strike\tBid\tAsk\tDelta\tTheta/d\tIV\tOI\tB/E\tAnn Yld');
+      L.push('  Strike\tBid\tAsk\tPrem/d\tDelta\tTheta/d\tIV\tOI\tB/E\tAnn Yld');
       lastExp = null;
       [..._optD.calls].sort((a,b)=>a.strike-b.strike).forEach(c => {
         if (c.expiration !== lastExp) { L.push('  -- '+c.expiration+' ('+c.dte+'d) --'); lastExp = c.expiration; }
         const opt = c.optimal ? ' *' : '';
         const theta = c.theta != null ? '$'+c.theta.toFixed(3) : 'N/A';
-        L.push('  $'+c.strike.toFixed(0)+opt+'\t$'+c.bid.toFixed(2)+'\t$'+c.ask.toFixed(2)+'\t'+c.delta.toFixed(2)+'\t'+theta+'\t'+(c.impliedVolatility*100).toFixed(0)+'%\t'+c.openInterest+'\t$'+c.breakeven.toFixed(2)+'\t'+c.annYield.toFixed(1)+'%');
+        L.push('  $'+c.strike.toFixed(0)+opt+'\t$'+c.bid.toFixed(2)+'\t$'+c.ask.toFixed(2)+'\t$'+(c.dailyPrem!=null?c.dailyPrem.toFixed(3):'0.000')+'\t'+c.delta.toFixed(2)+'\t'+theta+'\t'+(c.impliedVolatility*100).toFixed(0)+'%\t'+c.openInterest+'\t$'+c.breakeven.toFixed(2)+'\t'+c.annYield.toFixed(1)+'%');
       });
     }
   }

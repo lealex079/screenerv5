@@ -28,7 +28,8 @@ Environment variables:
   EMAIL_FROM            — e.g. screener@cpa-cfo-now.com (must be on an authed domain)
   EMAIL_TO              — comma-separated recipients
   EMAIL_MODE=print      — write email HTML to a file instead of sending (testing)
-  MAX_WORKERS=12        — parallel scan workers
+  MAX_WORKERS=4         — parallel scan workers (low, to stay under Yahoo rate limits)
+  FINVIZ_MAX_TICKERS=250 — hard cap on universe size
   PACIFIC_TARGET_HOUR=7 — the Pacific hour a scheduled run should fire (DST guard)
 
 Tuning (composite weights, quality bar, Tier-1 cap) lives in watchlist_rank.py.
@@ -57,7 +58,8 @@ SENDGRID_API_KEY  = os.environ.get("SENDGRID_API_KEY", "")
 EMAIL_FROM        = os.environ.get("EMAIL_FROM", "screener@cpa-cfo-now.com")
 EMAIL_TO          = os.environ.get("EMAIL_TO", "")
 EMAIL_MODE        = os.environ.get("EMAIL_MODE", "send")   # "send" | "print"
-MAX_WORKERS       = int(os.environ.get("MAX_WORKERS", "12"))
+MAX_WORKERS       = int(os.environ.get("MAX_WORKERS", "4"))
+FINVIZ_MAX_TICKERS = int(os.environ.get("FINVIZ_MAX_TICKERS", "250"))
 
 # ── Import scan functions from scan.py ────────────────────────────────────────
 # scan.py lives in api/scan.py relative to repo root.
@@ -86,26 +88,39 @@ log.info(f"Loaded scan functions from {_scan_path}")
 def finviz_screen() -> list[str]:
     """
     Run Finviz screen and return list of tickers.
-    Filters for liquid, optionable US equities suitable for put selling.
-    Falls back to a hardcoded seed list if Finviz is unavailable.
+
+    Tuned for a put-selling watchlist and, just as important, for a universe
+    SMALL enough that scanning it through yfinance doesn't trip Yahoo's rate
+    limiter. The earlier loose filter set returned ~1,250 names; slamming that
+    many through 12 parallel workers is what produced the "Invalid Crumb" 401
+    flood. These filters cut that to a few hundred liquid, optionable names —
+    and FINVIZ_MAX_TICKERS caps it further as a hard backstop.
+
+    Every filter is passable straight into the finviz library. To change the
+    universe, prefer editing on finviz.com and confirming the count/names look
+    right before transcribing codes here — Finviz renames codes and a wrong one
+    fails silently (returns a different universe, no error).
     """
     filters = [
-        "geo_usa",          # US-listed only
-        "ind_stocksonly",   # exclude ETFs / funds
-        "sh_opt_option",    # optionable — eliminates ~80% of universe
-        "cap_midover",      # market cap $2B+ — options liquidity
-        "sh_price_o15",     # price > $15 — avoids strike granularity problems
-        "sh_avgvol_o500",   # avg volume > 500k — underlying liquidity
-        "sh_short_u20",     # short float < 20% — avoids squeeze risk
-        "ta_rsi_nos70",     # RSI not overbought — drops most extended names
+        "geo_usa",            # US-listed only
+        "ind_stocksonly",     # exclude ETFs / funds
+        "sh_opt_optionshort", # optionable AND shortable (better liquidity proxy)
+        "cap_midover",        # market cap $2B+ — options liquidity
+        "sh_price_o20",       # price > $20 — cleaner strike granularity
+        "sh_avgvol_o1000",    # avg volume > 1M — tighter liquidity floor (was 500k)
+        "sh_short_u15",       # short float < 15% — squeeze avoidance (was 20%)
+        "ta_sma200_pa",       # price above 200-day SMA — put-selling wants uptrends
+        "ta_volatility_o3",   # historical volatility > 3% — premium worth selling
     ]
 
     try:
         from finviz.screener import Screener
         log.info("Running Finviz screen...")
-        screen = Screener(filters=filters, table="Overview", order="-marketcap")
+        screen = Screener(filters=filters, table="Overview", order="-marketcap",
+                          rows=FINVIZ_MAX_TICKERS)
         tickers = [row["Ticker"] for row in screen if row.get("Ticker")]
-        log.info(f"Finviz returned {len(tickers)} candidates")
+        tickers = tickers[:FINVIZ_MAX_TICKERS]   # hard backstop on universe size
+        log.info(f"Finviz returned {len(tickers)} candidates (capped at {FINVIZ_MAX_TICKERS})")
         return tickers
     except ImportError:
         log.warning("finviz library not installed. Run: pip install finviz")
@@ -168,8 +183,16 @@ def run_parallel_scan(tickers: list[str], max_workers: int = MAX_WORKERS) -> lis
 
 
 def _safe_scan(ticker: str) -> dict:
-    """Wrapper around scan_ticker with a small delay to avoid rate limiting."""
-    time.sleep(0.5)  # ~3 req/sec per worker — safe for yfinance
+    """Wrapper around scan_ticker with a delay to stay under Yahoo's rate limit.
+
+    The dry-run showed that hammering Yahoo (1,248 names × 12 workers) triggers
+    a wall of 401 "Invalid Crumb" errors — Yahoo's rate limiter rejecting the
+    auth handshake under load. Three names at a trickle worked perfectly. With
+    MAX_WORKERS=4 and ~1.5s per worker, effective throughput is ~2-3 req/sec,
+    which the 3-name test suggests Yahoo tolerates. Tune MAX_WORKERS / this delay
+    together if 401s reappear at full universe size.
+    """
+    time.sleep(1.5)
     try:
         return scan_ticker(ticker)
     except Exception as e:

@@ -99,6 +99,12 @@ log.info(f"Loaded scan functions from {_scan_path}")
 # STEP 1 — Finviz screen
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _looks_like_ticker(s: str) -> bool:
+    """A plausible US equity symbol: 1-5 uppercase letters, optional .class."""
+    import re
+    return bool(re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", s or ""))
+
+
 def finviz_screen() -> list[str]:
     """
     Run Finviz screen and return list of tickers.
@@ -150,27 +156,47 @@ def finviz_screen() -> list[str]:
             log.info(f"Finviz row[0] type={type(first).__name__} "
                      f"sample={str(first)[:120]}")
 
+        # The finviz v2.0.0 parser can misalign headers by one column when the
+        # table has a leading "No." rank column — the field it labels "Ticker"
+        # ends up holding a stray single character while the real ticker sits in
+        # the next column ("Company"). Rather than trust any header, find which
+        # column actually contains ticker-shaped values, weighting toward
+        # MULTI-letter symbols: the misaligned column is full of single stray
+        # letters (which are technically ticker-shaped), so we must prefer the
+        # column whose values are real 2-5 letter tickers. Self-correcting if the
+        # layout shifts again.
         raw = []
-        for row in rows:
-            if isinstance(row, dict):
-                t = row.get("Ticker") or row.get("ticker")
-            elif isinstance(row, (list, tuple)):
-                t = row[0] if row else None          # Ticker is the first column
-            else:
-                t = str(row)
-            if t:
-                raw.append(t)
+        if rows and isinstance(rows[0], dict):
+            def col_score(key):
+                score = 0
+                for r in rows:
+                    v = str(r.get(key, "")).strip().upper()
+                    if _looks_like_ticker(v):
+                        score += 3 if len(v.split(".")[0]) >= 2 else 1  # favor multi-letter
+                return score
+            best_key = max(rows[0].keys(), key=col_score)
+            log.info(f"Finviz: reading tickers from column '{best_key}' "
+                     f"(score {col_score(best_key)} over {len(rows)} rows)")
+            for r in rows:
+                v = str(r.get(best_key, "")).strip().upper()
+                if v:
+                    raw.append(v)
+        else:
+            for row in rows:
+                if isinstance(row, (list, tuple)):
+                    v = row[0] if row else None
+                else:
+                    v = str(row)
+                if v:
+                    raw.append(v)
 
-        # Dedupe, preserving order, and reject anything that isn't a plausible
-        # ticker (1-5 uppercase letters, optional dot-class). A single stray
-        # character can't survive this, so the "scanned the alphabet" failure
-        # mode is now impossible even if the row shape changes again.
-        import re as _re
-        valid = _re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
+        # Dedupe, preserving order. Column detection above already restricted us
+        # to a ticker-shaped column, so here we just normalize and drop repeats
+        # and any stragglers that still aren't valid tickers.
         seen, tickers = set(), []
         for t in raw:
             t = str(t).strip().upper()
-            if t and t not in seen and valid.match(t):
+            if t and t not in seen and _looks_like_ticker(t):
                 seen.add(t)
                 tickers.append(t)
         tickers = tickers[:FINVIZ_MAX_TICKERS]

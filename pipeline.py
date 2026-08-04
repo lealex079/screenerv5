@@ -75,6 +75,20 @@ _spec = importlib.util.spec_from_file_location("scan", _scan_path)
 _scan_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_scan_mod)
 
+# Point yfinance's timezone/cookie cache at a dedicated, writable dir. On CI the
+# default (~/.cache/py-yfinance) gets contended by concurrent workers, producing
+# "database is locked" and "Failed to create TzCache" errors that in turn corrupt
+# the crumb/cookie handshake and inflate the 401 count. A fresh per-run dir avoids
+# the collision. Best-effort: if the yfinance API differs, we just skip it.
+try:
+    import yfinance as _yf
+    import tempfile, os as _os
+    _cache_dir = _os.path.join(tempfile.gettempdir(), "yf_cache")
+    _os.makedirs(_cache_dir, exist_ok=True)
+    _yf.set_tz_cache_location(_cache_dir)
+except Exception as _e:
+    log.warning(f"could not set yfinance cache location: {_e}")
+
 scan_ticker    = _scan_mod.scan_ticker
 fetch_options  = _scan_mod.fetch_options
 
@@ -118,9 +132,19 @@ def finviz_screen() -> list[str]:
         log.info("Running Finviz screen...")
         screen = Screener(filters=filters, table="Overview", order="-marketcap",
                           rows=FINVIZ_MAX_TICKERS)
-        tickers = [row["Ticker"] for row in screen if row.get("Ticker")]
+        raw = [row["Ticker"] for row in screen if row.get("Ticker")]
+        # Dedupe, preserving order. The finviz library can return the same ticker
+        # more than once (pagination overlap when the filtered set is small), and
+        # without this the same name flows all the way to the top-5 as duplicates.
+        seen, tickers = set(), []
+        for t in raw:
+            t = str(t).strip().upper()
+            if t and t not in seen:
+                seen.add(t)
+                tickers.append(t)
         tickers = tickers[:FINVIZ_MAX_TICKERS]   # hard backstop on universe size
-        log.info(f"Finviz returned {len(tickers)} candidates (capped at {FINVIZ_MAX_TICKERS})")
+        log.info(f"Finviz returned {len(raw)} rows, {len(tickers)} unique "
+                 f"(capped at {FINVIZ_MAX_TICKERS})")
         return tickers
     except ImportError:
         log.warning("finviz library not installed. Run: pip install finviz")

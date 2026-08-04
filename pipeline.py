@@ -132,19 +132,53 @@ def finviz_screen() -> list[str]:
         log.info("Running Finviz screen...")
         screen = Screener(filters=filters, table="Overview", order="-marketcap",
                           rows=FINVIZ_MAX_TICKERS)
-        raw = [row["Ticker"] for row in screen if row.get("Ticker")]
-        # Dedupe, preserving order. The finviz library can return the same ticker
-        # more than once (pagination overlap when the filtered set is small), and
-        # without this the same name flows all the way to the top-5 as duplicates.
+
+        # Access rows by index via the documented API rather than iterating the
+        # Screener object. `screen.data` is the canonical list of dict rows; each
+        # row is keyed by column header ("Ticker", "Company", ...). Iterating the
+        # object directly proved unreliable across finviz versions (it fell back
+        # to character-level iteration in v2.0.0, turning "AAPL" into A,A,P,L —
+        # which is why an earlier run scanned single letters).
+        rows = getattr(screen, "data", None)
+        if rows is None:
+            rows = [screen[i] for i in range(len(screen))]
+
+        # Log the shape of the first row ONCE so any future format change is
+        # diagnosable from the log instead of by guesswork.
+        if rows:
+            first = rows[0]
+            log.info(f"Finviz row[0] type={type(first).__name__} "
+                     f"sample={str(first)[:120]}")
+
+        raw = []
+        for row in rows:
+            if isinstance(row, dict):
+                t = row.get("Ticker") or row.get("ticker")
+            elif isinstance(row, (list, tuple)):
+                t = row[0] if row else None          # Ticker is the first column
+            else:
+                t = str(row)
+            if t:
+                raw.append(t)
+
+        # Dedupe, preserving order, and reject anything that isn't a plausible
+        # ticker (1-5 uppercase letters, optional dot-class). A single stray
+        # character can't survive this, so the "scanned the alphabet" failure
+        # mode is now impossible even if the row shape changes again.
+        import re as _re
+        valid = _re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
         seen, tickers = set(), []
         for t in raw:
             t = str(t).strip().upper()
-            if t and t not in seen:
+            if t and t not in seen and valid.match(t):
                 seen.add(t)
                 tickers.append(t)
-        tickers = tickers[:FINVIZ_MAX_TICKERS]   # hard backstop on universe size
-        log.info(f"Finviz returned {len(raw)} rows, {len(tickers)} unique "
+        tickers = tickers[:FINVIZ_MAX_TICKERS]
+        log.info(f"Finviz: {len(raw)} rows → {len(tickers)} valid unique tickers "
                  f"(capped at {FINVIZ_MAX_TICKERS})")
+        if len(tickers) < 5:
+            log.warning(f"Only {len(tickers)} tickers — filter codes may be wrong "
+                        f"or the screen is near-empty. First few: {tickers[:10]}")
         return tickers
     except ImportError:
         log.warning("finviz library not installed. Run: pip install finviz")

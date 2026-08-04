@@ -100,9 +100,19 @@ log.info(f"Loaded scan functions from {_scan_path}")
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _looks_like_ticker(s: str) -> bool:
-    """A plausible US equity symbol: 1-5 uppercase letters, optional .class."""
+    """A plausible US equity symbol: 1-5 uppercase letters, optional .class.
+
+    Rejects market-cap-style values ("1.2B", "850M", "3.1T") and anything with
+    digits — those slipped through an earlier looser check and caused the column
+    detector to lock onto the Market Cap column.
+    """
     import re
-    return bool(re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", s or ""))
+    if not s or any(c.isdigit() for c in s):
+        return False
+    # single-letter cap suffixes (B/M/T/K) are not tickers in this context
+    if s in {"B", "M", "T", "K"}:
+        return False
+    return bool(re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", s))
 
 
 def finviz_screen() -> list[str]:
@@ -156,37 +166,33 @@ def finviz_screen() -> list[str]:
             log.info(f"Finviz row[0] type={type(first).__name__} "
                      f"sample={str(first)[:120]}")
 
-        # The finviz v2.0.0 parser can misalign headers by one column when the
-        # table has a leading "No." rank column — the field it labels "Ticker"
-        # ends up holding a stray single character while the real ticker sits in
-        # the next column ("Company"). Rather than trust any header, find which
-        # column actually contains ticker-shaped values, weighting toward
-        # MULTI-letter symbols: the misaligned column is full of single stray
-        # letters (which are technically ticker-shaped), so we must prefer the
-        # column whose values are real 2-5 letter tickers. Self-correcting if the
-        # layout shifts again.
+        # The finviz v2.0.0 "Overview" parser has a consistent off-by-one header
+        # shift: every field holds the value belonging to the column on its RIGHT.
+        # Confirmed from the live row shape:
+        #   {'No.':'1','Ticker':'N','Company':'NVDA','Sector':'NVIDIA Corp',...}
+        # so the real ticker is in 'Company'. We read 'Company' first and only
+        # fall back to 'Ticker' if 'Company' isn't ticker-shaped (in case a future
+        # library version fixes the shift). A per-run log line records which field
+        # actually supplied the tickers, so a layout change is caught immediately.
         raw = []
         if rows and isinstance(rows[0], dict):
-            def col_score(key):
-                score = 0
-                for r in rows:
-                    v = str(r.get(key, "")).strip().upper()
-                    if _looks_like_ticker(v):
-                        score += 3 if len(v.split(".")[0]) >= 2 else 1  # favor multi-letter
-                return score
-            best_key = max(rows[0].keys(), key=col_score)
-            log.info(f"Finviz: reading tickers from column '{best_key}' "
-                     f"(score {col_score(best_key)} over {len(rows)} rows)")
+            def field_looks_right(key):
+                vals = [str(r.get(key, "")).strip().upper() for r in rows]
+                return sum(1 for v in vals if _looks_like_ticker(v) and len(v.split(".")[0]) >= 2)
+
+            company_hits = field_looks_right("Company")
+            ticker_hits = field_looks_right("Ticker")
+            src_key = "Company" if company_hits >= ticker_hits else "Ticker"
+            log.info(f"Finviz: reading tickers from '{src_key}' "
+                     f"(Company={company_hits}, Ticker={ticker_hits} multi-letter hits)")
             for r in rows:
-                v = str(r.get(best_key, "")).strip().upper()
+                v = str(r.get(src_key, "")).strip().upper()
                 if v:
                     raw.append(v)
         else:
             for row in rows:
-                if isinstance(row, (list, tuple)):
-                    v = row[0] if row else None
-                else:
-                    v = str(row)
+                v = (row[0] if isinstance(row, (list, tuple)) and row
+                     else str(row) if not isinstance(row, (list, tuple)) else None)
                 if v:
                     raw.append(v)
 

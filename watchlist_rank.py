@@ -74,6 +74,50 @@ WEAK_GRADE_SCORE = 50    # sell_put grade score below this is D/F territory
 TIER1_CAP = 5            # never show more than this many
 TIER1_MIN_COMPOSITE = 55  # quality bar: a thin week yields fewer than the cap,
                           # honestly, rather than padding with weak names.
+TIER2_CAP = 18           # scannable ceiling. Past ~20 rows the table becomes the
+                          # triage problem the watchlist exists to solve.
+RICH_IV_HV = 1.20        # IV/HV at or above this = premium standout
+
+
+def reason_flag(bundle: dict) -> str:
+    """
+    One word for a Tier 2 row: WHY this name is where it is.
+
+    Deliberately NOT the SELL/WATCH/AVOID verdict used in Tier 1. Those come from
+    Opus actually reading the setup — support placement, strike, grade, chain
+    depth. A Tier 2 row has no Claude call behind it, so reusing those words
+    would dress a bare threshold in the authority of a reasoned judgment. Worse,
+    Tier 2 names are by construction the ones that did NOT make the top five, so
+    a mechanical "SELL PUTS" on row 14 half-contradicts itself.
+
+    A reason is more useful for triage anyway: it tells the reader whether to
+    look closer or skip, without pretending to a verdict.
+
+        RICH      premium standout (IV/HV >= RICH_IV_HV), nothing capped
+        SOLID     clean, nothing capped — just below the Tier 1 cut
+        THIN      capped on chain depth (OI/volume)
+        NO QUOTE  no quotable ~20-delta put
+        WEAK      screener's own Sell Put grade is D/F
+    """
+    options = bundle.get("options") or {}
+    put = _target_put(options)
+    if put is None:
+        return "NO QUOTE"
+
+    grade = ((options.get("grades") or {}).get("sell_put") or {})
+    gscore = grade.get("score")
+    if gscore is not None and gscore < WEAK_GRADE_SCORE:
+        return "WEAK"
+
+    oi = put.get("openInterest") or 0
+    vol = put.get("volume") or 0
+    if oi < MIN_PUT_OI or vol < MIN_PUT_VOLUME:
+        return "THIN"
+
+    iv_hv = options.get("iv_hv")
+    if iv_hv is not None and iv_hv >= RICH_IV_HV:
+        return "RICH"
+    return "SOLID"
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -195,18 +239,22 @@ def composite_score(scan: dict, options: dict) -> float:
     return round(score, 1)
 
 
-def rank_candidates(bundles: list[dict]) -> tuple[list[dict], list[dict]]:
+def rank_candidates(bundles: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     """
     bundles = [{"ticker","scan","options",...}, ...] already scanned+optioned.
 
-    Returns (tier1, blocked):
-      tier1   — up to TIER1_CAP survivors above the quality bar, best first,
-                each annotated with `_composite` and `_gates` ([] since clear).
-      blocked — everything removed by a gate, each with `_gates` (the reasons),
-                for the optional "why isn't X here" footer.
+    Returns (tier1, tier2, blocked):
+      tier1   — up to TIER1_CAP survivors above the quality bar, best first.
+                These get an Opus triage blurb.
+      tier2   — the next TIER2_CAP survivors by composite, each annotated with
+                `_flag` (see reason_flag). Data rows only: NO Claude call, so
+                they cost nothing and add no latency. Options were already
+                fetched for every survivor, so the actual strike/yield/OI are
+                available for free.
+      blocked — everything removed by a gate, with `_gates` for the footer.
 
-    Names that clear the gates but fall below the bar are in neither list — they
-    cleared, they just weren't among the best five worth researching today.
+    Every survivor is annotated with `_composite` and `_flag`, so the email can
+    render whatever slice it wants.
     """
     survivors, blocked = [], []
     for b in bundles:
@@ -221,11 +269,15 @@ def rank_candidates(bundles: list[dict]) -> tuple[list[dict], list[dict]]:
             continue
         b["_gates"] = []
         b["_composite"] = composite_score(scan, options)
+        b["_flag"] = reason_flag(b)
         survivors.append(b)
 
     survivors.sort(key=lambda x: x["_composite"], reverse=True)
     tier1 = [b for b in survivors if b["_composite"] >= TIER1_MIN_COMPOSITE][:TIER1_CAP]
-    return tier1, blocked
+    # Tier 2 continues the same ranking below Tier 1 — no overlap.
+    t1_tickers = {b["ticker"] for b in tier1}
+    tier2 = [b for b in survivors if b["ticker"] not in t1_tickers][:TIER2_CAP]
+    return tier1, tier2, blocked
 
 
 assert abs(TREND_W + CRASH_SAFETY_W + STRUCTURE_W + PREMIUM_W + LIQUIDITY_W - 1.0) < 1e-9, \

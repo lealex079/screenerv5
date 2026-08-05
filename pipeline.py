@@ -334,7 +334,7 @@ def fetch_options_for_top(top: list[dict]) -> None:
 # Email — the triage watchlist digest
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_watchlist_email(tier1: list[dict], blocked: list[dict], run_date: str) -> tuple[str, str]:
+def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[dict], run_date: str) -> tuple[str, str]:
     """
     The triage watchlist email: up to 5 ranked names with brief blurbs, plus a
     small 'blocked by a gate' footer. This is a RESEARCH QUEUE, not a report —
@@ -385,6 +385,77 @@ def build_watchlist_email(tier1: list[dict], blocked: list[dict], run_date: str)
           <div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>
         </div>"""
 
+    # ── Tier 2: data-only rows, no Claude call ────────────────────────────────
+    tier2_html = ""
+    if tier2:
+        flag_color = {"RICH": "#22c55e", "SOLID": "#94a3b8", "THIN": "#f59e0b",
+                      "WEAK": "#f59e0b", "NO QUOTE": "#64748b"}
+        rows = ""
+        for b in tier2:
+            scan = b.get("scan") or {}
+            opts = b.get("options") or {}
+            put = next((p for p in (opts.get("puts") or []) if p.get("optimal")), None)
+            flag = b.get("_flag", "")
+            ivhv = opts.get("iv_hv")
+            strike = f"${put['strike']:.0f}/{put.get('dte','?')}d" if put else "—"
+            yld = f"{put['annYield']:.1f}%" if put and put.get("annYield") is not None else "—"
+            oi = f"{put['openInterest']:,}" if put and put.get("openInterest") else "—"
+            rows += f"""
+            <tr>
+              <td style="padding:5px 8px;color:#e2e8f0;font-weight:600">{b['ticker']}</td>
+              <td style="padding:5px 8px;color:#94a3b8;text-align:right">{b.get('_composite','—')}</td>
+              <td style="padding:5px 8px;color:#64748b;text-align:right">{scan.get('trend_score',0):.0f}/{scan.get('crash_score',0):.0f}/{scan.get('structure_score',0):.0f}</td>
+              <td style="padding:5px 8px;color:#94a3b8;text-align:right">{f'{ivhv:.2f}' if ivhv is not None else '—'}</td>
+              <td style="padding:5px 8px;color:#cbd5e1;text-align:right">{strike}</td>
+              <td style="padding:5px 8px;color:#e2e8f0;text-align:right;font-weight:600">{yld}</td>
+              <td style="padding:5px 8px;color:#64748b;text-align:right">{oi}</td>
+              <td style="padding:5px 8px;text-align:right"><span style="color:{flag_color.get(flag,'#64748b')};font-size:10px;letter-spacing:.4px">{flag}</span></td>
+            </tr>"""
+        legend_items = [
+            ("RICH", "#22c55e", "Premium standout — implied vol well above realized (IV/HV high). Nothing capped it."),
+            ("SOLID", "#94a3b8", "Clean setup, nothing capped — it just ranked below today's top five."),
+            ("THIN", "#f59e0b", "Chain is shallow (low open interest or volume). A real fill may be hard to get."),
+            ("WEAK", "#f59e0b", "The screener's own Sell Put grade came back D or F."),
+            ("NO QUOTE", "#64748b", "No quotable ~20-delta put — the chain didn't produce a usable strike."),
+        ]
+        legend_rows = "".join(
+            f"""<tr>
+                  <td style="padding:2px 10px 2px 0;white-space:nowrap;vertical-align:top">
+                    <span style="color:{c};font-size:10px;letter-spacing:.4px;font-weight:600">{name}</span>
+                  </td>
+                  <td style="padding:2px 0;color:#64748b;font-size:11px;line-height:1.5">{desc}</td>
+                </tr>"""
+            for name, c, desc in legend_items
+        )
+        tier2_html = f"""
+        <div style="margin-top:26px">
+          <div style="font-size:12px;color:#94a3b8;margin-bottom:2px">Also cleared the gates</div>
+          <div style="font-size:11px;color:#475569;margin-bottom:10px;line-height:1.5">
+            Ranked below the top {len(tier1)}, shown as data only — no write-up.
+            The flag says <i>why</i> the name sits here. It's read off the numbers,
+            not a verdict — unlike the calls above, nothing analyzed these.
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:11px">
+            <tr style="color:#475569;font-size:10px;text-align:right">
+              <th style="padding:4px 8px;text-align:left">Ticker</th>
+              <th style="padding:4px 8px">Rank</th><th style="padding:4px 8px">T/C/S</th>
+              <th style="padding:4px 8px">IV/HV</th><th style="padding:4px 8px">Put</th>
+              <th style="padding:4px 8px">Ann Yld</th><th style="padding:4px 8px">OI</th>
+              <th style="padding:4px 8px">Flag</th>
+            </tr>
+            {rows}
+          </table>
+          <div style="margin-top:14px;padding:12px 14px;background:#141c27;border-radius:6px;border:1px solid #1e2a35">
+            <div style="font-size:10px;color:#475569;letter-spacing:.5px;margin-bottom:8px">WHAT THE FLAGS MEAN</div>
+            <table style="border-collapse:collapse">{legend_rows}</table>
+            <div style="margin-top:10px;font-size:10px;color:#334155;line-height:1.5">
+              T/C/S = Trend / Crash / Structure scores · IV/HV = implied vs realized
+              volatility (above 1.0 means options are pricing more movement than the
+              stock has been making) · Ann Yld = annualized yield on the quoted put.
+            </div>
+          </div>
+        </div>"""
+
     # ── Blocked footer (collapsible via <details>) ────────────────────────────
     blocked_html = ""
     if blocked:
@@ -419,6 +490,7 @@ def build_watchlist_email(tier1: list[dict], blocked: list[dict], run_date: str)
   </div>
 
   {cards}
+  {tier2_html}
   {blocked_html}
 
   <div style="border-top:1px solid #1e2a35;margin-top:22px;padding-top:12px;font-size:10px;color:#334155;text-align:center">
@@ -583,9 +655,9 @@ def main():
                for d in pre]
 
     # Step 5 — full gate (adds liquidity) + composite rank → top 5
-    tier1, blocked = wr.rank_candidates(bundles)
+    tier1, tier2, blocked = wr.rank_candidates(bundles)
     log.info(f"Ranked: {len(tier1)} in Tier 1 (bar {wr.TIER1_MIN_COMPOSITE}, "
-             f"cap {wr.TIER1_CAP}); {len(blocked)} blocked by a gate")
+             f"cap {wr.TIER1_CAP}); {len(tier2)} in Tier 2; {len(blocked)} blocked")
     if not tier1:
         log.warning("No names cleared the quality bar — thin day, no watchlist sent")
         sys.exit(0)
@@ -611,7 +683,7 @@ def main():
 
     # Step 7 — build + send the watchlist email
     log.info("\nBuilding watchlist email...")
-    subject, html = build_watchlist_email(tier1, blocked, run_date)
+    subject, html = build_watchlist_email(tier1, tier2, blocked, run_date)
     send_email(subject, html)
 
     log.info("\nPipeline complete.")

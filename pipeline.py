@@ -52,6 +52,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("pipeline")
 
+# Silence yfinance's internal logging. It logs every failed HTTP attempt at
+# ERROR level — the wall of "Invalid Crumb" 401s — even though our retry logic
+# recovers ~98% of them. Those lines make a real failure impossible to spot in
+# the flood. We suppress them (CRITICAL+ only) and rely on our own per-scan
+# summary ("246 ok, 4 errors") for the honest picture. This changes NOTHING
+# about the actual requests or success rate — only what gets printed.
+for _noisy in ("yfinance", "urllib3", "requests", "peewee"):
+    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
+    logging.getLogger(_noisy).propagate = False
+
 # ── Config from environment ───────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 SENDGRID_API_KEY  = os.environ.get("SENDGRID_API_KEY", "")

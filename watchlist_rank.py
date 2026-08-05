@@ -80,19 +80,43 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
+# Weight given to vol_rank inside the premium score. Set to 0.0 deliberately —
+# see _premium_to_score. Raise it if you decide realized-vol percentile is worth
+# something; the plumbing stays in place either way.
+VOL_RANK_WEIGHT = 0.0
+
+
 def _premium_to_score(iv_hv, vol_rank) -> float:
     """
-    Map premium richness to 0-100, mirroring premium_score() in scan.py so the
-    watchlist and the screener agree on what 'rich' means.
-      IV/HV: 0.7x -> 0, 1.0x -> 50, 1.3x -> 100   (60% weight)
-      vol_rank: already a 0-100 percentile               (40% weight)
-    Falls back gracefully if one input is missing.
+    Map premium richness to 0-100 for a PUT SELLER.
+
+    Driven by IV/HV:  0.7x -> 0, 1.0x -> 50 (fairly priced), 1.3x -> 100.
+
+    WHY vol_rank IS WEIGHTED 0 (it is 40% of scan.py's premium_score):
+
+    1. IT SATURATES. vol_rank is the percentile of the stock's CURRENT 30d
+       realized vol within its own trailing year. Equity vol is highly
+       correlated across names, so when the market's vol regime rises, nearly
+       every name pegs near 100 at once. Simulated: ~15% of names sit >=95th in
+       a calm tape, ~99% when vol has risen recently. Observed the same thing
+       live — every name in three consecutive runs printed 89-100. An input that
+       reads ~100 for the whole universe cannot rank anything.
+
+    2. IT POINTS THE WRONG WAY. It measures REALIZED vol, not premium. A stock
+       realizing its highest vol in a year is moving more than usual — that is
+       strike-breach risk for a put seller, not edge. The edge is implied ABOVE
+       realized, which is exactly what IV/HV captures. IV/HV is also a ratio, so
+       it stays meaningful across vol regimes instead of drifting with them.
+
+    This only changes the WATCHLIST RANKING. scan.py's own premium_score and the
+    trade grades are untouched — the screener still reports vol_rank, and the
+    blurbs may still mention it.
     """
     parts, weights = [], []
     if iv_hv is not None:
-        parts.append(_clamp((iv_hv - 0.7) / (1.3 - 0.7) * 100)); weights.append(0.6)
-    if vol_rank is not None:
-        parts.append(_clamp(float(vol_rank))); weights.append(0.4)
+        parts.append(_clamp((iv_hv - 0.7) / (1.3 - 0.7) * 100)); weights.append(1.0 - VOL_RANK_WEIGHT)
+    if vol_rank is not None and VOL_RANK_WEIGHT > 0:
+        parts.append(_clamp(float(vol_rank))); weights.append(VOL_RANK_WEIGHT)
     if not parts:
         return 50.0  # neutral if we know nothing — don't reward or punish
     return sum(p * w for p, w in zip(parts, weights)) / sum(weights)

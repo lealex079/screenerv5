@@ -356,6 +356,12 @@ def build_watchlist_email(tier1: list[dict], blocked: list[dict], run_date: str)
         blurb_html = "<br>".join(
             (b.get("blurb") or "").split("\n")
         ) or "[no blurb]"
+        # Sector comes from yt.info, which intermittently 401s under Yahoo
+        # throttling — scan.py then defaults it to "Unknown". Printing that adds
+        # nothing, so show the label only when it's real.
+        _sec = str(scan.get("sector") or "").strip()
+        sector_html = ("" if _sec.lower() in ("", "unknown", "none", "n/a")
+                       else f'<span style="font-size:12px;color:#64748b;margin-left:8px">{_sec}</span>')
         ts, cs, ss = scan.get("trend_score"), scan.get("crash_score"), scan.get("structure_score")
         price = scan.get("price") or 0
         cards += f"""
@@ -364,7 +370,7 @@ def build_watchlist_email(tier1: list[dict], blocked: list[dict], run_date: str)
             <div>
               <span style="font-size:13px;color:#475569">#{i}</span>
               <span style="font-size:20px;font-weight:600;color:#e2e8f0;margin-left:6px">{b['ticker']}</span>
-              <span style="font-size:12px;color:#64748b;margin-left:8px">{scan.get('sector','')}</span>
+              {sector_html}
             </div>
             <div style="text-align:right">
               <div style="font-size:16px;font-weight:600;color:#e2e8f0">${price:.2f}</div>

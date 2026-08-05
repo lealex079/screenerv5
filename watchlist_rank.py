@@ -50,11 +50,25 @@ LIQUIDITY_GATE = 35      # <  blocks
 EARNINGS_GATE_DAYS = 45  # 0..this blocks
 
 # ── Composite weights (must sum to 1.0) ───────────────────────────────────────
-TREND_W = 0.25
+TREND_W = 0.30          # was 0.25 — HIG ranked #1 on structure with trend 42
 CRASH_SAFETY_W = 0.20
-STRUCTURE_W = 0.20
+STRUCTURE_W = 0.15      # was 0.20 — it's a PROVISIONAL score; it was outvoting
+                        # the regression-validated trend read and dragging
+                        # weak-trend names to the top
 PREMIUM_W = 0.25
 LIQUIDITY_W = 0.10
+
+# ── Tradeability caps ─────────────────────────────────────────────────────────
+# Premium you cannot actually harvest is not an opportunity. These caps stop a
+# name from ranking highly when the trade behind it isn't real. They are CAPS on
+# the composite, applied after the weighted score, so a name can still appear —
+# it just can't outrank a genuinely clean setup.
+NO_QUOTE_CAP = 54.0      # no quotable ~20Δ put at all → below the Tier-1 bar
+THIN_OI_CAP = 60.0       # quotable but illiquid → can appear, can't lead
+WEAK_GRADE_CAP = 58.0    # screener's own Sell Put grade is D/F → can't lead
+MIN_PUT_OI = 100         # open interest floor for "a real fill is plausible"
+MIN_PUT_VOLUME = 10      # today's volume floor
+WEAK_GRADE_SCORE = 50    # sell_put grade score below this is D/F territory
 
 # ── Tier 1 selection ──────────────────────────────────────────────────────────
 TIER1_CAP = 5            # never show more than this many
@@ -103,22 +117,58 @@ def check_gates(scan: dict, options: dict) -> list[str]:
     return active
 
 
+def _target_put(options: dict) -> dict | None:
+    """The screener's flagged ~20-delta put, if it produced one."""
+    for p in (options.get("puts") or []):
+        if p.get("optimal"):
+            return p
+    return None
+
+
 def composite_score(scan: dict, options: dict) -> float:
-    """Weighted 0-100 attractiveness for survivors. Assumes gates already passed."""
+    """
+    Weighted 0-100 attractiveness for survivors, then capped by TRADEABILITY.
+
+    The weighted part answers "how good does this look?". The caps answer "is the
+    trade behind it real?" — because the two can disagree badly. In the 2026-08-05
+    run, HIG ranked #1 on a structure score of 93 while carrying trend 42 and a
+    put with 5 volume / 95 OI, and the blurb correctly called it AVOID. A ranking
+    whose #1 pick is an AVOID destroys trust in the whole list, so tradeability
+    now constrains the score rather than merely being described in the blurb.
+    """
     trend = _clamp(scan.get("trend_score") or 0)
     crash_safety = _clamp(100 - (scan.get("crash_score") or 50))
     structure = _clamp(scan.get("structure_score") or 0)
     premium = _premium_to_score(options.get("iv_hv"), options.get("vol_rank"))
     liquidity = _clamp(options.get("liquidity_score") or 0)
 
-    return round(
+    score = (
         trend * TREND_W
         + crash_safety * CRASH_SAFETY_W
         + structure * STRUCTURE_W
         + premium * PREMIUM_W
-        + liquidity * LIQUIDITY_W,
-        1,
+        + liquidity * LIQUIDITY_W
     )
+
+    # ── Tradeability caps, strongest first ────────────────────────────────────
+    put = _target_put(options)
+    if put is None:
+        # No quotable ~20Δ put. Nothing to sell, so nothing to research today.
+        # This also means an accidental after-hours run (when every chain goes
+        # bid-less) sends an empty watchlist instead of five phantom trades.
+        return round(min(score, NO_QUOTE_CAP), 1)
+
+    oi = put.get("openInterest") or 0
+    vol = put.get("volume") or 0
+    if oi < MIN_PUT_OI or vol < MIN_PUT_VOLUME:
+        score = min(score, THIN_OI_CAP)
+
+    grade = ((options.get("grades") or {}).get("sell_put") or {})
+    gscore = grade.get("score")
+    if gscore is not None and gscore < WEAK_GRADE_SCORE:
+        score = min(score, WEAK_GRADE_CAP)
+
+    return round(score, 1)
 
 
 def rank_candidates(bundles: list[dict]) -> tuple[list[dict], list[dict]]:

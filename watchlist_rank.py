@@ -63,12 +63,29 @@ LIQUIDITY_W = 0.10
 # name from ranking highly when the trade behind it isn't real. They are CAPS on
 # the composite, applied after the weighted score, so a name can still appear —
 # it just can't outrank a genuinely clean setup.
-NO_QUOTE_CAP = 54.0      # no quotable ~20Δ put at all → below the Tier-1 bar
-THIN_OI_CAP = 60.0       # quotable but illiquid → can appear, can't lead
-WEAK_GRADE_CAP = 58.0    # screener's own Sell Put grade is D/F → can't lead
-MIN_PUT_OI = 100         # open interest floor for "a real fill is plausible"
-MIN_PUT_VOLUME = 10      # today's volume floor
+NO_QUOTE_CAP = 54.0      # no quotable ~20Δ put at all → below the Tier-1 bar.
+                         # Stays a hard cap: there is no trade, so there is
+                         # nothing to rank.
+
+# Everything else is a PROPORTIONAL PENALTY, not a cap. Hard caps pinned four
+# Tier-1 names at exactly 60.0 in the 2026-08-05 run, making their order
+# arbitrary — the flattening happened precisely where the ranking needs to
+# discriminate. Multiplying preserves relative order while still demoting.
+THIN_PENALTY = 0.85      # quotable but shallow chain
+WEAK_GRADE_PENALTY = 0.82  # screener's own Sell Put grade is D/F
+
+# Chain-depth test. OPEN INTEREST ONLY — per-strike DAILY volume is naturally
+# tiny even on deep chains (most OI sits untraded on any given day), so a volume
+# floor produced absurd false negatives: 'D' carried 3,205 OI and was still
+# flagged THIN because that strike traded fewer than 10 contracts that day.
+# 15 of 18 Tier-2 rows came back THIN, which is a flag that has stopped meaning
+# anything. OI is the honest measure of whether a fill is plausible.
+MIN_PUT_OI = 50          # was 100 — with volume dropped, this is the sole test
+
 WEAK_GRADE_SCORE = 50    # sell_put grade score below this is D/F territory
+WEAK_GRADE_LETTERS = {"D", "D-", "D+", "F"}  # a "D" letter can carry a score
+                         # just above 50 and slip past the numeric test — VRTX
+                         # reached Tier 1 that way with grade D and OI 3.
 
 # ── Tier 1 selection ──────────────────────────────────────────────────────────
 TIER1_CAP = 5            # never show more than this many
@@ -77,6 +94,21 @@ TIER1_MIN_COMPOSITE = 55  # quality bar: a thin week yields fewer than the cap,
 TIER2_CAP = 18           # scannable ceiling. Past ~20 rows the table becomes the
                           # triage problem the watchlist exists to solve.
 RICH_IV_HV = 1.20        # IV/HV at or above this = premium standout
+
+
+def _is_weak_grade(options: dict) -> bool:
+    """Sell Put grade is D/F — by letter OR by numeric score."""
+    g = ((options.get("grades") or {}).get("sell_put") or {})
+    letter = str(g.get("grade") or "").strip().upper()
+    if letter in WEAK_GRADE_LETTERS:
+        return True
+    sc = g.get("score")
+    return sc is not None and sc < WEAK_GRADE_SCORE
+
+
+def _is_thin(put: dict) -> bool:
+    """Chain too shallow for a plausible fill. Open interest only — see MIN_PUT_OI."""
+    return (put.get("openInterest") or 0) < MIN_PUT_OI
 
 
 def reason_flag(bundle: dict) -> str:
@@ -104,14 +136,10 @@ def reason_flag(bundle: dict) -> str:
     if put is None:
         return "NO QUOTE"
 
-    grade = ((options.get("grades") or {}).get("sell_put") or {})
-    gscore = grade.get("score")
-    if gscore is not None and gscore < WEAK_GRADE_SCORE:
+    if _is_weak_grade(options):
         return "WEAK"
 
-    oi = put.get("openInterest") or 0
-    vol = put.get("volume") or 0
-    if oi < MIN_PUT_OI or vol < MIN_PUT_VOLUME:
+    if _is_thin(put):
         return "THIN"
 
     iv_hv = options.get("iv_hv")
@@ -226,15 +254,10 @@ def composite_score(scan: dict, options: dict) -> float:
         # bid-less) sends an empty watchlist instead of five phantom trades.
         return round(min(score, NO_QUOTE_CAP), 1)
 
-    oi = put.get("openInterest") or 0
-    vol = put.get("volume") or 0
-    if oi < MIN_PUT_OI or vol < MIN_PUT_VOLUME:
-        score = min(score, THIN_OI_CAP)
-
-    grade = ((options.get("grades") or {}).get("sell_put") or {})
-    gscore = grade.get("score")
-    if gscore is not None and gscore < WEAK_GRADE_SCORE:
-        score = min(score, WEAK_GRADE_CAP)
+    if _is_thin(put):
+        score *= THIN_PENALTY
+    if _is_weak_grade(options):
+        score *= WEAK_GRADE_PENALTY
 
     return round(score, 1)
 

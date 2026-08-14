@@ -398,6 +398,11 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
             flag = b.get("_flag", "")
             ivhv = opts.get("iv_hv")
             strike = f"${put['strike']:.0f}/{put.get('dte','?')}d" if put else "—"
+            # Expiration date: DTE alone is ambiguous once the email is a day old,
+            # and the reader needs to know WHICH contract to pull up. Trim the year
+            # off ("Sep 19, 2026" -> "Sep 19") to keep the column narrow.
+            exp = (put or {}).get("expiration") or ""
+            exp = exp.rsplit(",", 1)[0].strip() if exp else "—"
             yld = f"{put['annYield']:.1f}%" if put and put.get("annYield") is not None else "—"
             oi = f"{put['openInterest']:,}" if put and put.get("openInterest") else "—"
             rows += f"""
@@ -407,6 +412,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
               <td style="padding:5px 8px;color:#64748b;text-align:right">{scan.get('trend_score',0):.0f}/{scan.get('crash_score',0):.0f}/{scan.get('structure_score',0):.0f}</td>
               <td style="padding:5px 8px;color:#94a3b8;text-align:right">{f'{ivhv:.2f}' if ivhv is not None else '—'}</td>
               <td style="padding:5px 8px;color:#cbd5e1;text-align:right">{strike}</td>
+              <td style="padding:5px 8px;color:#94a3b8;text-align:right;white-space:nowrap">{exp}</td>
               <td style="padding:5px 8px;color:#e2e8f0;text-align:right;font-weight:600">{yld}</td>
               <td style="padding:5px 8px;color:#64748b;text-align:right">{oi}</td>
               <td style="padding:5px 8px;text-align:right"><span style="color:{flag_color.get(flag,'#64748b')};font-size:10px;letter-spacing:.4px">{flag}</span></td>
@@ -440,6 +446,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
               <th style="padding:4px 8px;text-align:left">Ticker</th>
               <th style="padding:4px 8px">Rank</th><th style="padding:4px 8px">T/C/S</th>
               <th style="padding:4px 8px">IV/HV</th><th style="padding:4px 8px">Put</th>
+              <th style="padding:4px 8px">Expiry</th>
               <th style="padding:4px 8px">Ann Yld</th><th style="padding:4px 8px">OI</th>
               <th style="padding:4px 8px">Flag</th>
             </tr>
@@ -451,7 +458,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
             <div style="margin-top:10px;font-size:10px;color:#334155;line-height:1.5">
               T/C/S = Trend / Crash / Structure scores · IV/HV = implied vs realized
               volatility (above 1.0 means options are pricing more movement than the
-              stock has been making) · Ann Yld = annualized yield on the quoted put.
+              stock has been making) · Expiry = the contract's expiration date · Ann Yld = annualized yield on the quoted put.
             </div>
           </div>
         </div>"""

@@ -45,8 +45,15 @@ You receive one ticker's screener output as JSON. Write a blurb of 60-90 words:
 3. THE KEY LEVEL: name the nearest support confluence the put would sit above,
    with its price and sources, taken verbatim from `confluences`. If none is
    within range, say the chain's support is thin and stop — do NOT invent a level.
-4. THE PUT: strike, DTE, delta, annualized yield, breakeven — from `target_put`
-   verbatim. If `target_put` is null, say the chain was too thin to quote.
+4. THE PUT: strike, EXPIRATION DATE, DTE, delta, the PREMIUM (credit received
+   per share, and the bid/ask if both are present), annualized yield, and
+   breakeven — all from `target_put` verbatim. ALWAYS state the expiration date
+   (the `expiration` field, e.g. "Sep 19, 2026") — the reader needs to know
+   which contract this is, and DTE alone is ambiguous once the note is a day
+   old. ALWAYS state the premium: it is the actual cash collected and the only
+   number that sets the maximum profit, so a note without it can't be acted on.
+   Quote premium per share (e.g. "$4.70, so $470 per contract").
+   If `target_put` is null, say the chain was too thin to quote.
 5. If the Sell Call grade is strong (B or better), add a 4-6 word note that it's
    also a call-write candidate. Otherwise omit calls entirely.
 6. CLOSE with one short clause on the single biggest thing to check in the full

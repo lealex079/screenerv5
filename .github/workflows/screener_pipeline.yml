@@ -1,4 +1,4 @@
-name: Daily Screener Pipeline
+name: Monday Screener Watchlist
 
 on:
   schedule:
@@ -6,8 +6,9 @@ on:
     # PST and PDT firing times for 7:00 AM Pacific and let the pipeline's own
     # guard (PACIFIC_HOUR check) no-op the one that isn't 7 AM Pacific today.
     # This keeps delivery at 7 AM Pacific year-round with no twice-a-year edit.
-    - cron: "0 15 * * 1-5"   # 7:00 AM PST (UTC-8), active Nov–Mar
-    - cron: "0 14 * * 1-5"   # 7:00 AM PDT (UTC-7), active Mar–Nov
+    # Day-of-week "1" = Monday only.
+    - cron: "0 15 * * 1"   # 7:00 AM PST (UTC-8), active Nov–Mar
+    - cron: "0 14 * * 1"   # 7:00 AM PDT (UTC-7), active Mar–Nov
 
   # Allow manual trigger from GitHub Actions tab
   workflow_dispatch:
@@ -17,16 +18,20 @@ on:
         required: false
         default: ""
       dry_run:
-        description: "Dry run (scan + pre-gate only — no options, Claude, or email)"
+        description: "Dry run (no Claude, no email)"
         required: false
         default: "false"
         type: choice
         options: ["false", "true"]
+      top_n:
+        description: "Number of full reports (default 10)"
+        required: false
+        default: "10"
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 60   # full 300-ticker scan should finish in ~20 min
 
     steps:
       - name: Checkout repo
@@ -49,6 +54,7 @@ jobs:
           SENDGRID_API_KEY:  ${{ secrets.SENDGRID_API_KEY }}
           EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:          ${{ secrets.EMAIL_TO }}
+          TOP_N:             ${{ github.event.inputs.top_n || '10' }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           ARGS=""
@@ -81,6 +87,9 @@ jobs:
           EMAIL_TO:         ${{ secrets.EMAIL_TO }}
           RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Silence is the worst failure mode for something people rely on, so a
+          # broken run emails an alert instead of just going dark. Best-effort:
+          # if the alert itself can't send, we don't want to mask the real error.
           python - <<'PY' || echo "failure-notify step could not send alert"
           import os
           key = os.environ.get("SENDGRID_API_KEY")
@@ -93,7 +102,7 @@ jobs:
               from_email=os.environ.get("EMAIL_FROM","screener@cpa-cfo-now.com"),
               to_emails=to,
               subject="⚠️ Screener pipeline FAILED",
-              html_content=f'The daily screener run failed. Logs: '
+              html_content=f'The Monday screener run failed. Logs: '
                            f'<a href="{os.environ.get("RUN_URL","")}">{os.environ.get("RUN_URL","")}</a>',
           )
           r = sendgrid.SendGridAPIClient(api_key=key).send(msg)

@@ -51,7 +51,10 @@ jobs:
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SENDGRID_API_KEY:  ${{ secrets.SENDGRID_API_KEY }}
+          SMTP_PASS:         ${{ secrets.SMTP_PASS }}
+          SMTP_HOST:         ${{ vars.SMTP_HOST || 'smtp.resend.com' }}
+          SMTP_PORT:         ${{ vars.SMTP_PORT || '465' }}
+          SMTP_USER:         ${{ vars.SMTP_USER || 'resend' }}
           EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:          ${{ secrets.EMAIL_TO }}
           TOP_N:             ${{ github.event.inputs.top_n || '10' }}
@@ -82,29 +85,40 @@ jobs:
       - name: Notify on failure
         if: failure()
         env:
-          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
-          EMAIL_FROM:       ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO:         ${{ secrets.EMAIL_TO }}
-          RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
+          SMTP_HOST:  ${{ vars.SMTP_HOST || 'smtp.resend.com' }}
+          SMTP_PORT:  ${{ vars.SMTP_PORT || '465' }}
+          SMTP_USER:  ${{ vars.SMTP_USER || 'resend' }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO:   ${{ secrets.EMAIL_TO }}
+          RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Silence is the worst failure mode for something people rely on, so a
-          # broken run emails an alert instead of just going dark. Best-effort:
-          # if the alert itself can't send, we don't want to mask the real error.
+          # broken run emails an alert. Best-effort: if the alert itself can't
+          # send, don't mask the real error. Uses stdlib smtplib — no SDK.
           python - <<'PY' || echo "failure-notify step could not send alert"
-          import os
-          key = os.environ.get("SENDGRID_API_KEY")
-          to  = [e.strip() for e in os.environ.get("EMAIL_TO","").split(",") if e.strip()]
-          if not (key and to):
-              print("no SendGrid creds/recipients — skipping alert"); raise SystemExit(0)
-          import sendgrid
-          from sendgrid.helpers.mail import Mail
-          msg = Mail(
-              from_email=os.environ.get("EMAIL_FROM","screener@cpa-cfo-now.com"),
-              to_emails=to,
-              subject="⚠️ Screener pipeline FAILED",
-              html_content=f'The Monday screener run failed. Logs: '
-                           f'<a href="{os.environ.get("RUN_URL","")}">{os.environ.get("RUN_URL","")}</a>',
-          )
-          r = sendgrid.SendGridAPIClient(api_key=key).send(msg)
-          print("alert sent, status", r.status_code)
+          import os, smtplib
+          from email.message import EmailMessage
+          pw = os.environ.get("SMTP_PASS")
+          to = [e.strip() for e in os.environ.get("EMAIL_TO","").split(",") if e.strip()]
+          if not (pw and to):
+              print("no SMTP creds/recipients — skipping alert"); raise SystemExit(0)
+          url = os.environ.get("RUN_URL","")
+          m = EmailMessage()
+          m["Subject"] = "Screener pipeline FAILED"
+          m["From"] = os.environ.get("EMAIL_FROM","")
+          m["To"] = ", ".join(to)
+          m.set_content(f"The Monday screener run failed.\n\nLogs: {url}")
+          m.add_alternative(f'The Monday screener run failed. '
+                            f'Logs: <a href="{url}">{url}</a>', subtype="html")
+          host = os.environ.get("SMTP_HOST","smtp.resend.com")
+          port = int(os.environ.get("SMTP_PORT","465"))
+          user = os.environ.get("SMTP_USER","resend")
+          if port in (465, 2465):
+              with smtplib.SMTP_SSL(host, port, timeout=30) as s:
+                  s.login(user, pw); s.send_message(m)
+          else:
+              with smtplib.SMTP(host, port, timeout=30) as s:
+                  s.starttls(); s.login(user, pw); s.send_message(m)
+          print("alert sent")
           PY

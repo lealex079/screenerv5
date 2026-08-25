@@ -24,7 +24,8 @@ Usage:
 
 Environment variables:
   ANTHROPIC_API_KEY     — required for blurbs (console.anthropic.com)
-  SENDGRID_API_KEY      — required to send email (or EMAIL_MODE=print to skip)
+  SMTP_PASS             — email provider API key (Resend: the re_... key)
+  SMTP_HOST/PORT/USER   — optional; default to Resend (smtp.resend.com:465, user "resend")
   EMAIL_FROM            — e.g. screener@cpa-cfo-now.com (must be on an authed domain)
   EMAIL_TO              — comma-separated recipients
   EMAIL_MODE=print      — write email HTML to a file instead of sending (testing)
@@ -64,7 +65,10 @@ for _noisy in ("yfinance", "urllib3", "requests", "peewee"):
 
 # ── Config from environment ───────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-SENDGRID_API_KEY  = os.environ.get("SENDGRID_API_KEY", "")
+SMTP_HOST         = os.environ.get("SMTP_HOST", "smtp.resend.com")
+SMTP_PORT         = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_USER         = os.environ.get("SMTP_USER", "resend")
+SMTP_PASS         = os.environ.get("SMTP_PASS", "")
 EMAIL_FROM        = os.environ.get("EMAIL_FROM", "screener@cpa-cfo-now.com")
 EMAIL_TO          = os.environ.get("EMAIL_TO", "")
 EMAIL_MODE        = os.environ.get("EMAIL_MODE", "send")   # "send" | "print"
@@ -508,24 +512,48 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
 
 
 
-def send_email(subject: str, html: str) -> None:
-    """Send via SendGrid or print to stdout depending on EMAIL_MODE."""
+def _html_to_text(html: str) -> str:
+    """Crude HTML -> plain text for the multipart alternative part.
 
-    if EMAIL_MODE == "print" or not SENDGRID_API_KEY:
-        log.info("EMAIL_MODE=print — writing email HTML to screener_email_preview.html")
+    A text/plain alternative is not decoration: HTML-only mail is a mild spam
+    signal on its own, and some clients block HTML entirely. This does not need
+    to be pretty, only readable.
+    """
+    import re
+    t = re.sub(r"<(script|style).*?</\1>", "", html, flags=re.S | re.I)
+    t = re.sub(r"<br\s*/?>|</(p|div|tr|h1|h2|h3)>", "\n", t, flags=re.I)
+    t = re.sub(r"</td>", "  ", t, flags=re.I)
+    t = re.sub(r"<[^>]+>", "", t)
+    import html as _html
+    t = _html.unescape(t).replace("\xa0", " ")   # handles &mdash; &sigma; etc.
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return "\n".join(line.strip() for line in t.splitlines()).strip()
+
+
+def send_email(subject: str, html: str) -> None:
+    """Send the watchlist over SMTP, or write it to a file in print mode.
+
+    PROVIDER-AGNOSTIC BY DESIGN. This uses stdlib smtplib rather than any
+    vendor's SDK, so switching email providers is a change of environment
+    variables, not a change of code. For a job that sends one email a week,
+    vendor lock-in is a cost with no upside.
+
+    Defaults are Resend's published SMTP settings:
+        SMTP_HOST  smtp.resend.com
+        SMTP_PORT  465          (SSL; use 587 for STARTTLS)
+        SMTP_USER  resend       (a literal routing marker, NOT your account
+                                 email — Resend uses this to select API-key auth)
+        SMTP_PASS  your API key, including the re_ prefix
+
+    To move to Brevo, Mailgun, SES, or a company mail server, change those four
+    secrets and nothing else.
+    """
+    if EMAIL_MODE == "print" or not SMTP_PASS:
+        log.info("EMAIL_MODE=print (or no SMTP_PASS) — writing "
+                 "screener_email_preview.html instead of sending")
         with open("screener_email_preview.html", "w") as f:
             f.write(html)
         log.info(f"Subject: {subject}")
-        return
-
-    try:
-        import sendgrid
-        from sendgrid.helpers.mail import Mail, To
-    except ImportError:
-        log.error("sendgrid not installed. Run: pip install sendgrid")
-        log.info("Falling back to print mode.")
-        with open("screener_email_preview.html", "w") as f:
-            f.write(html)
         return
 
     recipients = [e.strip() for e in EMAIL_TO.split(",") if e.strip()]
@@ -533,16 +561,30 @@ def send_email(subject: str, html: str) -> None:
         log.error("EMAIL_TO not set — cannot send email")
         return
 
-    sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
-    message = Mail(
-        from_email=EMAIL_FROM,
-        to_emails=recipients,
-        subject=subject,
-        html_content=html,
-    )
+    import smtplib
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_FROM
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(_html_to_text(html))       # text/plain part
+    msg.add_alternative(html, subtype="html")  # text/html part
+
     try:
-        response = sg.send(message)
-        log.info(f"Email sent to {recipients} — status {response.status_code}")
+        if SMTP_PORT in (465, 2465):           # implicit SSL
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
+                srv.login(SMTP_USER, SMTP_PASS)
+                srv.send_message(msg)
+        else:                                   # STARTTLS (587, 2587, 25)
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
+                srv.starttls()
+                srv.login(SMTP_USER, SMTP_PASS)
+                srv.send_message(msg)
+        log.info(f"Email sent to {recipients} via {SMTP_HOST}:{SMTP_PORT}")
+    except smtplib.SMTPAuthenticationError as e:
+        log.error(f"SMTP auth failed ({e}). For Resend, SMTP_USER must be the "
+                  f"literal string 'resend' and SMTP_PASS the full re_... key.")
     except Exception as e:
         log.error(f"Email send failed: {e}")
 

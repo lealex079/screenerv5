@@ -32,6 +32,9 @@ Environment variables:
   MAX_WORKERS=4         — parallel scan workers (low, to stay under Yahoo rate limits)
   FINVIZ_MAX_TICKERS=250 — hard cap on universe size
   PACIFIC_TARGET_HOUR=7 — the Pacific hour a scheduled run should fire (DST guard)
+  SCHEDULE_CRON         — set by the workflow to github.event.schedule; lets the
+                          DST guard identify which cron fired instead of guessing
+                          from the clock (GitHub cron delays are common)
 
 Tuning (composite weights, quality bar, Tier-1 cap) lives in watchlist_rank.py.
 """
@@ -613,29 +616,65 @@ def parse_args():
     return p.parse_args()
 
 
+# 7 AM Pacific in UTC is 14:00 during PDT and 15:00 during PST. The workflow
+# registers both crons; exactly one of them "owns" any given day.
+PDT_CRON = "0 14 * * 1"
+PST_CRON = "0 15 * * 1"
+
+
 def _wrong_scheduled_hour() -> bool:
     """
-    True if this is a SCHEDULED run firing at the wrong Pacific hour.
+    True if this is a SCHEDULED run triggered by the cron that does NOT own
+    today — i.e. the wrong half of the DST pair.
 
-    The workflow schedules both the PST and PDT 7 AM crons (GitHub cron can't do
-    DST), so on any given day one of the two fires at 7 AM Pacific and the other
-    at 6 or 8. This lets the correct one through and no-ops the other.
+    Identity comes from WHICH CRON FIRED (github.event.schedule), not from the
+    wall clock at execution time. GitHub's scheduler is explicitly best-effort
+    and multi-hour delays happen under load. An hour-equality check means a
+    delayed run gets killed by its own guard and nothing is ever delivered,
+    which is what happened on 2026-08-31: both crons landed in the early
+    afternoon and both no-oped, so no watchlist went out at all.
 
-    Manual runs (workflow_dispatch) and local runs are NEVER blocked — only a
-    genuine schedule-triggered run at the wrong hour returns True.
+    Manual runs (workflow_dispatch) and local runs are NEVER blocked.
     """
     if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
         return False
+
     try:
         from zoneinfo import ZoneInfo
-        pacific_hour = datetime.datetime.now(ZoneInfo("America/Los_Angeles")).hour
+        now = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
+        is_dst = bool(now.dst())
     except Exception:
         return False   # if tz data is unavailable, don't suppress the run
+
     target = int(os.environ.get("PACIFIC_TARGET_HOUR", "7"))
-    if pacific_hour != target:
-        log.info(f"Scheduled run at {pacific_hour}:00 Pacific ≠ target {target}:00 "
-                 f"(the other DST cron owns today's run) — exiting cleanly.")
-        return True
+    cron = os.environ.get("SCHEDULE_CRON", "").strip()
+    owner = PDT_CRON if is_dst else PST_CRON
+
+    if cron:
+        # Preferred path: delay-proof. Only the cron that owns today proceeds,
+        # no matter how late GitHub actually starts it.
+        if cron != owner:
+            log.info(f"Scheduled run from cron '{cron}'; today is owned by "
+                     f"'{owner}' ({'PDT' if is_dst else 'PST'}) — exiting cleanly.")
+            return True
+    else:
+        # Fallback for runs where the workflow didn't pass SCHEDULE_CRON through.
+        # Use a wide window rather than hour equality so a delayed run still
+        # delivers; the two crons are only an hour apart, so a duplicate is
+        # possible here. That is the safer failure: a second email beats none.
+        if not (target <= now.hour <= target + 6):
+            log.info(f"Scheduled run at {now.hour}:00 Pacific is far outside the "
+                     f"{target}:00–{target + 6}:00 window and SCHEDULE_CRON is "
+                     f"unset — exiting cleanly.")
+            return True
+        log.warning("SCHEDULE_CRON not set — falling back to a time window. Add "
+                    "SCHEDULE_CRON: ${{ github.event.schedule }} to the workflow "
+                    "env block to make this exact.")
+
+    if now.hour != target:
+        log.warning(f"Delivering LATE: this run was scheduled for {target}:00 "
+                    f"Pacific but started at {now.hour}:{now.minute:02d}. "
+                    f"GitHub scheduler delay, not a pipeline fault.")
     return False
 
 

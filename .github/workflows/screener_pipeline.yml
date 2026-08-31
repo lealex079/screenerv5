@@ -6,7 +6,7 @@ on:
     # PST and PDT firing times for 7:00 AM Pacific and let the pipeline's own
     # guard (PACIFIC_HOUR check) no-op the one that isn't 7 AM Pacific today.
     # This keeps delivery at 7 AM Pacific year-round with no twice-a-year edit.
-    # Day-of-week "1" = Monday only.
+    # Day-of-week "1" = Monday only. For Mon/Wed/Fri use "1,3,5".
     - cron: "0 15 * * 1"   # 7:00 AM PST (UTC-8), active Nov–Mar
     - cron: "0 14 * * 1"   # 7:00 AM PDT (UTC-7), active Mar–Nov
 
@@ -51,10 +51,11 @@ jobs:
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL:      ${{ vars.CLAUDE_MODEL || 'claude-opus-5' }}
           SMTP_PASS:         ${{ secrets.SMTP_PASS }}
-          SMTP_HOST:         ${{ vars.SMTP_HOST || 'smtp.resend.com' }}
-          SMTP_PORT:         ${{ vars.SMTP_PORT || '465' }}
-          SMTP_USER:         ${{ vars.SMTP_USER || 'resend' }}
+          SMTP_HOST:         ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT:         ${{ vars.SMTP_PORT || '587' }}
+          SMTP_USER:         ${{ secrets.SMTP_USER }}
           EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:          ${{ secrets.EMAIL_TO }}
           TOP_N:             ${{ github.event.inputs.top_n || '10' }}
@@ -74,23 +75,28 @@ jobs:
 
           python pipeline.py $ARGS
 
-      - name: Upload email preview (dry run only)
-        if: ${{ github.event.inputs.dry_run == 'true' }}
+      # Always upload, including on failure. If the send breaks, this artifact
+      # is the only surviving copy of the email and can be forwarded by hand.
+      - name: Upload email preview
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: email-preview
           path: screener_email_preview.html
-          retention-days: 3
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Notify on failure
         if: failure()
         env:
           SMTP_PASS:  ${{ secrets.SMTP_PASS }}
-          SMTP_HOST:  ${{ vars.SMTP_HOST || 'smtp.resend.com' }}
-          SMTP_PORT:  ${{ vars.SMTP_PORT || '465' }}
-          SMTP_USER:  ${{ vars.SMTP_USER || 'resend' }}
+          SMTP_HOST:  ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT:  ${{ vars.SMTP_PORT || '587' }}
+          SMTP_USER:  ${{ secrets.SMTP_USER }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO:   ${{ secrets.EMAIL_TO }}
+          # Alerts go to ALERT_TO (you), not EMAIL_TO (Sean and Franklin).
+          # Falls back to EMAIL_FROM so the alert always has somewhere to land.
+          ALERT_TO:   ${{ secrets.ALERT_TO || secrets.EMAIL_FROM }}
           RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Silence is the worst failure mode for something people rely on, so a
@@ -100,7 +106,7 @@ jobs:
           import os, smtplib
           from email.message import EmailMessage
           pw = os.environ.get("SMTP_PASS")
-          to = [e.strip() for e in os.environ.get("EMAIL_TO","").split(",") if e.strip()]
+          to = [e.strip() for e in os.environ.get("ALERT_TO","").split(",") if e.strip()]
           if not (pw and to):
               print("no SMTP creds/recipients — skipping alert"); raise SystemExit(0)
           url = os.environ.get("RUN_URL","")
@@ -111,9 +117,9 @@ jobs:
           m.set_content(f"The Monday screener run failed.\n\nLogs: {url}")
           m.add_alternative(f'The Monday screener run failed. '
                             f'Logs: <a href="{url}">{url}</a>', subtype="html")
-          host = os.environ.get("SMTP_HOST","smtp.resend.com")
-          port = int(os.environ.get("SMTP_PORT","465"))
-          user = os.environ.get("SMTP_USER","resend")
+          host = os.environ.get("SMTP_HOST","smtp.gmail.com")
+          port = int(os.environ.get("SMTP_PORT","587"))
+          user = os.environ.get("SMTP_USER","")
           if port in (465, 2465):
               with smtplib.SMTP_SSL(host, port, timeout=30) as s:
                   s.login(user, pw); s.send_message(m)

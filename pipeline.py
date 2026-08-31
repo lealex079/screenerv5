@@ -24,9 +24,9 @@ Usage:
 
 Environment variables:
   ANTHROPIC_API_KEY     — required for blurbs (console.anthropic.com)
-  SMTP_PASS             — email provider API key (Resend: the re_... key)
-  SMTP_HOST/PORT/USER   — optional; default to Resend (smtp.resend.com:465, user "resend")
-  EMAIL_FROM            — e.g. screener@cpa-cfo-now.com (must be on an authed domain)
+  SMTP_PASS             — SMTP password (Gmail: 16-char App Password)
+  SMTP_HOST/PORT/USER   — smtp.gmail.com : 587 : full Gmail address
+  EMAIL_FROM            — must equal SMTP_USER while on Gmail
   EMAIL_TO              — comma-separated recipients
   EMAIL_MODE=print      — write email HTML to a file instead of sending (testing)
   MAX_WORKERS=4         — parallel scan workers (low, to stay under Yahoo rate limits)
@@ -65,13 +65,14 @@ for _noisy in ("yfinance", "urllib3", "requests", "peewee"):
 
 # ── Config from environment ───────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-SMTP_HOST         = os.environ.get("SMTP_HOST", "smtp.resend.com")
-SMTP_PORT         = int(os.environ.get("SMTP_PORT", "465"))
-SMTP_USER         = os.environ.get("SMTP_USER", "resend")
+SMTP_HOST         = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT         = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER         = os.environ.get("SMTP_USER", "")
 SMTP_PASS         = os.environ.get("SMTP_PASS", "")
-EMAIL_FROM        = os.environ.get("EMAIL_FROM", "screener@cpa-cfo-now.com")
+EMAIL_FROM        = os.environ.get("EMAIL_FROM", "")
 EMAIL_TO          = os.environ.get("EMAIL_TO", "")
 EMAIL_MODE        = os.environ.get("EMAIL_MODE", "send")   # "send" | "print"
+CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
 MAX_WORKERS       = int(os.environ.get("MAX_WORKERS", "4"))
 FINVIZ_MAX_TICKERS = int(os.environ.get("FINVIZ_MAX_TICKERS", "250"))
 
@@ -538,28 +539,35 @@ def send_email(subject: str, html: str) -> None:
     variables, not a change of code. For a job that sends one email a week,
     vendor lock-in is a cost with no upside.
 
-    Defaults are Resend's published SMTP settings:
-        SMTP_HOST  smtp.resend.com
-        SMTP_PORT  465          (SSL; use 587 for STARTTLS)
-        SMTP_USER  resend       (a literal routing marker, NOT your account
-                                 email — Resend uses this to select API-key auth)
-        SMTP_PASS  your API key, including the re_ prefix
+    Currently running on Gmail SMTP as an interim sender until the firm domain
+    (cpacfonow.com) is authenticated:
+        SMTP_HOST  smtp.gmail.com
+        SMTP_PORT  587          (STARTTLS; use 465 for implicit SSL)
+        SMTP_USER  the full Gmail address
+        SMTP_PASS  a Google App Password, NOT the account password
+                   (requires 2FA enabled on the account)
 
-    To move to Brevo, Mailgun, SES, or a company mail server, change those four
-    secrets and nothing else.
+    Gmail will only send as the authenticated address or a verified alias, so
+    EMAIL_FROM must match SMTP_USER while on this provider.
+
+    To move to a company mail server or an ESP, change those four values and
+    nothing else. The module-level defaults are deliberately Gmail so that a
+    missing repo Variable fails loudly on auth rather than silently dialling
+    some other provider.
     """
+    # Always write the preview first. If the send throws, this is the only copy
+    # of the output that survives the run, and it can be forwarded by hand.
+    with open("screener_email_preview.html", "w") as f:
+        f.write(html)
     if EMAIL_MODE == "print" or not SMTP_PASS:
-        log.info("EMAIL_MODE=print (or no SMTP_PASS) — writing "
+        log.info("EMAIL_MODE=print (or no SMTP_PASS) — wrote "
                  "screener_email_preview.html instead of sending")
-        with open("screener_email_preview.html", "w") as f:
-            f.write(html)
         log.info(f"Subject: {subject}")
         return
 
     recipients = [e.strip() for e in EMAIL_TO.split(",") if e.strip()]
     if not recipients:
-        log.error("EMAIL_TO not set — cannot send email")
-        return
+        raise RuntimeError("EMAIL_TO not set — cannot send email")
 
     import smtplib
     from email.message import EmailMessage
@@ -583,10 +591,13 @@ def send_email(subject: str, html: str) -> None:
                 srv.send_message(msg)
         log.info(f"Email sent to {recipients} via {SMTP_HOST}:{SMTP_PORT}")
     except smtplib.SMTPAuthenticationError as e:
-        log.error(f"SMTP auth failed ({e}). For Resend, SMTP_USER must be the "
-                  f"literal string 'resend' and SMTP_PASS the full re_... key.")
+        log.error(f"SMTP auth failed ({e}). On Gmail, SMTP_USER must be the full "
+                  f"address and SMTP_PASS a 16-character App Password with the "
+                  f"spaces stripped — not the account password.")
+        raise
     except Exception as e:
         log.error(f"Email send failed: {e}")
+        raise
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -719,10 +730,10 @@ def main():
         sys.exit(1)
     import anthropic
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    log.info(f"\nGenerating {len(tier1)} triage blurbs (Opus 4.8, medium)...")
+    log.info(f"\nGenerating {len(tier1)} triage blurbs ({CLAUDE_MODEL}, medium)...")
     for i, b in enumerate(tier1, 1):
         try:
-            b["blurb"] = wrep.generate_blurb(b, client, "claude-opus-4-8", "medium")
+            b["blurb"] = wrep.generate_blurb(b, client, CLAUDE_MODEL, "medium")
             log.info(f"  [{i}/{len(tier1)}] {b['ticker']}: blurb ok")
         except Exception as e:
             b["blurb"] = f"[Blurb generation failed: {e}]"
@@ -738,7 +749,7 @@ def main():
     log.info("\nPipeline complete.")
     log.info(f"  Scanned: {len(tickers)}  |  Viable after pre-gate: {len(pre)}")
     log.info(f"  Tier 1 researched: {len(tier1)}  |  Blocked: {len(blocked)}")
-    log.info(f"  Est. API cost: ~${len(tier1) * 0.05:.2f} (Opus 4.8 medium, brief blurbs)")
+    log.info(f"  Est. API cost: ~${len(tier1) * 0.05:.2f} ({CLAUDE_MODEL} medium, brief blurbs)")
 
 
 if __name__ == "__main__":

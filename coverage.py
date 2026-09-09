@@ -451,6 +451,56 @@ The reader decides. Your job is to report accurately and say what is blocking.
 End with nothing. No sign-off, no "let me know"."""
 
 
+def _quiet_but_live(bundle: dict) -> bool:
+    """Unchanged, but tradeable. The one case where a quiet name still needs prose."""
+    d = bundle.get("delta") or {}
+    return (not d.get("material") and not d.get("first_run")
+            and not bundle.get("search_trigger")
+            and (bundle.get("gate_status") or {}).get("verdict") == "SETUP LIVE")
+
+
+def needs_prose(bundle: dict) -> bool:
+    """
+    Should this name get a written note, or does the card already say it all?
+
+    On a quiet run the prose and the "What is blocking it" box are the same
+    sentence in two formats: INTU on 2026-09-09 read "Structure is 24.0 against a
+    floor of 25, which keeps the name blocked" directly above a box reading
+    "structure at 24.0 (needs >= 25)". Redundancy is what makes an email
+    skimmable in the bad sense.
+
+    So prose is written when it adds something the box cannot:
+      - something material moved, or
+      - the setup is LIVE, which means there is a trade to describe. This is the
+        case the pure materiality rule got wrong: a name that is unchanged AND
+        tradeable is exactly the name the reader wants the strike for.
+      - a news lookup was triggered, which has findings to report.
+
+    Everything else renders as card plus blocking box, and skips the API call.
+    """
+    d = bundle.get("delta") or {}
+    if d.get("first_run"):
+        return True
+    if d.get("material"):
+        return True
+    if (bundle.get("gate_status") or {}).get("verdict") == "SETUP LIVE":
+        return True
+    if bundle.get("search_trigger"):
+        return True
+    return False
+
+
+QUIET_NOTE_ADDENDUM = """
+
+Nothing material moved on this name since the last report, but the setup is \
+still live. Do not spend sentences saying nothing changed. Write TWO OR THREE \
+sentences covering only the trade that is on the table: strike, expiry, DTE, \
+delta, credit, annualized yield, breakeven, and how the breakeven sits against \
+the nearest support. The reader already knows the situation. They want the \
+contract.
+"""
+
+
 def generate_coverage_blurb(bundle: dict, client, model: str,
                             effort: str = "medium") -> str:
     """Coverage note for a pinned name. Same payload shape as triage, plus the
@@ -475,7 +525,9 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
         "model": model,
         "max_tokens": 700 if not trigger else 1100,
         "output_config": {"effort": effort},
-        "system": COVERAGE_SYSTEM_PROMPT + ("\n" + SEARCH_INSTRUCTIONS if trigger else ""),
+        "system": (COVERAGE_SYSTEM_PROMPT
+                   + ("\n" + SEARCH_INSTRUCTIONS if trigger else "")
+                   + (QUIET_NOTE_ADDENDUM if _quiet_but_live(bundle) else "")),
         "messages": [{"role": "user", "content": json.dumps(payload, default=str)}],
     }
     if trigger:
@@ -504,10 +556,62 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
 VERDICT_COLOR = {"SETUP LIVE": "#22c55e", "NOT YET": "#f59e0b", "AVOID": "#ef4444"}
 
 
+def all_quiet(pinned: list[dict]) -> bool:
+    """
+    Every name unchanged and none of them tradeable.
+
+    When that is true the four cards say nothing four times. One short line is
+    the honest version: the reader learns the system ran and found nothing,
+    which is the confirmation they actually want, without being asked to read
+    four identical blocks. A silence condition is what keeps them opening the
+    reports that do say something.
+    """
+    if not pinned:
+        return False
+    return all(
+        not (b.get("delta") or {}).get("material")
+        and not (b.get("delta") or {}).get("first_run")
+        and (b.get("gate_status") or {}).get("verdict") != "SETUP LIVE"
+        for b in pinned
+    )
+
+
+def render_quiet_digest(pinned: list[dict]) -> str:
+    """One compact block for a run where nothing moved and nothing is live."""
+    rows = ""
+    for b in pinned:
+        gs = b.get("gate_status") or {}
+        blocking = ", ".join(g["gate"] for g in (gs.get("blocking") or [])) or "—"
+        vcolor = VERDICT_COLOR.get(gs.get("verdict"), "#94a3b8")
+        price = (b.get("scan") or {}).get("price") or 0
+        rows += (f'<tr>'
+                 f'<td style="padding:5px 10px 5px 0;color:#e2e8f0;font-weight:600">{b["ticker"]}</td>'
+                 f'<td style="padding:5px 10px 5px 0;color:#94a3b8">${price:.2f}</td>'
+                 f'<td style="padding:5px 10px 5px 0;color:{vcolor};font-size:12px">{gs.get("verdict","—")}</td>'
+                 f'<td style="padding:5px 0;color:#64748b;font-size:12px">blocked on {blocking}</td>'
+                 f'</tr>')
+    return f"""
+    <div style="background:#1a2332;border-radius:8px;border:1px solid #2a3a4e;
+                padding:18px 20px;margin-bottom:18px">
+      <div style="font-size:13px;color:#e2e8f0;margin-bottom:10px">
+        No material change on any name since the last report, and nothing is
+        currently tradeable.
+      </div>
+      <table style="border-collapse:collapse;font-size:13px">{rows}</table>
+      <div style="font-size:11px;color:#475569;margin-top:12px;line-height:1.5">
+        Full write-ups return as soon as something moves or a setup goes live.
+        The complete screen runs Sunday.
+      </div>
+    </div>"""
+
+
 def render_pinned_section(pinned: list[dict], score_color) -> str:
     """HTML block for the pinned names. Sits above the ranked discovery names."""
     if not pinned:
         return ""
+
+    if all_quiet(pinned):
+        return render_quiet_digest(pinned)
 
     cards = ""
     for b in pinned:
@@ -517,7 +621,8 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
         verdict = gs.get("verdict", "—")
         vcolor  = VERDICT_COLOR.get(verdict, "#94a3b8")
 
-        blurb_html = "<br>".join((b.get("blurb") or "").split("\n")) or "[no note]"
+        raw_blurb = (b.get("blurb") or "").strip()
+        blurb_html = ("<br>".join(raw_blurb.split("\n")) if raw_blurb else "")
         price = scan.get("price") or 0
         ts, cs, ss = (scan.get("trend_score"), scan.get("crash_score"),
                       scan.get("structure_score"))
@@ -578,7 +683,7 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
             <span style="color:#64748b">Structure <b style="color:{score_color(ss)}">{s(ss)}</b></span>
           </div>
           {delta_html}
-          <div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>
+          {f'<div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>' if blurb_html else ''}
           {blockers_html}
         </div>"""
 

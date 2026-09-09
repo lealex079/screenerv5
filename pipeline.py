@@ -366,11 +366,21 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     pinned = pinned or []
     n = len(tier1)
     n_moved = sum(1 for b in pinned if (b.get("delta") or {}).get("material"))
+    quiet = False
+    if pinned:
+        try:
+            import coverage as _cov
+            quiet = _cov.all_quiet(pinned)
+        except Exception:
+            quiet = False
+
     if mode == "coverage":
-        # Midweek: the subject IS the summary. "3 unchanged" is a useful thing
-        # to see in a notification without opening anything.
+        # Midweek: the subject IS the summary. On a quiet run it should be
+        # readable from the notification without opening anything.
         if n_moved:
             subject = (f"Coverage — {run_date} | {n_moved} of {len(pinned)} moved")
+        elif quiet:
+            subject = f"Coverage — {run_date} | nothing to action"
         else:
             subject = f"Coverage — {run_date} | no material change"
     elif pinned and not tier1:
@@ -529,14 +539,18 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     # Intro copy has to stay honest in every combination: pinned names are shown
     # precisely because they have NOT cleared the gates, so the old blanket
     # "each cleared all four gates" line would be false whenever pinned exist.
-    if mode == "coverage":
+    if mode == "coverage" and quiet:
+        intro_line = (f"Midweek check on your {len(pinned)} watchlist names. "
+                      f"Nothing moved and nothing is tradeable, so this is short "
+                      f"by design. The full screen runs Sunday.")
+    elif mode == "coverage":
         # No screen ran today, so the copy must not imply one did.
         intro_line = (f"Midweek update on your {len(pinned)} watchlist name"
                       f"{'s' if len(pinned) != 1 else ''}, revised against what "
                       f"has moved since the last report. "
                       + (f"{n_moved} changed materially."
                          if n_moved else "Nothing changed materially.")
-                      + " No new names — the full screen runs Sunday.")
+                      + " No new names. The full screen runs Sunday.")
     elif pinned and tier1:
         intro_line = (f"Coverage on your {len(pinned)} watchlist name"
                       f"{'s' if len(pinned) != 1 else ''}, then the {n} new "
@@ -570,8 +584,10 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     </h1>
     <p style="font-size:12px;color:#475569;margin:6px 0 0;line-height:1.5">
       {intro_line}
-      <b style="color:#64748b">This is a triage screen to prioritize research — a
-      heuristic ranking, not a validated signal.</b> Run the full report in the Project before trading.
+      {'' if (mode == "coverage" and quiet) else
+       '<b style="color:#64748b">This is a triage screen to prioritize research, '
+       'a heuristic ranking rather than a validated signal.</b> '
+       'Run the full report in the Project before trading.'}
     </p>
   </div>
 
@@ -582,7 +598,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
   {blocked_html}
 
   <div style="border-top:1px solid #1e2a35;margin-top:22px;padding-top:12px;font-size:10px;color:#334155;text-align:center">
-    TrendScore & CrashScore: regression-validated · structure_score, grades, composite rank: provisional screens · Not financial advice
+    TrendScore and CrashScore: regression-validated. structure_score, grades, composite rank: provisional screens. Not financial advice.
   </div>
 </div></body></html>"""
     return subject, html
@@ -939,15 +955,23 @@ def main():
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     if pinned_bundles:
         import coverage as cov
-        log.info(f"\nGenerating {len(pinned_bundles)} coverage notes "
-                 f"({CLAUDE_MODEL}, medium)...")
-        for i, b in enumerate(pinned_bundles, 1):
+        # A name whose card and blocking box already say everything gets no
+        # prose and no API call. On a quiet run that is most of them.
+        writing = [b for b in pinned_bundles if cov.needs_prose(b)]
+        skipped = [b["ticker"] for b in pinned_bundles if b not in writing]
+        if skipped:
+            log.info(f"Skipping notes for {', '.join(skipped)} "
+                     f"(unchanged, not tradeable — the card says it all)")
+        if writing:
+            log.info(f"\nGenerating {len(writing)} coverage notes "
+                     f"({CLAUDE_MODEL}, medium)...")
+        for i, b in enumerate(writing, 1):
             try:
                 b["blurb"] = cov.generate_coverage_blurb(b, client, CLAUDE_MODEL, "medium")
-                log.info(f"  [{i}/{len(pinned_bundles)}] {b['ticker']}: note ok")
+                log.info(f"  [{i}/{len(writing)}] {b['ticker']}: note ok")
             except Exception as e:
                 b["blurb"] = f"[Coverage note failed: {e}]"
-                log.error(f"  [{i}/{len(pinned_bundles)}] {b['ticker']}: FAILED — {e}")
+                log.error(f"  [{i}/{len(writing)}] {b['ticker']}: FAILED — {e}")
             time.sleep(0.5)
 
     log.info(f"\nGenerating {len(tier1)} triage blurbs ({CLAUDE_MODEL}, medium)...")
@@ -978,8 +1002,9 @@ def main():
     log.info(f"  Scanned: {len(tickers)}  |  Viable after pre-gate: {len(pre)}")
     log.info(f"  Tier 1 researched: {len(tier1)}  |  Blocked: {len(blocked)}")
     log.info(f"  Pinned coverage: {len(pinned_bundles)}")
-    log.info(f"  Est. API cost: ~${(len(tier1) + len(pinned_bundles)) * 0.05:.2f} "
-             f"({CLAUDE_MODEL} medium)")
+    _notes = sum(1 for b in pinned_bundles if b.get("blurb"))
+    log.info(f"  Est. API cost: ~${(len(tier1) + _notes) * 0.05:.2f} "
+             f"({CLAUDE_MODEL} medium, {len(tier1)} blurbs + {_notes} notes)")
 
 
 if __name__ == "__main__":

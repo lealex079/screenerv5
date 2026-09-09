@@ -136,24 +136,24 @@ def weekly_candle(ticker: str, weeks: int = 60, allow_partial: bool = False) -> 
         bear_eng = (not up_week) and pc > po and c <= po and o >= pc
 
         if hammer:
-            pats.append("hammer (sold off hard, recovered to close near the high)")
+            pats.append("hammer (traded well below the close before recovering)")
         if star:
-            pats.append("shooting star (rallied, then gave it all back into the close)")
+            pats.append("shooting star (traded well above the close before giving it back)")
         if bull_eng:
             pats.append("bullish engulfing (this week's body covers last week's)")
         if bear_eng:
             pats.append("bearish engulfing (this week's body covers last week's)")
         if body_pct >= LONG_BODY_MIN:
-            pats.append("wide-body up week (buyers in control start to finish)"
+            pats.append("wide-body up week (opened near the low, closed near the high)"
                         if up_week else
-                        "wide-body down week (sellers in control start to finish)")
+                        "wide-body down week (opened near the high, closed near the low)")
         if outside:
             pats.append("outside week (took out both the prior week's high and low)")
         if inside:
             pats.append("inside week (range contained entirely within the prior week)")
         # Generic small body — only when nothing more specific describes it.
         if body_pct <= DOJI_BODY_MAX and not (hammer or star):
-            pats.append("doji (indecision — opened and closed at nearly the same level)")
+            pats.append("doji (opened and closed at nearly the same level)")
 
         if partial:
             pats = []
@@ -275,40 +275,75 @@ def gate_status(scan: dict, options: dict) -> dict:
 # Coverage blurb
 # ══════════════════════════════════════════════════════════════════════════════
 
-COVERAGE_SYSTEM_PROMPT = """You write a short weekly coverage note on a stock \
-the reader already holds on their watchlist. They did not ask whether to look \
-at it; they asked what it is doing.
+COVERAGE_SYSTEM_PROMPT = """\
+You write a short weekly coverage note on a stock the reader already holds on \
+their watchlist. They did not ask whether to look at it. They asked what it is \
+doing.
 
-Your readers are two CPAs. They are financially literate but not quants. Write \
-plainly. No hedging filler, no "it is important to note".
+Your readers are two CPAs. They are financially literate but not quants.
 
 You are given measured values. Every number in your note must come from that \
 payload. Never invent a price, level, pattern or news item. If a field is \
 absent, say nothing about it rather than guessing.
 
-The weekly candle description is ALREADY MEASURED for you. Describe what the \
-measurements say. Do not add pattern names that are not in the patterns list.
+The weekly candle description is ALREADY MEASURED for you. Report what the \
+measurements say. Do not add pattern names that are not in the patterns list. \
+If the candle is marked in_progress, call it week to date and do not describe \
+it as a close.
 
-Structure, 4-6 sentences total, no headers:
+WHAT TO COVER, in this order, 4 to 6 sentences total, no headers:
 
-1. Open with the verdict in caps: SETUP LIVE, NOT YET, or AVOID. Then one \
-sentence on what the stock is actually doing.
-2. The week: use the candle measurements. What the close position and range \
-tell you about who was in control.
-3. The level that matters: the nearest support confluence, with the price and \
-what forms it.
-4. If SETUP LIVE, the specific put: strike, expiry, DTE, delta, credit, \
-annualized yield, breakeven, and how the breakeven sits against that support.
-5. If NOT YET or AVOID, state exactly which gate is blocking, its current value \
-and threshold, and what would have to change. This is the most useful sentence \
-in the note — be concrete.
+1. The verdict in caps: SETUP LIVE, NOT YET, or AVOID. Then one sentence on \
+what the stock is doing.
+2. The week, using the candle measurements. Where price closed in the range and \
+how the range and volume compare to normal.
+3. The nearest support confluence, with its price and what forms it.
+4. If SETUP LIVE, the put: strike, expiry, DTE, delta, credit, annualized yield, \
+breakeven, and how the breakeven sits against that support.
+5. If NOT YET or AVOID, which gate is blocking, its value and threshold, and \
+what would have to change. This is the most useful sentence in the note. Be \
+specific.
 
-If a "delta" block is present this is a REVISION of an earlier note. You are not \
-shown the earlier note, only measured changes since it. Lead instead with what \
-moved, using those numbers, and reach your verdict from today's data rather than \
-defending a previous one. If delta.material is false, say so plainly in one \
-sentence and keep the whole note to two or three sentences — a quiet week \
-deserves a short note, and padding it teaches the reader to skim.
+If a "delta" block is present this is a revision of an earlier note. You are not \
+shown the earlier note, only measured changes since it. Lead with what moved, \
+using those numbers, and reach your verdict from today's data rather than \
+defending a previous one. If delta.material is false, say so in one sentence and \
+keep the whole note to two or three sentences. A quiet week deserves a short \
+note. Padding it teaches the reader to skim.
+
+HOW TO WRITE
+
+Write the way a competent analyst talks to a colleague. Plain, direct, no
+performance. The reader is a CPA who wants to know what the numbers say and
+whether to act. Assume intelligence, not enthusiasm.
+
+Never use an em dash or an en dash. Use a period or a comma. If a sentence needs
+an aside, make it its own sentence.
+
+Do not use these constructions. They are the main thing that makes writing sound
+artificial:
+- "X, not Y" or "not X, but Y" as a rhetorical flourish. "This is a stall, not a
+  fight" and "the caution is size, not direction" are both wrong. Say "volume was
+  light and neither side pushed" and "the risk here is filling the order, not the
+  direction."
+- A colon used to set up a reveal. "The level that matters is:" or "The block is
+  unchanged:" Just state it.
+- Trading-desk theatre. No "sellers had the tape", "buyers in control", "gave it
+  all back", "flush", "ugly", "no man's land". Describe what the numbers show.
+- "Worth noting", "it is important to note", "notably", "crucially".
+- Scare quotes around ordinary words.
+
+Prefer short sentences. Two plain sentences beat one clause-heavy sentence. If a
+sentence runs past about 25 words, split it.
+
+Say numbers once. Do not restate a figure you already gave in a different unit
+or framing in the same paragraph.
+
+Round sensibly. "3.2%" not "3.16%". "$140.03" not "140.08" when you already said
+$140.03 two sentences earlier. Match the precision the reader would use out loud.
+
+Do not editorialize about the setup's quality beyond the verdict and the reason.
+The reader decides. Your job is to report accurately and say what is blocking.
 
 End with nothing. No sign-off, no "let me know"."""
 
@@ -572,13 +607,24 @@ def delta_sentence(d: dict) -> str:
         return f"No material change since {d.get('since', 'the last report')}."
     bits = []
     if "verdict_change" in d:
-        bits.append(d["verdict_change"].replace("->", "→"))
+        bits.append(d["verdict_change"].replace("->", "to"))
     if (p := d.get("price_change_pct")) is not None and abs(p) >= MATERIAL_PRICE_PCT:
-        bits.append(f"{p:+.1f}% on price")
+        bits.append(f"price {p:+.1f}%")
     if d.get("gates_cleared"):
         bits.append(f"cleared {', '.join(d['gates_cleared'])}")
     if d.get("gates_newly_blocking"):
         bits.append(f"now blocked on {', '.join(d['gates_newly_blocking'])}")
+    # A score move can be the ONLY material change (IIPR, 2026-09-09: structure
+    # +9 with price flat). Without this the line renders as a bare "(since ...)".
+    for key, label in (("structure", "structure"), ("crash", "crash"),
+                       ("trend", "trend")):
+        v = d.get(f"{key}_change")
+        if v is not None and abs(v) >= MATERIAL_SCORE_PTS:
+            bits.append(f"{label} {v:+.0f}")
     if (c := d.get("put_credit_change_pct")) is not None and abs(c) >= MATERIAL_CREDIT_PCT:
         bits.append(f"premium {c:+.0f}%")
-    return "; ".join(bits) + f" (since {d.get('since','last run')})."
+    if not bits:
+        # material was set by something with no printable form. Say so plainly
+        # rather than emitting a fragment.
+        return f"Minor changes since {d.get('since', 'the last report')}."
+    return "; ".join(bits) + f" (since {d.get('since','the last report')})."

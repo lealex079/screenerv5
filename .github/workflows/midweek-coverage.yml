@@ -1,42 +1,34 @@
-name: Monday Screener Watchlist
+name: Midweek Coverage Update
+
+# Wed + Fri, pinned names only. No Finviz, no discovery — those run Sunday.
+# Requested by Sean and Frank 2026-09-09: automated picks weekly, custom
+# tickers revised three times a week.
 
 on:
   schedule:
-    # GitHub cron is UTC-only and has no DST awareness, so BOTH the PST and PDT
-    # firing times for 7:00 AM Pacific are registered. The pipeline's guard uses
-    # SCHEDULE_CRON (below) to tell which one fired and no-ops the other.
-    #
-    # Offset to :07 rather than :00 on purpose. GitHub's scheduler is
-    # best-effort and the top of the hour is its most congested slot; a few
-    # minutes past materially reduces the delay.
-    #
-    # Day-of-week "1" = Monday. For Mon/Wed/Fri use "1,3,5" on BOTH lines AND
-    # update PDT_CRON / PST_CRON in pipeline.py to match exactly.
-    - cron: "7 15 * * 1"   # 7:07 AM PST (UTC-8), active Nov–Mar
-    - cron: "7 14 * * 1"   # 7:07 AM PDT (UTC-7), active Mar–Nov
+    # 6:07 AM Pacific Wed and Fri, before the open. Both DST halves registered;
+    # pipeline.py's SCHEDULES table no-ops whichever does not own today.
+    # MUST match SCHEDULES in pipeline.py exactly.
+    - cron: "7 13 * * 3,5"   # 6:07 AM PDT, active Mar–Nov
+    - cron: "7 14 * * 3,5"   # 6:07 AM PST, active Nov–Mar
 
-  # Allow manual trigger from GitHub Actions tab
   workflow_dispatch:
     inputs:
-      tickers:
-        description: "Override tickers (comma-separated, no spaces: AAPL,NVDA)"
-        required: false
-        default: ""
       dry_run:
         description: "Dry run (no Claude, no email)"
         required: false
         default: "false"
         type: choice
         options: ["false", "true"]
-      top_n:
-        description: "Number of triage blurbs (cap is 5)"
-        required: false
-        default: "10"
+
+# The run commits coverage_state.json back so the NEXT run can diff against it.
+permissions:
+  contents: write
 
 jobs:
-  run-pipeline:
+  coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # full 300-ticker scan should finish in ~20 min
+    timeout-minutes: 20      # 4 tickers — nothing like the Sunday screen
 
     steps:
       - name: Checkout repo
@@ -51,9 +43,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt   # single source of truth — keep in sync with local
+          pip install -r requirements.txt
 
-      - name: Run pipeline
+      - name: Run coverage update
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_MODEL:      ${{ vars.CLAUDE_MODEL || 'claude-opus-5' }}
@@ -63,35 +55,39 @@ jobs:
           SMTP_USER:         ${{ secrets.SMTP_USER }}
           EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:          ${{ secrets.EMAIL_TO }}
-          TOP_N:             ${{ github.event.inputs.top_n || '10' }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-          # Which cron fired. Empty on manual runs. This is what makes the DST
-          # guard delay-proof — without it the guard falls back to a wall-clock
-          # window and can double-send or skip.
           SCHEDULE_CRON:     ${{ github.event.schedule }}
+          PINNED_TICKERS:    ${{ vars.PINNED_TICKERS || 'AVAV,IIPR,INTU,ACN' }}
         run: |
-          ARGS=""
-
-          # Dry run flag
+          ARGS="--mode coverage"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
-
-          # Manual ticker override. Quoted so a value with spaces
-          # ("AAPL, NVDA") isn't word-split into stray argv entries.
-          if [ -n "${{ github.event.inputs.tickers }}" ]; then
-            ARGS="$ARGS --tickers=${{ github.event.inputs.tickers }}"
-          fi
-
           python pipeline.py $ARGS
 
-      # Always upload, including on failure. If the send breaks, this artifact
-      # is the only surviving copy of the email and can be forwarded by hand.
+      # Persist the snapshot so Friday can diff against Wednesday. Runs only on
+      # success: if the send failed, the reader never saw this run, and the next
+      # diff should be against what they last actually read.
+      - name: Commit coverage state
+        if: success()
+        run: |
+          if [ -n "$(git status --porcelain coverage_state.json)" ]; then
+            git config user.name  "screener-bot"
+            git config user.email "actions@github.com"
+            git add coverage_state.json
+            git commit -m "coverage state $(date -u +%Y-%m-%d)"
+            # Another run may have pushed since checkout; rebase rather than fail.
+            git pull --rebase --autostash origin ${{ github.ref_name }} || true
+            git push
+          else
+            echo "coverage_state.json unchanged — nothing to commit"
+          fi
+
       - name: Upload email preview
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: email-preview
+          name: coverage-preview
           path: screener_email_preview.html
           retention-days: 14
           if-no-files-found: warn
@@ -104,13 +100,9 @@ jobs:
           SMTP_PORT:  ${{ vars.SMTP_PORT || '587' }}
           SMTP_USER:  ${{ secrets.SMTP_USER }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          # Alerts go to ALERT_TO (you), not EMAIL_TO (Sean and Franklin).
           ALERT_TO:   ${{ secrets.ALERT_TO || secrets.EMAIL_FROM }}
           RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # Silence is the worst failure mode for something people rely on, so a
-          # broken run emails an alert. Best-effort: if the alert itself can't
-          # send, don't mask the real error. Uses stdlib smtplib — no SDK.
           python - <<'PY' || echo "failure-notify step could not send alert"
           import os, smtplib
           from email.message import EmailMessage
@@ -120,12 +112,10 @@ jobs:
               print("no SMTP creds/recipients — skipping alert"); raise SystemExit(0)
           url = os.environ.get("RUN_URL","")
           m = EmailMessage()
-          m["Subject"] = "Screener pipeline FAILED"
+          m["Subject"] = "Coverage update FAILED"
           m["From"] = os.environ.get("EMAIL_FROM","")
           m["To"] = ", ".join(to)
-          m.set_content(f"The Monday screener run failed.\n\nLogs: {url}")
-          m.add_alternative(f'The Monday screener run failed. '
-                            f'Logs: <a href="{url}">{url}</a>', subtype="html")
+          m.set_content(f"The midweek coverage run failed.\n\nLogs: {url}")
           host = os.environ.get("SMTP_HOST","smtp.gmail.com")
           port = int(os.environ.get("SMTP_PORT","587"))
           user = os.environ.get("SMTP_USER","")

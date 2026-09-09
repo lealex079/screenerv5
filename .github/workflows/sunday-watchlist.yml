@@ -1,0 +1,161 @@
+name: Sunday Screener Watchlist
+
+on:
+  schedule:
+    # Delivery is 6 PM Pacific SUNDAY so the reader has it before Monday's open
+    # and it reflects a CLOSED weekly candle. GitHub cron is UTC-only with no
+    # DST awareness, so both firing times are registered and pipeline.py's guard
+    # (SCHEDULE_CRON, below) no-ops whichever one does not own today.
+    #
+    # Sunday evening Pacific is MONDAY in UTC — day-of-week is 1, NOT 0.
+    # Writing "* * 0" here would fire Saturday evening Pacific.
+    #
+    # These two strings MUST match PDT_CRON / PST_CRON in pipeline.py exactly.
+    # If they drift, every scheduled run decides it is the wrong cron and
+    # nothing is ever sent, silently.
+    - cron: "7 1 * * 1"   # 6:07 PM PDT Sunday (01:07 UTC Mon), active Mar–Nov
+    - cron: "7 2 * * 1"   # 6:07 PM PST Sunday (02:07 UTC Mon), active Nov–Mar
+
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Override tickers (comma-separated, NO spaces: AAPL,NVDA)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run (no Claude, no email)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      no_pinned:
+        description: "Skip pinned coverage (debugging only)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      top_n:
+        description: "Number of triage blurbs (cap is 5)"
+        required: false
+        default: "10"
+
+# The run commits coverage_state.json back so Wednesday can diff against it.
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL:      ${{ vars.CLAUDE_MODEL || 'claude-opus-5' }}
+          SMTP_PASS:         ${{ secrets.SMTP_PASS }}
+          SMTP_HOST:         ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT:         ${{ vars.SMTP_PORT || '587' }}
+          SMTP_USER:         ${{ secrets.SMTP_USER }}
+          EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO:          ${{ secrets.EMAIL_TO }}
+          TOP_N:             ${{ github.event.inputs.top_n || '10' }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_CRON:     ${{ github.event.schedule }}
+          # Names under continuous coverage. Editable here without a code change,
+          # which is the stopgap until the dashboard exists.
+          PINNED_TICKERS:    ${{ vars.PINNED_TICKERS || 'AVAV,IIPR,INTU,ACN' }}
+          # 18 = 6 PM Pacific. Must track the crons above.
+          PACIFIC_TARGET_HOUR: "18"
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ github.event.inputs.no_pinned }}" = "true" ]; then
+            ARGS="$ARGS --no-pinned"
+          fi
+          # Quoted: an unquoted value with spaces word-splits into stray argv.
+          if [ -n "${{ github.event.inputs.tickers }}" ]; then
+            ARGS="$ARGS --tickers=${{ github.event.inputs.tickers }}"
+          fi
+          python pipeline.py $ARGS
+
+      # Persist the snapshot so Wednesday can diff against Sunday. Success only:
+      # if the send failed the reader never saw this run.
+      - name: Commit coverage state
+        if: success()
+        run: |
+          if [ -n "$(git status --porcelain coverage_state.json)" ]; then
+            git config user.name  "screener-bot"
+            git config user.email "actions@github.com"
+            git add coverage_state.json
+            git commit -m "coverage state $(date -u +%Y-%m-%d)"
+            git pull --rebase --autostash origin ${{ github.ref_name }} || true
+            git push
+          else
+            echo "coverage_state.json unchanged — nothing to commit"
+          fi
+
+      # Always upload, including on failure. If the send breaks, this artifact
+      # is the only surviving copy of the email and can be forwarded by hand.
+      - name: Upload email preview
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-preview
+          path: screener_email_preview.html
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
+          SMTP_HOST:  ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT:  ${{ vars.SMTP_PORT || '587' }}
+          SMTP_USER:  ${{ secrets.SMTP_USER }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          ALERT_TO:   ${{ secrets.ALERT_TO || secrets.EMAIL_FROM }}
+          RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY' || echo "failure-notify step could not send alert"
+          import os, smtplib
+          from email.message import EmailMessage
+          pw = os.environ.get("SMTP_PASS")
+          to = [e.strip() for e in os.environ.get("ALERT_TO","").split(",") if e.strip()]
+          if not (pw and to):
+              print("no SMTP creds/recipients — skipping alert"); raise SystemExit(0)
+          url = os.environ.get("RUN_URL","")
+          m = EmailMessage()
+          m["Subject"] = "Screener pipeline FAILED"
+          m["From"] = os.environ.get("EMAIL_FROM","")
+          m["To"] = ", ".join(to)
+          m.set_content(f"The Sunday screener run failed.\n\nLogs: {url}")
+          m.add_alternative(f'The Sunday screener run failed. '
+                            f'Logs: <a href="{url}">{url}</a>', subtype="html")
+          host = os.environ.get("SMTP_HOST","smtp.gmail.com")
+          port = int(os.environ.get("SMTP_PORT","587"))
+          user = os.environ.get("SMTP_USER","")
+          if port in (465, 2465):
+              with smtplib.SMTP_SSL(host, port, timeout=30) as s:
+                  s.login(user, pw); s.send_message(m)
+          else:
+              with smtplib.SMTP(host, port, timeout=30) as s:
+                  s.starttls(); s.login(user, pw); s.send_message(m)
+          print("alert sent")
+          PY

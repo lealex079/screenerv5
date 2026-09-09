@@ -79,6 +79,13 @@ CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
 MAX_WORKERS       = int(os.environ.get("MAX_WORKERS", "4"))
 FINVIZ_MAX_TICKERS = int(os.environ.get("FINVIZ_MAX_TICKERS", "250"))
 
+# Names under continuous coverage. These bypass the Finviz screen AND every
+# gate: they are reported every run whether or not they qualify, because the
+# reader asked for them by name. Requested by Sean 2026-09-02.
+PINNED_TICKERS = [t.strip().upper() for t in
+                  os.environ.get("PINNED_TICKERS", "AVAV,IIPR,INTU,ACN").split(",")
+                  if t.strip()]
+
 # ── Import scan functions from scan.py ────────────────────────────────────────
 # scan.py lives in api/scan.py relative to repo root.
 # Add api/ to path so we can import directly without touching the Vercel structure.
@@ -342,20 +349,52 @@ def fetch_options_for_top(top: list[dict]) -> None:
 # Email — the triage watchlist digest
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[dict], run_date: str) -> tuple[str, str]:
+def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[dict],
+                          run_date: str, pinned: list[dict] | None = None,
+                          mode: str = "full") -> tuple[str, str]:
     """
-    The triage watchlist email: up to 5 ranked names with brief blurbs, plus a
-    small 'blocked by a gate' footer. This is a RESEARCH QUEUE, not a report —
-    the header says so, and each blurb points to the full Claude Project.
+    The triage watchlist email. Two tracks, in this order:
+
+      1. Pinned coverage — names the reader asked for by name, reported every
+         run whether or not they qualify. Gates describe rather than filter.
+      2. Discovery — up to 5 ranked names off the Finviz screen, plus a
+         'blocked by a gate' footer.
+
+    This is a RESEARCH QUEUE, not a report — the header says so, and each blurb
+    points to the full Claude Project.
     """
+    pinned = pinned or []
     n = len(tier1)
-    subject = f"Watchlist — {run_date} | {n} name{'s' if n != 1 else ''} worth researching"
+    n_moved = sum(1 for b in pinned if (b.get("delta") or {}).get("material"))
+    if mode == "coverage":
+        # Midweek: the subject IS the summary. "3 unchanged" is a useful thing
+        # to see in a notification without opening anything.
+        if n_moved:
+            subject = (f"Coverage — {run_date} | {n_moved} of {len(pinned)} moved")
+        else:
+            subject = f"Coverage — {run_date} | no material change"
+    elif pinned and not tier1:
+        subject = f"Watchlist — {run_date} | coverage update, no new names"
+    elif pinned:
+        subject = (f"Watchlist — {run_date} | {len(pinned)} on coverage, "
+                   f"{n} new name{'s' if n != 1 else ''}")
+    else:
+        subject = f"Watchlist — {run_date} | {n} name{'s' if n != 1 else ''} worth researching"
 
     def score_color(v, high_bad=False):
         if v is None: return "#94a3b8"
         if high_bad:
             return "#ef4444" if v >= 60 else "#f59e0b" if v >= 40 else "#22c55e"
         return "#22c55e" if v >= 70 else "#f59e0b" if v >= 50 else "#94a3b8"
+
+    # ── Pinned coverage (rendered above discovery) ────────────────────────────
+    pinned_html = ""
+    if pinned:
+        try:
+            import coverage as cov
+            pinned_html = cov.render_pinned_section(pinned, score_color)
+        except Exception as e:
+            log.error(f"Pinned section failed to render: {e}")
 
     # ── Tier 1 cards ──────────────────────────────────────────────────────────
     cards = ""
@@ -487,6 +526,38 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
           <div style="margin-top:8px;padding-left:8px">{rows}</div>
         </details>"""
 
+    # Intro copy has to stay honest in every combination: pinned names are shown
+    # precisely because they have NOT cleared the gates, so the old blanket
+    # "each cleared all four gates" line would be false whenever pinned exist.
+    if mode == "coverage":
+        # No screen ran today, so the copy must not imply one did.
+        intro_line = (f"Midweek update on your {len(pinned)} watchlist name"
+                      f"{'s' if len(pinned) != 1 else ''}, revised against what "
+                      f"has moved since the last report. "
+                      + (f"{n_moved} changed materially."
+                         if n_moved else "Nothing changed materially.")
+                      + " No new names — the full screen runs Sunday.")
+    elif pinned and tier1:
+        intro_line = (f"Coverage on your {len(pinned)} watchlist name"
+                      f"{'s' if len(pinned) != 1 else ''}, then the {n} new "
+                      f"name{'s' if n != 1 else ''} from today's screen that "
+                      f"cleared all four put-selling gates, ranked.")
+    elif pinned:
+        intro_line = (f"Coverage on your {len(pinned)} watchlist name"
+                      f"{'s' if len(pinned) != 1 else ''}. Nothing new cleared "
+                      f"all four put-selling gates from today's screen.")
+    else:
+        intro_line = (f"The {n} name{'s' if n != 1 else ''} most worth researching "
+                      f"today, ranked. Each cleared all four put-selling gates.")
+
+    discovery_header = ""
+    if pinned and tier1:
+        discovery_header = (
+            '<div style="font-size:13px;font-weight:600;color:#e2e8f0;'
+            'margin:0 0 4px">New from today\'s screen</div>'
+            '<div style="font-size:11px;color:#64748b;margin-bottom:12px">'
+            'Ranked by composite score. Each cleared every gate.</div>')
+
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"></head>
 <body style="margin:0;padding:0;background:#0a0e13;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e2e8f0">
@@ -495,15 +566,17 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
   <div style="border-bottom:1px solid #1e2a35;padding-bottom:14px;margin-bottom:18px">
     <h1 style="font-size:17px;font-weight:500;margin:0;color:#e2e8f0">
       <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:8px;vertical-align:middle"></span>
-      Watchlist — {run_date}
+      {"Coverage" if mode == "coverage" else "Watchlist"} — {run_date}
     </h1>
     <p style="font-size:12px;color:#475569;margin:6px 0 0;line-height:1.5">
-      The {n} name{'s' if n != 1 else ''} most worth researching today, ranked. Each cleared all four
-      put-selling gates. <b style="color:#64748b">This is a triage screen to prioritize research — a
+      {intro_line}
+      <b style="color:#64748b">This is a triage screen to prioritize research — a
       heuristic ranking, not a validated signal.</b> Run the full report in the Project before trading.
     </p>
   </div>
 
+  {pinned_html}
+  {discovery_header}
   {cards}
   {tier2_html}
   {blocked_html}
@@ -613,69 +686,90 @@ def parse_args():
                    help="Scan + rank only — no Claude API calls, no email")
     p.add_argument("--tickers", type=str, default="",
                    help="Comma-separated tickers to override Finviz (e.g. AAPL,NVDA)")
+    p.add_argument("--no-pinned", action="store_true",
+                   help="Skip the pinned coverage section (debugging only)")
+    p.add_argument("--mode", choices=["full", "coverage"], default="full",
+                   help="full = Finviz discovery + pinned coverage (Sunday); "
+                        "coverage = pinned names only (Wed/Fri)")
     return p.parse_args()
 
 
-# 7 AM Pacific in UTC is 14:00 during PDT and 15:00 during PST. The workflow
-# registers both crons; exactly one of them "owns" any given day.
-PDT_CRON = "0 14 * * 1"
-PST_CRON = "0 15 * * 1"
+# ── Schedule table ────────────────────────────────────────────────────────────
+#
+# Two cadences, requested by Sean and Frank 2026-09-02/09:
+#
+#   full      Sunday 6 PM Pacific — Finviz discovery + pinned coverage. Runs
+#             Sunday so it reflects a CLOSED weekly candle and lands before
+#             Monday's open.
+#   coverage  Wed + Fri 6 AM Pacific — pinned names only. No Finviz, no
+#             discovery. Revises the standing notes against measured change.
+#
+# GitHub cron is UTC-only with no DST awareness, so each cadence registers both
+# firing times and exactly one owns any given date. Identity comes from WHICH
+# CRON FIRED, never from the wall clock: GitHub's scheduler is best-effort and
+# a six-hour delay on 2026-08-31 killed an hour-equality check and sent nothing.
+#
+# Sunday evening Pacific is MONDAY in UTC, so the Sunday crons use day 1, not 0.
+#
+# Every string here MUST match the workflow crons exactly. Drift means each run
+# decides it is the wrong cron and nothing is ever sent, silently.
+#
+#   cron          -> (mode, pacific_hour, is_dst_cron)
+SCHEDULES = {
+    "7 1 * * 1":    ("full",     18, True),    # Sun 6:07 PM PDT (01:07 UTC Mon)
+    "7 2 * * 1":    ("full",     18, False),   # Sun 6:07 PM PST (02:07 UTC Mon)
+    "7 13 * * 3,5": ("coverage",  6, True),    # Wed/Fri 6:07 AM PDT
+    "7 14 * * 3,5": ("coverage",  6, False),   # Wed/Fri 6:07 AM PST
+}
 
 
-def _wrong_scheduled_hour() -> bool:
+def resolve_schedule() -> tuple[bool, str]:
     """
-    True if this is a SCHEDULED run triggered by the cron that does NOT own
-    today — i.e. the wrong half of the DST pair.
+    Decide whether this run should proceed, and in which mode.
 
-    Identity comes from WHICH CRON FIRED (github.event.schedule), not from the
-    wall clock at execution time. GitHub's scheduler is explicitly best-effort
-    and multi-hour delays happen under load. An hour-equality check means a
-    delayed run gets killed by its own guard and nothing is ever delivered,
-    which is what happened on 2026-08-31: both crons landed in the early
-    afternoon and both no-oped, so no watchlist went out at all.
+    Returns (should_run, mode). Manual and local runs are NEVER blocked and use
+    whatever --mode was passed.
 
-    Manual runs (workflow_dispatch) and local runs are NEVER blocked.
+    For a scheduled run, the cron that fired identifies both the cadence and
+    which half of the DST year owns today. That is delay-proof: a run started
+    six hours late still delivers, and says so.
     """
     if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
-        return False
+        return True, ""
 
+    cron = os.environ.get("SCHEDULE_CRON", "").strip()
     try:
         from zoneinfo import ZoneInfo
         now = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
         is_dst = bool(now.dst())
     except Exception:
-        return False   # if tz data is unavailable, don't suppress the run
+        return True, ""          # no tz data — never suppress on that account
 
-    target = int(os.environ.get("PACIFIC_TARGET_HOUR", "7"))
-    cron = os.environ.get("SCHEDULE_CRON", "").strip()
-    owner = PDT_CRON if is_dst else PST_CRON
-
-    if cron:
-        # Preferred path: delay-proof. Only the cron that owns today proceeds,
-        # no matter how late GitHub actually starts it.
-        if cron != owner:
-            log.info(f"Scheduled run from cron '{cron}'; today is owned by "
-                     f"'{owner}' ({'PDT' if is_dst else 'PST'}) — exiting cleanly.")
-            return True
-    else:
-        # Fallback for runs where the workflow didn't pass SCHEDULE_CRON through.
-        # Use a wide window rather than hour equality so a delayed run still
-        # delivers; the two crons are only an hour apart, so a duplicate is
-        # possible here. That is the safer failure: a second email beats none.
-        if not (target <= now.hour <= target + 6):
-            log.info(f"Scheduled run at {now.hour}:00 Pacific is far outside the "
-                     f"{target}:00–{target + 6}:00 window and SCHEDULE_CRON is "
-                     f"unset — exiting cleanly.")
-            return True
-        log.warning("SCHEDULE_CRON not set — falling back to a time window. Add "
+    if not cron:
+        log.warning("SCHEDULE_CRON not set — cannot identify the cadence. Add "
                     "SCHEDULE_CRON: ${{ github.event.schedule }} to the workflow "
-                    "env block to make this exact.")
+                    "env block. Proceeding with the requested mode.")
+        return True, ""
 
-    if now.hour != target:
-        log.warning(f"Delivering LATE: this run was scheduled for {target}:00 "
-                    f"Pacific but started at {now.hour}:{now.minute:02d}. "
-                    f"GitHub scheduler delay, not a pipeline fault.")
-    return False
+    entry = SCHEDULES.get(cron)
+    if entry is None:
+        log.warning(f"Cron '{cron}' is not in SCHEDULES — the workflow and "
+                    f"pipeline.py have drifted. Proceeding rather than sending "
+                    f"nothing, but fix this.")
+        return True, ""
+
+    mode, target_hour, cron_is_dst = entry
+    if cron_is_dst != is_dst:
+        log.info(f"Cron '{cron}' is the {'PDT' if cron_is_dst else 'PST'} half of "
+                 f"the pair; today is {'PDT' if is_dst else 'PST'} — exiting cleanly.")
+        return False, mode
+
+    if now.hour != target_hour:
+        log.warning(f"Delivering LATE: scheduled for {target_hour}:00 Pacific, "
+                    f"started at {now.hour}:{now.minute:02d}. GitHub scheduler "
+                    f"delay, not a pipeline fault.")
+    log.info(f"Scheduled run: cron '{cron}' -> mode '{mode}'")
+    return True, mode
 
 
 def _pre_gate_scan_only(results: list[dict]) -> list[dict]:
@@ -703,8 +797,10 @@ def _pre_gate_scan_only(results: list[dict]) -> list[dict]:
 def main():
     args = parse_args()
 
-    if _wrong_scheduled_hour():
+    should_run, sched_mode = resolve_schedule()
+    if not should_run:
         sys.exit(0)
+    mode = sched_mode or args.mode
 
     import watchlist_rank as wr
     import watchlist_report as wrep
@@ -712,54 +808,118 @@ def main():
     run_date = datetime.date.today().isoformat()
 
     log.info("=" * 60)
-    log.info(f"Pipeline starting — {run_date}  (triage watchlist, top {wr.TIER1_CAP})")
+    log.info(f"Pipeline starting — {run_date}  (mode: {mode}, top {wr.TIER1_CAP})")
     log.info(f"  Workers: {MAX_WORKERS}  |  Dry run: {args.dry_run}")
     log.info("=" * 60)
 
     # Step 1 — ticker universe
-    if args.tickers:
+    if mode == "coverage":
+        # Wed/Fri: pinned names only. No Finviz call, no discovery, ~1 min.
+        tickers = []
+        log.info("Coverage mode — skipping the Finviz screen entirely.")
+    elif args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
         log.info(f"Manual ticker override: {tickers}")
     else:
         tickers = finviz_screen()
-    if not tickers:
+    if not tickers and mode != "coverage":
         log.error("No tickers to scan — exiting")
         sys.exit(1)
+
+    # Pinned names join the scan universe but are pulled back out before the
+    # gates. Union so a pinned name that Finviz also returned isn't scanned twice.
+    pinned_wanted = [] if args.no_pinned else list(PINNED_TICKERS)
+    if pinned_wanted:
+        log.info(f"Pinned coverage: {pinned_wanted}")
+        tickers = list(dict.fromkeys(list(tickers) + pinned_wanted))
 
     # Step 2 — parallel scan
     results = run_parallel_scan(tickers, max_workers=MAX_WORKERS)
 
+    # Step 2b — split pinned out. They skip every gate by design.
+    pinned = [d for d in results
+              if d.get("ticker") in pinned_wanted and not d.get("error")]
+    for t in pinned_wanted:
+        if not any(d.get("ticker") == t for d in pinned):
+            log.warning(f"Pinned {t}: scan failed, will be omitted from coverage")
+    discovery = [d for d in results if d.get("ticker") not in pinned_wanted]
+
     # Step 3 — cheap scan-only pre-gate (avoid options fetches on dead names)
-    pre = _pre_gate_scan_only(results)
-    log.info(f"Scan-only pre-gate: {len(pre)}/{len(results)} names still viable "
+    pre = _pre_gate_scan_only(discovery)
+    log.info(f"Scan-only pre-gate: {len(pre)}/{len(discovery)} names still viable "
              f"(cleared crash/structure/earnings)")
-    if not pre:
-        log.warning("No names cleared the scan-only gates — nothing to research today")
+    if not pre and not pinned:
+        log.warning("No names cleared the scan-only gates and no pinned coverage "
+                    "— nothing to send today")
         sys.exit(0)
 
     if args.dry_run:
         # Rank on scan-only signal so the dry-run preview is still useful, but
         # skip the options fetch, the liquidity gate, and all Claude spend.
         pre.sort(key=lambda d: d.get("trend_score", 0), reverse=True)
+        if pinned:
+            log.info("\nDry run — pinned coverage (gates bypassed):")
+            for d in pinned:
+                log.info(f"  *  {d['ticker']:<6} Trend={d.get('trend_score',0):.0f} "
+                         f"Crash={d.get('crash_score',0):.0f} "
+                         f"Struct={d.get('structure_score',0):.0f}")
         log.info(f"\nDry run — top scan-only names (no options, no Claude, no email):")
         for i, d in enumerate(pre[:wr.TIER1_CAP], 1):
             log.info(f"  {i}. {d['ticker']:<6} Trend={d.get('trend_score',0):.0f} "
                      f"Crash={d.get('crash_score',0):.0f} Struct={d.get('structure_score',0):.0f}")
         sys.exit(0)
 
-    # Step 4 — options (with ctx) on the pre-gate survivors only
-    log.info(f"\nFetching options for {len(pre)} survivors...")
-    fetch_options_for_top(pre)   # attaches d["options"], threads ctx
+    # Step 4 — options (with ctx) on the pre-gate survivors AND every pinned name
+    log.info(f"\nFetching options for {len(pre)} survivors"
+             f"{f' + {len(pinned)} pinned' if pinned else ''}...")
+    fetch_options_for_top(pre + pinned)   # attaches d["options"], threads ctx
     bundles = [{"ticker": d["ticker"], "scan": d, "options": d.get("options") or {}}
                for d in pre]
+
+    # Step 4b — pinned bundles: weekly candle + full gate picture.
+    # The candle is measured in Python and handed to the prompt as numbers; the
+    # model is never asked to read a chart and name a pattern.
+    pinned_bundles = []
+    if pinned:
+        import coverage as cov
+        log.info(f"Measuring weekly candles for {len(pinned)} pinned names...")
+        for d in pinned:
+            opts = d.get("options") or {}
+            # Sunday reports the CLOSED week. Midweek that bar has not
+            # changed, so re-reporting it would be noise — show week-to-date.
+            wc = cov.weekly_candle(d["ticker"], allow_partial=(mode == "coverage"))
+            if wc.get("error"):
+                log.warning(f"  {d['ticker']}: candle unavailable — {wc['error']}")
+            gs = cov.gate_status(d, opts)
+            log.info(f"  {d['ticker']:<6} {gs['verdict']:<11} "
+                     f"{'blocked by ' + ', '.join(g['gate'] for g in gs['blocking'])
+                        if gs['blocking'] else 'all gates clear'}")
+            pinned_bundles.append({
+                "ticker": d["ticker"], "scan": d, "options": opts,
+                "weekly_candle": wc, "gate_status": gs,
+            })
+
+        prior = cov.load_state()
+        n_material = 0
+        for b in pinned_bundles:
+            b["delta"] = cov.compute_delta(prior.get(b["ticker"], {}), b)
+            if b["delta"].get("material"):
+                n_material += 1
+        if prior:
+            log.info(f"Change vs last run: {n_material}/{len(pinned_bundles)} "
+                     f"materially moved")
 
     # Step 5 — full gate (adds liquidity) + composite rank → top 5
     tier1, tier2, blocked = wr.rank_candidates(bundles)
     log.info(f"Ranked: {len(tier1)} in Tier 1 (bar {wr.TIER1_MIN_COMPOSITE}, "
              f"cap {wr.TIER1_CAP}); {len(tier2)} in Tier 2; {len(blocked)} blocked")
-    if not tier1:
-        log.warning("No names cleared the quality bar — thin day, no watchlist sent")
+    if not tier1 and not pinned_bundles:
+        log.warning("No names cleared the quality bar and no pinned coverage "
+                    "— thin day, no watchlist sent")
         sys.exit(0)
+    if not tier1 and mode != "coverage":
+        log.info("No discovery names cleared the quality bar — sending pinned "
+                 "coverage only.")
     for i, b in enumerate(tier1, 1):
         log.info(f"  {i}. {b['ticker']:<6} composite={b['_composite']}")
 
@@ -769,6 +929,19 @@ def main():
         sys.exit(1)
     import anthropic
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    if pinned_bundles:
+        import coverage as cov
+        log.info(f"\nGenerating {len(pinned_bundles)} coverage notes "
+                 f"({CLAUDE_MODEL}, medium)...")
+        for i, b in enumerate(pinned_bundles, 1):
+            try:
+                b["blurb"] = cov.generate_coverage_blurb(b, client, CLAUDE_MODEL, "medium")
+                log.info(f"  [{i}/{len(pinned_bundles)}] {b['ticker']}: note ok")
+            except Exception as e:
+                b["blurb"] = f"[Coverage note failed: {e}]"
+                log.error(f"  [{i}/{len(pinned_bundles)}] {b['ticker']}: FAILED — {e}")
+            time.sleep(0.5)
+
     log.info(f"\nGenerating {len(tier1)} triage blurbs ({CLAUDE_MODEL}, medium)...")
     for i, b in enumerate(tier1, 1):
         try:
@@ -782,13 +955,23 @@ def main():
 
     # Step 7 — build + send the watchlist email
     log.info("\nBuilding watchlist email...")
-    subject, html = build_watchlist_email(tier1, tier2, blocked, run_date)
+    subject, html = build_watchlist_email(tier1, tier2, blocked, run_date,
+                                          pinned=pinned_bundles, mode=mode)
     send_email(subject, html)
+
+    # Snapshot only after the email is away. If the send throws, the state
+    # stays put and the next run diffs against what the reader last actually saw.
+    if pinned_bundles:
+        import coverage as cov
+        cov.save_state(pinned_bundles, run_date)
+        log.info(f"Coverage state saved for {len(pinned_bundles)} names.")
 
     log.info("\nPipeline complete.")
     log.info(f"  Scanned: {len(tickers)}  |  Viable after pre-gate: {len(pre)}")
     log.info(f"  Tier 1 researched: {len(tier1)}  |  Blocked: {len(blocked)}")
-    log.info(f"  Est. API cost: ~${len(tier1) * 0.05:.2f} ({CLAUDE_MODEL} medium, brief blurbs)")
+    log.info(f"  Pinned coverage: {len(pinned_bundles)}")
+    log.info(f"  Est. API cost: ~${(len(tier1) + len(pinned_bundles)) * 0.05:.2f} "
+             f"({CLAUDE_MODEL} medium)")
 
 
 if __name__ == "__main__":

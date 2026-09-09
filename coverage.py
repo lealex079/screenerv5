@@ -22,6 +22,7 @@ Two things live here:
 
 import datetime
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -244,12 +245,14 @@ def gate_status(scan: dict, options: dict) -> dict:
             driver = (f"5-day move is {r5:+.1f}% and 20-day is "
                       f"{r20:+.1f}%" if r20 is not None else f"5-day move is {r5:+.1f}%")
         add("crash", cs, f"< {wr.CRASH_GATE}", ok,
-            f"needs to fall {cs - wr.CRASH_GATE + 1:.0f} points, which takes a flat "
+            f"needs to fall {cs - wr.CRASH_GATE + 1:.0f} point"
+            f"{'' if cs - wr.CRASH_GATE + 1 < 1.5 else 's'}, which takes a flat "
             f"or down week", driver)
 
     if ss is not None:
+        _gap = wr.STRUCTURE_GATE - ss
         add("structure", ss, f">= {wr.STRUCTURE_GATE}", ss >= wr.STRUCTURE_GATE,
-            f"needs to rise {wr.STRUCTURE_GATE - ss:.0f} points")
+            f"needs to rise {_gap:.0f} point{'' if abs(_gap) < 1.5 else 's'}")
 
     if liq is not None:
         add("liquidity", liq, f">= {wr.LIQUIDITY_GATE}", liq >= wr.LIQUIDITY_GATE,
@@ -274,6 +277,92 @@ def gate_status(scan: dict, options: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # Coverage blurb
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Web search — triggered, never unconditional
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Ask a model to check for news and it finds some, every time, and quietly
+# promotes a routine headline into a thesis change. That failure is invisible:
+# a note explaining why the setup changed reads more authoritative than one
+# saying nothing happened.
+#
+# So search is GATED on something already having moved in the numbers. On a
+# quiet Wednesday no search runs at all, which removes the main source of
+# manufactured significance and most of the cost at the same time.
+
+SEARCH_TOOL_VERSION = os.environ.get("SEARCH_TOOL_VERSION", "web_search_20260318")
+SEARCH_MAX_USES     = int(os.environ.get("SEARCH_MAX_USES", "4"))
+ENABLE_SEARCH       = os.environ.get("ENABLE_SEARCH", "1") != "0"
+
+# Aggregators and stock-tip mills produce confident narratives about noise.
+# Excluding them pushes the model toward filings and company statements.
+SEARCH_BLOCKED_DOMAINS = [
+    "zacks.com", "investorplace.com", "fool.com", "benzinga.com",
+    "marketbeat.com", "simplywall.st", "stocktwits.com", "247wallst.com",
+]
+
+
+def search_trigger(delta: dict, scan: dict) -> str | None:
+    """
+    Should this ticker get a news lookup? Returns the reason, or None.
+
+    Every trigger is something already measured. News explains a move that has
+    happened; it is not used to predict one, and it never gets a vote on the
+    verdict.
+    """
+    if not ENABLE_SEARCH or not delta:
+        return None
+    if delta.get("first_run"):
+        return "first report on this name"
+
+    if "verdict_change" in delta:
+        return f"verdict moved ({delta['verdict_change'].replace('->', 'to')})"
+
+    # Price move scaled to the name's own volatility, so a 4% day flags on ACN
+    # but not on a name that routinely moves 6%.
+    pct = delta.get("price_change_pct")
+    rvol = scan.get("rvol_10d")            # annualised %, from scan.py
+    if pct is not None and rvol:
+        daily = rvol / (252 ** 0.5)        # -> typical daily move, %
+        if daily > 0 and abs(pct) >= 1.5 * daily:
+            return f"price moved {pct:+.1f}%, over 1.5x its typical daily range"
+    elif pct is not None and abs(pct) >= 6.0:
+        return f"price moved {pct:+.1f}%"
+
+    if delta.get("gates_cleared"):
+        return f"cleared {', '.join(delta['gates_cleared'])}"
+    if delta.get("gates_newly_blocking"):
+        return f"newly blocked on {', '.join(delta['gates_newly_blocking'])}"
+    if (c := delta.get("put_credit_change_pct")) is not None and abs(c) >= 25:
+        return f"option premium moved {c:+.0f}%"
+
+    ed = scan.get("earnings_days")
+    if ed is not None and 0 <= ed <= 7:
+        return f"earnings in {ed} days"
+    return None
+
+
+SEARCH_INSTRUCTIONS = """
+A "search_trigger" field is present, which means something in the numbers moved \
+and you may use web search to find out why.
+
+Rules for searching:
+- Search only for what explains the trigger. Do not go looking for general \
+commentary, price targets, or outlooks.
+- Restrict yourself to news published since the "since" date in the delta block. \
+Older items did not cause this move.
+- Prefer primary sources: SEC filings such as 8-K and 10-Q, company press \
+releases, and earnings call transcripts. Then major wire services. Ignore \
+opinion pieces, price-target changes, and anything that reads as a stock tip.
+- If you find nothing published in that window that plausibly explains the \
+move, say exactly that in one sentence and move on. Finding nothing is a \
+normal and useful result. Do not substitute a loosely related headline.
+- Report at most two items, each in one sentence, with the date and source.
+- News explains what already happened in the numbers. It does not change your \
+verdict. The verdict comes from the gates.
+"""
+
 
 COVERAGE_SYSTEM_PROMPT = """\
 You write a short weekly coverage note on a stock the reader already holds on \
@@ -307,9 +396,23 @@ specific.
 If a "delta" block is present this is a revision of an earlier note. You are not \
 shown the earlier note, only measured changes since it. Lead with what moved, \
 using those numbers, and reach your verdict from today's data rather than \
-defending a previous one. If delta.material is false, say so in one sentence and \
-keep the whole note to two or three sentences. A quiet week deserves a short \
-note. Padding it teaches the reader to skim.
+defending a previous one.
+
+If delta.material is false, write TWO SENTENCES TOTAL and stop. The first gives \
+the verdict and says nothing material changed. The second names the blocking \
+gate with its value and threshold. Nothing else. Do not describe the candle, do \
+not restate the support level, do not mention small moves in price or premium \
+that fell below the materiality floor. A quiet week gets a quiet note, and \
+padding one teaches the reader to skim the ones that matter.
+
+If a score change is marked unconfirmed, it reversed a recent move in the \
+opposite direction and is probably measurement noise. Do not report it.
+
+Never imply that a small distance to a threshold means a setup is close to \
+triggering. A structure score of 24 against a floor of 25 is failing, and the \
+one-point gap is arithmetic, not a forecast. Report the distance and what would \
+have to happen. Do not write "it would take one point" or "it is one point \
+away" as though that makes it imminent.
 
 HOW TO WRITE
 
@@ -360,18 +463,36 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
                                 "tradeable.")
     payload["weekly_candle"] = bundle.get("weekly_candle") or {}
     payload["gate_status"] = bundle.get("gate_status") or {}
+    trigger = bundle.get("search_trigger")
+    if trigger:
+        payload["search_trigger"] = trigger
     # Measured deltas only. The previous note's PROSE is deliberately withheld:
     # given its own prior conclusion, the model reliably confirms it.
     if bundle.get("delta"):
         payload["delta"] = bundle["delta"]
 
-    resp = client.messages.create(
-        model=model,
-        max_tokens=700,
-        output_config={"effort": effort},
-        system=COVERAGE_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
-    )
+    kwargs = {
+        "model": model,
+        "max_tokens": 700 if not trigger else 1100,
+        "output_config": {"effort": effort},
+        "system": COVERAGE_SYSTEM_PROMPT + ("\n" + SEARCH_INSTRUCTIONS if trigger else ""),
+        "messages": [{"role": "user", "content": json.dumps(payload, default=str)}],
+    }
+    if trigger:
+        # allowed_callers=["direct"] skips dynamic filtering. This is a narrow,
+        # single-purpose lookup, not exploratory research, and the direct path
+        # keeps the response blocks simple to parse.
+        kwargs["tools"] = [{
+            "type": SEARCH_TOOL_VERSION,
+            "name": "web_search",
+            "max_uses": SEARCH_MAX_USES,
+            "allowed_callers": ["direct"],
+            "blocked_domains": SEARCH_BLOCKED_DOMAINS,
+        }]
+
+    resp = client.messages.create(**kwargs)
+    # With tools enabled the response also carries server_tool_use and
+    # web_search_tool_result blocks. Take only the prose.
     return "".join(b.text for b in resp.content
                    if getattr(b, "type", "") == "text").strip()
 
@@ -487,15 +608,28 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
 # tickers do not need Postgres, and a file diffs cleanly in the repo history so
 # you can see what the system thought on any past date.
 
-import os
-
 STATE_PATH = os.environ.get("COVERAGE_STATE", "coverage_state.json")
 
 # A move smaller than this is noise, not news. Without a floor the "what
 # changed" line fires on every 0.2% drift and readers stop trusting it.
 MATERIAL_PRICE_PCT  = 1.5
-MATERIAL_SCORE_PTS  = 5
+MATERIAL_SCORE_PTS  = 8      # raised from 5: see the jitter note below
 MATERIAL_CREDIT_PCT = 15.0
+
+# Observed 2026-09-09: IIPR structure_score read 29, then 38, then 29 across
+# three runs eighteen minutes apart on 0.1% price movement. A score that
+# oscillates that far on a flat tape is measuring intraday noise, not structure,
+# and at the old 5-point floor it would have fired a "material change" on
+# roughly every other run. Crying wolf is the fastest way to lose a reader.
+#
+# Two defences, because the floor alone is a guess:
+#   1. The floor is 8, above the observed swing.
+#   2. Scores are DEBOUNCED — a move must survive two consecutive runs in the
+#      same direction before it counts as material. An out-and-back oscillation
+#      cancels itself and is never reported.
+# The real fix is upstream (compute structure off closed daily bars); run
+# tools/check_jitter.py to find it. Until then this keeps the email honest.
+DEBOUNCE_SCORES = os.environ.get("DEBOUNCE_SCORES", "1") != "0"
 
 
 def load_state(path: str = STATE_PATH) -> dict:
@@ -515,8 +649,13 @@ def save_state(bundles: list[dict], run_date: str, path: str = STATE_PATH) -> No
         scan = b.get("scan") or {}
         gs   = b.get("gate_status") or {}
         put  = _target_put(b.get("options") or {})
+        prior = state.get(b["ticker"], {})
         state[b["ticker"]] = {
             "date": run_date,
+            # One run of history, so the next run can confirm a move rather than
+            # react to a single reading.
+            "prev": {k: prior.get(k) for k in
+                     ("date", "trend", "crash", "structure", "price", "verdict")},
             "price": scan.get("price"),
             "trend": scan.get("trend_score"),
             "crash": scan.get("crash_score"),
@@ -566,15 +705,25 @@ def compute_delta(prev: dict, bundle: dict) -> dict:
         if abs(pct) >= MATERIAL_PRICE_PCT:
             d["material"] = True
 
+    older = prev.get("prev") or {}
     for key, cur in (("trend", scan.get("trend_score")),
                      ("crash", scan.get("crash_score")),
                      ("structure", scan.get("structure_score"))):
-        old = prev.get(key)
-        if old is not None and cur is not None:
-            diff = cur - old
-            d[f"{key}_change"] = round(diff, 1)
-            if abs(diff) >= MATERIAL_SCORE_PTS:
-                d["material"] = True
+        was = prev.get(key)
+        if was is None or cur is None:
+            continue
+        diff = cur - was
+        d[f"{key}_change"] = round(diff, 1)
+        if abs(diff) < MATERIAL_SCORE_PTS:
+            continue
+        if DEBOUNCE_SCORES and (before := older.get(key)) is not None:
+            # Confirm the move held. If the previous reading was an excursion
+            # that has now reversed, the two diffs have opposite signs and this
+            # is jitter, not news.
+            if (was - before) * diff < 0:
+                d[f"{key}_unconfirmed"] = True
+                continue
+        d["material"] = True
 
     v0, v1 = prev.get("verdict"), gs.get("verdict")
     if v0 and v1 and v0 != v1:

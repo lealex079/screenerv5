@@ -900,14 +900,22 @@ def main():
             })
 
         prior = cov.load_state()
-        n_material = 0
+        n_material = n_search = 0
         for b in pinned_bundles:
             b["delta"] = cov.compute_delta(prior.get(b["ticker"], {}), b)
             if b["delta"].get("material"):
                 n_material += 1
+            # Search is gated on the numbers already having moved. A quiet run
+            # searches nothing, which is both the cost control and the main
+            # defence against a routine headline being written up as a cause.
+            trig = cov.search_trigger(b["delta"], b["scan"])
+            if trig:
+                b["search_trigger"] = trig
+                n_search += 1
+                log.info(f"  {b['ticker']}: news lookup triggered — {trig}")
         if prior:
             log.info(f"Change vs last run: {n_material}/{len(pinned_bundles)} "
-                     f"materially moved")
+                     f"materially moved, {n_search} news lookups")
 
     # Step 5 — full gate (adds liquidity) + composite rank → top 5
     tier1, tier2, blocked = wr.rank_candidates(bundles)

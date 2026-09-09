@@ -81,6 +81,8 @@ jobs:
           PINNED_TICKERS:    ${{ vars.PINNED_TICKERS || 'AVAV,IIPR,INTU,ACN' }}
           # 18 = 6 PM Pacific. Must track the crons above.
           PACIFIC_TARGET_HOUR: "18"
+          ENABLE_SEARCH:       ${{ vars.ENABLE_SEARCH || '1' }}
+          SEARCH_TOOL_VERSION: ${{ vars.SEARCH_TOOL_VERSION || 'web_search_20260318' }}
         run: |
           ARGS=""
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then

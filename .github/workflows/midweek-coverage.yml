@@ -58,6 +58,11 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SCHEDULE_CRON:     ${{ github.event.schedule }}
           PINNED_TICKERS:    ${{ vars.PINNED_TICKERS || 'AVAV,IIPR,INTU,ACN' }}
+          # News lookups run only when the numbers already moved. Set to 0 to
+          # disable entirely; SEARCH_TOOL_VERSION is here so a version bump is a
+          # variable change rather than a code push.
+          ENABLE_SEARCH:       ${{ vars.ENABLE_SEARCH || '1' }}
+          SEARCH_TOOL_VERSION: ${{ vars.SEARCH_TOOL_VERSION || 'web_search_20260318' }}
         run: |
           ARGS="--mode coverage"
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then

@@ -1,0 +1,57 @@
+{
+  "ACN": {
+    "blocking": [
+      "earnings"
+    ],
+    "crash": 29.1,
+    "date": "2026-09-09",
+    "price": 176.62,
+    "put_credit": 2.45,
+    "put_strike": 160.0,
+    "structure": 37.0,
+    "support": null,
+    "trend": 59.9,
+    "verdict": "AVOID"
+  },
+  "AVAV": {
+    "blocking": [
+      "structure",
+      "earnings"
+    ],
+    "crash": 29.9,
+    "date": "2026-09-09",
+    "price": 140.03,
+    "put_credit": 3.3,
+    "put_strike": 120.0,
+    "structure": 10.0,
+    "support": null,
+    "trend": 56.6,
+    "verdict": "AVOID"
+  },
+  "IIPR": {
+    "blocking": [],
+    "crash": 46.5,
+    "date": "2026-09-09",
+    "price": 56.99,
+    "put_credit": 0.5,
+    "put_strike": 50.0,
+    "structure": 29.0,
+    "support": null,
+    "trend": 41.2,
+    "verdict": "SETUP LIVE"
+  },
+  "INTU": {
+    "blocking": [
+      "structure"
+    ],
+    "crash": 10.3,
+    "date": "2026-09-09",
+    "price": 313.32,
+    "put_credit": 4.1,
+    "put_strike": 280.0,
+    "structure": 24.0,
+    "support": null,
+    "trend": 43.1,
+    "verdict": "AVOID"
+  }
+}

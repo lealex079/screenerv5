@@ -82,6 +82,11 @@ FINVIZ_MAX_TICKERS = int(os.environ.get("FINVIZ_MAX_TICKERS", "250"))
 # Names under continuous coverage. These bypass the Finviz screen AND every
 # gate: they are reported every run whether or not they qualify, because the
 # reader asked for them by name. Requested by Sean 2026-09-02.
+ENABLE_PREMIUM = os.environ.get("ENABLE_PREMIUM", "1") != "0"
+# New paths ship OFF so a scheduled run keeps doing exactly what it did before
+# the code landed. Turn each on deliberately after a manual run has proved it.
+ENABLE_CHARTS  = os.environ.get("ENABLE_CHARTS", "0") != "0"
+ENABLE_POSITIONS = os.environ.get("ENABLE_POSITIONS", "0") != "0"
 PINNED_TICKERS = [t.strip().upper() for t in
                   os.environ.get("PINNED_TICKERS", "AVAV,IIPR,INTU,ACN").split(",")
                   if t.strip()]
@@ -140,7 +145,8 @@ def _looks_like_ticker(s: str) -> bool:
     return bool(re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", s))
 
 
-def finviz_screen() -> list[str]:
+def finviz_screen(filters: list[str] | None = None,
+                  label: str = "core") -> list[str]:
     """
     Run Finviz screen and return list of tickers.
 
@@ -156,7 +162,7 @@ def finviz_screen() -> list[str]:
     right before transcribing codes here — Finviz renames codes and a wrong one
     fails silently (returns a different universe, no error).
     """
-    filters = [
+    filters = filters if filters is not None else [
         "geo_usa",            # US-listed only
         "ind_stocksonly",     # exclude ETFs / funds
         "sh_opt_optionshort", # optionable AND shortable (better liquidity proxy)
@@ -170,7 +176,7 @@ def finviz_screen() -> list[str]:
 
     try:
         from finviz.screener import Screener
-        log.info("Running Finviz screen...")
+        log.info(f"Running Finviz screen ({label})...")
         screen = Screener(filters=filters, table="Overview", order="-marketcap",
                           rows=FINVIZ_MAX_TICKERS)
 
@@ -364,6 +370,8 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     points to the full Claude Project.
     """
     pinned = pinned or []
+    premium = premium or []
+    benchmarks = benchmarks or []
     n = len(tier1)
     n_moved = sum(1 for b in pinned if (b.get("delta") or {}).get("material"))
     quiet = False
@@ -405,6 +413,15 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
             pinned_html = cov.render_pinned_section(pinned, score_color)
         except Exception as e:
             log.error(f"Pinned section failed to render: {e}")
+
+    # ── Higher-premium section (Frank's track) ────────────────────────────────
+    premium_html = ""
+    if premium or benchmarks:
+        try:
+            import premium as _prem
+            premium_html = _prem.render_premium_section(premium, benchmarks)
+        except Exception as e:
+            log.error(f"Premium section failed to render: {e}")
 
     # ── Tier 1 cards ──────────────────────────────────────────────────────────
     cards = ""
@@ -594,6 +611,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
   {pinned_html}
   {discovery_header}
   {cards}
+  {premium_html}
   {tier2_html}
   {blocked_html}
 
@@ -623,7 +641,8 @@ def _html_to_text(html: str) -> str:
     return "\n".join(line.strip() for line in t.splitlines()).strip()
 
 
-def send_email(subject: str, html: str) -> None:
+def send_email(subject: str, html: str,
+               images: dict[str, bytes] | None = None) -> None:
     """Send the watchlist over SMTP, or write it to a file in print mode.
 
     PROVIDER-AGNOSTIC BY DESIGN. This uses stdlib smtplib rather than any
@@ -670,6 +689,19 @@ def send_email(subject: str, html: str) -> None:
     msg["To"] = ", ".join(recipients)
     msg.set_content(_html_to_text(html))       # text/plain part
     msg.add_alternative(html, subtype="html")  # text/html part
+
+    # Inline charts by Content-ID. Remote <img src="https://..."> is blocked by
+    # default in most corporate inboxes; a CID attachment renders. Attaching to
+    # the HTML part (not the message root) is what makes the client treat these
+    # as embedded rather than as downloads sitting at the bottom.
+    if images:
+        html_part = msg.get_payload()[-1]
+        for cid, blob in images.items():
+            if not blob:
+                continue
+            html_part.add_related(blob, maintype="image", subtype="png",
+                                  cid=f"<{cid}>", filename=f"{cid}.png")
+        log.info(f"Attached {sum(1 for b in images.values() if b)} inline charts")
 
     try:
         if SMTP_PORT in (465, 2465):           # implicit SSL
@@ -838,6 +870,21 @@ def main():
         log.info(f"Manual ticker override: {tickers}")
     else:
         tickers = finviz_screen()
+        if ENABLE_PREMIUM:
+            # Frank's ask. The premium is in the universe, not the thresholds,
+            # so this widens what gets searched rather than lowering the bar.
+            import premium as prem
+            try:
+                vol_tickers = finviz_screen(filters=prem.finviz_volatile_filters(),
+                                            label="volatile")
+            except Exception as e:
+                log.warning(f"Volatile screen failed, continuing without it: {e}")
+                vol_tickers = []
+            before = len(tickers)
+            tickers = list(dict.fromkeys(list(tickers) + vol_tickers
+                                         + prem.BENCHMARKS))
+            log.info(f"Universe: {before} core + {len(vol_tickers)} volatile "
+                     f"+ {len(prem.BENCHMARKS)} benchmarks = {len(tickers)} unique")
     if not tickers and mode != "coverage":
         log.error("No tickers to scan — exiting")
         sys.exit(1)
@@ -915,6 +962,19 @@ def main():
                 "weekly_candle": wc, "gate_status": gs,
             })
 
+        # Open positions change the question from "should we enter" to
+        # "hold, roll, or take assignment". Attach before deltas so the prompt
+        # selection downstream can see it.
+        if ENABLE_POSITIONS:
+            import positions as pos_mod
+            open_pos = pos_mod.load_positions()
+            for b in pinned_bundles:
+                if (p := open_pos.get(b["ticker"])):
+                    b["position"] = pos_mod.evaluate(b["ticker"], p, b["scan"],
+                                                     b.get("options") or {})
+                    log.info(f"  {b['ticker']}: OPEN POSITION -> "
+                             f"{b['position']['action']}")
+
         prior = cov.load_state()
         n_material = n_search = 0
         for b in pinned_bundles:
@@ -937,6 +997,19 @@ def main():
     tier1, tier2, blocked = wr.rank_candidates(bundles)
     log.info(f"Ranked: {len(tier1)} in Tier 1 (bar {wr.TIER1_MIN_COMPOSITE}, "
              f"cap {wr.TIER1_CAP}); {len(tier2)} in Tier 2; {len(blocked)} blocked")
+    # Premium track: same scanned bundles, different gates and a different sort.
+    premium_names, benchmarks = [], []
+    if ENABLE_PREMIUM and mode != "coverage" and bundles:
+        import premium as prem
+        chosen = {b["ticker"] for b in tier1}
+        premium_names = prem.rank_premium(bundles, exclude=chosen)
+        benchmarks = prem.build_benchmarks(bundles)
+        log.info(f"Premium track: {len(premium_names)} names above "
+                 f"{prem.MIN_ANN_YIELD}% annualized with IV/HV >= {prem.MIN_IV_HV}")
+        for b in premium_names:
+            log.info(f"  {b['ticker']:<6} {b['_ann_yield']:.1f}% ann, "
+                     f"IV/HV {b.get('_iv_hv') or 0:.2f}")
+
     if not tier1 and not pinned_bundles:
         log.warning("No names cleared the quality bar and no pinned coverage "
                     "— thin day, no watchlist sent")
@@ -985,11 +1058,33 @@ def main():
         if i < len(tier1):
             time.sleep(0.5)
 
+    # Step 6b — charts. Rendered for the names that carry a quoted trade, since
+    # the point of the picture is showing the strike under the support band.
+    chart_images = {}
+    if ENABLE_CHARTS:
+        import charts as ch
+        import strikes as stk
+        targets = [b for b in pinned_bundles
+                   if (b.get("gate_status") or {}).get("verdict") == "SETUP LIVE"]
+        targets += list(tier1)
+        log.info(f"\nRendering {len(targets)} charts...")
+        for b in targets:
+            scan = b.get("scan") or {}
+            put, _ = stk.select_put(b)
+            png = ch.render_trade_chart(b["ticker"], scan, put, scan.get("vp"))
+            if png:
+                cid = f"chart-{b['ticker'].lower()}"
+                chart_images[cid] = png
+                b["_chart_cid"] = cid
+        log.info(f"  {len(chart_images)}/{len(targets)} rendered")
+
     # Step 7 — build + send the watchlist email
     log.info("\nBuilding watchlist email...")
     subject, html = build_watchlist_email(tier1, tier2, blocked, run_date,
-                                          pinned=pinned_bundles, mode=mode)
-    send_email(subject, html)
+                                          pinned=pinned_bundles, mode=mode,
+                                          premium=premium_names,
+                                          benchmarks=benchmarks)
+    send_email(subject, html, images=chart_images)
 
     # Snapshot only after the email is away. If the send throws, the state
     # stays put and the next run diffs against what the reader last actually saw.

@@ -79,9 +79,15 @@ jobs:
           # Names under continuous coverage. Editable here without a code change,
           # which is the stopgap until the dashboard exists.
           PINNED_TICKERS:    ${{ vars.PINNED_TICKERS || 'AVAV,IIPR,INTU,ACN' }}
+          # Both default OFF. Scheduled runs keep their current behaviour until
+          # you flip each one deliberately after a manual run has proved it.
+          ENABLE_CHARTS:     ${{ vars.ENABLE_CHARTS || '0' }}
+          ENABLE_POSITIONS:  ${{ vars.ENABLE_POSITIONS || '0' }}
           # 18 = 6 PM Pacific. Must track the crons above.
           PACIFIC_TARGET_HOUR: "18"
           ENABLE_SEARCH:       ${{ vars.ENABLE_SEARCH || '1' }}
+          # Frank's higher-premium track. Set to 0 to run the core screen alone.
+          ENABLE_PREMIUM:      ${{ vars.ENABLE_PREMIUM || '1' }}
           SEARCH_TOOL_VERSION: ${{ vars.SEARCH_TOOL_VERSION || 'web_search_20260318' }}
         run: |
           ARGS=""

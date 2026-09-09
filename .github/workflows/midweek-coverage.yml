@@ -58,6 +58,10 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SCHEDULE_CRON:     ${{ github.event.schedule }}
           PINNED_TICKERS:    ${{ vars.PINNED_TICKERS || 'AVAV,IIPR,INTU,ACN' }}
+          # Both default OFF. Scheduled runs keep their current behaviour until
+          # you flip each one deliberately after a manual run has proved it.
+          ENABLE_CHARTS:     ${{ vars.ENABLE_CHARTS || '0' }}
+          ENABLE_POSITIONS:  ${{ vars.ENABLE_POSITIONS || '0' }}
           # News lookups run only when the numbers already moved. Set to 0 to
           # disable entirely; SEARCH_TOOL_VERSION is here so a version bump is a
           # variable change rather than a code push.

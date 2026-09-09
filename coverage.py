@@ -389,6 +389,13 @@ how the range and volume compare to normal.
 3. The nearest support confluence, with its price and what forms it.
 4. If SETUP LIVE, the put: strike, expiry, DTE, delta, credit, annualized yield, \
 breakeven, and how the breakeven sits against that support.
+
+The strike was chosen FROM the support level, not from a delta target. When \
+strike_basis is "confluence", use strike_rationale and say the strike sits under \
+that zone, treating the delta as the result rather than the goal. When \
+strike_basis is "delta", no support zone was strong or near enough to anchor to. \
+Say that plainly: this is the 0.20 delta contract and there is no structural \
+level behind it.
 5. If NOT YET or AVOID, which gate is blocking, its value and threshold, and \
 what would have to change. This is the most useful sentence in the note. Be \
 specific.
@@ -451,6 +458,14 @@ The reader decides. Your job is to report accurately and say what is blocking.
 End with nothing. No sign-off, no "let me know"."""
 
 
+def _position_prompt() -> str:
+    try:
+        import positions
+        return positions.POSITION_PROMPT
+    except Exception:
+        return ""
+
+
 def _quiet_but_live(bundle: dict) -> bool:
     """Unchanged, but tradeable. The one case where a quiet name still needs prose."""
     d = bundle.get("delta") or {}
@@ -487,6 +502,10 @@ def needs_prose(bundle: dict) -> bool:
         return True
     if bundle.get("search_trigger"):
         return True
+    # An open position always gets written up. "Nothing changed" is not an
+    # acceptable answer about money already at risk.
+    if bundle.get("position"):
+        return True
     return False
 
 
@@ -511,8 +530,22 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
     payload["coverage_note"] = ("This is a pinned name under continuous "
                                 "coverage. It is reported whether or not it is "
                                 "tradeable.")
+    # Strike comes from the support shelf, not from a fixed delta. If no shelf
+    # qualified, say so rather than implying a structural basis that isn't there.
+    try:
+        import strikes
+        put, how = strikes.select_put(bundle)
+        if put:
+            payload["target_put"] = put
+            payload["strike_basis"] = how
+            if how == "confluence":
+                payload["strike_rationale"] = strikes.anchor_sentence(put)
+    except Exception:
+        pass
     payload["weekly_candle"] = bundle.get("weekly_candle") or {}
     payload["gate_status"] = bundle.get("gate_status") or {}
+    if bundle.get("position"):
+        payload["position"] = bundle["position"]
     trigger = bundle.get("search_trigger")
     if trigger:
         payload["search_trigger"] = trigger
@@ -527,7 +560,8 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
         "output_config": {"effort": effort},
         "system": (COVERAGE_SYSTEM_PROMPT
                    + ("\n" + SEARCH_INSTRUCTIONS if trigger else "")
-                   + (QUIET_NOTE_ADDENDUM if _quiet_but_live(bundle) else "")),
+                   + (QUIET_NOTE_ADDENDUM if _quiet_but_live(bundle) else "")
+                   + (_position_prompt() if bundle.get("position") else "")),
         "messages": [{"role": "user", "content": json.dumps(payload, default=str)}],
     }
     if trigger:
@@ -610,7 +644,8 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
     if not pinned:
         return ""
 
-    if all_quiet(pinned):
+    # A run is never "quiet" if money is at risk on any of these names.
+    if all_quiet(pinned) and not any(b.get("position") for b in pinned):
         return render_quiet_digest(pinned)
 
     cards = ""
@@ -682,6 +717,8 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
             <span style="color:#64748b">Crash <b style="color:{score_color(cs, True)}">{s(cs)}</b></span>
             <span style="color:#64748b">Structure <b style="color:{score_color(ss)}">{s(ss)}</b></span>
           </div>
+          {(__import__("positions").render_position_badge(b["position"]) if b.get("position") else "")}
+          {(__import__("charts").chart_img_tag(b["_chart_cid"]) if b.get("_chart_cid") else "")}
           {delta_html}
           {f'<div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>' if blurb_html else ''}
           {blockers_html}

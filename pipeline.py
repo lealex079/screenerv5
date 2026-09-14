@@ -357,7 +357,9 @@ def fetch_options_for_top(top: list[dict]) -> None:
 
 def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[dict],
                           run_date: str, pinned: list[dict] | None = None,
-                          mode: str = "full") -> tuple[str, str]:
+                          mode: str = "full",
+                          premium: list[dict] | None = None,
+                          benchmarks: list[dict] | None = None) -> tuple[str, str]:
     """
     The triage watchlist email. Two tracks, in this order:
 

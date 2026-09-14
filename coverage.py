@@ -805,6 +805,7 @@ def save_state(bundles: list[dict], run_date: str, path: str = STATE_PATH) -> No
             "verdict": gs.get("verdict"),
             "blocking": [g["gate"] for g in (gs.get("blocking") or [])],
             "put_strike": (put or {}).get("strike"),
+            "put_expiry": (put or {}).get("expiration"),
             "put_credit": (put or {}).get("bid"),
             "support": (b.get("support_level")),
         }
@@ -879,13 +880,25 @@ def compute_delta(prev: dict, bundle: dict) -> dict:
     if added := (new_block - old_block):
         d["gates_newly_blocking"] = sorted(added); d["material"] = True
 
+    # Credit is only comparable when it is the SAME contract. The target put is
+    # re-chosen every run, so when the strike or expiry rolls, the two numbers
+    # describe different instruments. On 2026-09-14 that produced
+    # "option premium moved +2680%" for IIPR and triggered a news lookup for a
+    # move that never happened.
     c0, c1 = prev.get("put_credit"), (put or {}).get("bid")
-    if c0 and c1:
+    s0, s1 = prev.get("put_strike"), (put or {}).get("strike")
+    e0, e1 = prev.get("put_expiry"), (put or {}).get("expiration")
+    same_contract = (s0 is not None and s1 is not None
+                     and abs(s0 - s1) < 0.01
+                     and (e0 is None or e1 is None or e0 == e1))
+    if c0 and c1 and same_contract:
         d["put_credit_prev"], d["put_credit_now"] = c0, c1
         pct = (c1 / c0 - 1) * 100
         d["put_credit_change_pct"] = round(pct, 1)
         if abs(pct) >= MATERIAL_CREDIT_PCT:
             d["material"] = True
+    elif c0 and c1:
+        d["put_contract_rolled"] = (f"{s0} -> {s1}" if s0 != s1 else f"{e0} -> {e1}")
 
     return d
 

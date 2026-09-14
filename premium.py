@@ -31,6 +31,7 @@ the one with no evidence was relaxed, the ones with evidence were kept.
 """
 
 import logging
+import os
 
 import watchlist_rank as wr
 
@@ -44,6 +45,22 @@ BENCHMARKS = ["AVAV", "MU"]
 PREMIUM_CAP = 5          # how many high-yield names to write up
 MIN_ANN_YIELD = 12.0     # below this it is not a "high premium" name
 MIN_IV_HV = 1.10         # options must price MORE movement than the stock makes
+
+# Upper bounds, added after the 2026-09-14 run surfaced CRCL at 649% annualized
+# with IV/HV 4.47, plus WDC 483%, ALAB 450%, AMAT 412% and SNDK 394%.
+#
+# A 20-delta put cannot pay 649% annualized in a functioning market. Either the
+# chain mark is stale or illiquid, or the name has a binary event priced in: a
+# pending acquisition, a court date, a going-concern question. In both cases the
+# premium is not compensation for ordinary volatility, it is the market paying
+# you to take the other side of a coin flip, and the crash gate cannot see it
+# because nothing has moved yet.
+#
+# Frank asked for higher premium, not for lottery tickets. A 649% yield in the
+# email either destroys confidence in the screen or gets someone filled on
+# something nobody understood.
+MAX_ANN_YIELD = float(os.environ.get("MAX_ANN_YIELD", "120"))
+MAX_IV_HV     = float(os.environ.get("MAX_IV_HV", "3.0"))
 
 
 def finviz_volatile_filters() -> list[str]:
@@ -99,7 +116,7 @@ def rank_premium(bundles: list[dict], exclude: set[str] | None = None) -> list[d
     neither.
     """
     exclude = exclude or set()
-    out = []
+    out, excluded = [], []
     for b in bundles:
         if b["ticker"] in exclude:
             continue
@@ -116,6 +133,15 @@ def rank_premium(bundles: list[dict], exclude: set[str] | None = None) -> list[d
         ivhv = options.get("iv_hv")
         if yld < MIN_ANN_YIELD:
             continue
+        # Too-good-to-be-true is a data-quality signal, not an opportunity.
+        if yld > MAX_ANN_YIELD:
+            excluded.append((b["ticker"],
+                             f"{yld:.0f}% annualized is implausible for a 20-delta put"))
+            continue
+        if ivhv is not None and ivhv > MAX_IV_HV:
+            excluded.append((b["ticker"],
+                             f"IV/HV {ivhv:.1f} suggests a binary event or a stale chain"))
+            continue
         # A high yield on an option priced BELOW recent realized movement means
         # the stock is just volatile, not that the option is generous. The
         # premium has to be rich relative to what the stock has been doing.
@@ -126,8 +152,16 @@ def rank_premium(bundles: list[dict], exclude: set[str] | None = None) -> list[d
         b["_premium_flag"] = wr.reason_flag(b)
         out.append(b)
 
+    if excluded:
+        log.warning(f"Premium track: {len(excluded)} names excluded for "
+                    f"implausible pricing")
+        for t, why in excluded:
+            log.warning(f"  {t}: {why}")
     out.sort(key=lambda x: x["_ann_yield"], reverse=True)
-    return out[:PREMIUM_CAP]
+    out = out[:PREMIUM_CAP]
+    if out:
+        out[0]["_excluded_count"] = len(excluded)
+    return out
 
 
 def build_benchmarks(bundles: list[dict]) -> list[dict]:
@@ -190,6 +224,18 @@ def render_premium_section(names: list[dict], benchmarks: list[dict]) -> str:
             '<th style="padding:4px 8px;text-align:right;color:#475569;font-weight:400;border-bottom:1px solid #1e2a35">OI</th>'
             f'</tr></thead><tbody>{rows}</tbody></table>')
 
+    excluded_note = ""
+    n_excl = next((b.get("_excluded_count") for b in names if b.get("_excluded_count")), 0)
+    if n_excl:
+        excluded_note = (
+            f'<div style="font-size:11px;color:#f59e0b;margin-top:10px;'
+            f'padding-top:8px;border-top:1px solid #1e2a35;line-height:1.5">'
+            f'{n_excl} name{"s" if n_excl != 1 else ""} excluded for implausible '
+            f'option pricing: yields above {MAX_ANN_YIELD:.0f}% annualized, or '
+            f'implied volatility more than {MAX_IV_HV:.0f}x realized. Premium at '
+            f'that level usually means a pending event or a stale quote rather '
+            f'than an opportunity.</div>')
+
     bench = ""
     if benchmarks:
         brows = ""
@@ -232,6 +278,7 @@ def render_premium_section(names: list[dict], benchmarks: list[dict]) -> str:
       </div>
       <div style="background:#1a2332;border-radius:8px;border:1px solid #2a3a4e;padding:14px 16px">
         {body}
+        {excluded_note}
         {bench}
       </div>
     </div>"""

@@ -42,6 +42,11 @@ You receive one ticker's screener output as JSON. Write a blurb of 60-90 words:
    gated.)
 2. ONE sentence: why it's a candidate — the trend/structure/premium picture in
    plain English.
+2b. THE STRIKE WAS CHOSEN FROM THE LEVEL. When strike_basis is "confluence" the
+   strike was picked as the highest one sitting under a support shelf, and the
+   delta is whatever that produced. Present it that way round. When it is
+   "delta", no shelf qualified and this is simply the 0.20 delta contract; say
+   so rather than implying a level supports it.
 3. THE KEY LEVEL: name the nearest support confluence the put would sit above,
    with its price and sources, taken verbatim from `confluences`. If none is
    within range, say the chain's support is thin and stop — do NOT invent a level.
@@ -119,6 +124,24 @@ def _pick_support_confluence(confluences, price):
     return max(supports, key=lambda c: c.get("price_hi") or c.get("price") or 0)
 
 
+def _anchored_put(bundle):
+    """Strike chosen from support rather than delta. None if no shelf qualified."""
+    try:
+        import strikes
+        put, how = strikes.select_put(bundle)
+        return put if how == "confluence" else None
+    except Exception:
+        return None
+
+
+def _anchored_basis(bundle):
+    try:
+        import strikes
+        return strikes.select_put(bundle)[1]
+    except Exception:
+        return "delta"
+
+
 def build_triage_payload(bundle: dict) -> dict:
     """Compact, blurb-shaped payload — only what the triage prompt needs."""
     scan = bundle.get("scan") or {}
@@ -141,7 +164,8 @@ def build_triage_payload(bundle: dict) -> dict:
         "premium": {"iv_hv": options.get("iv_hv"), "vol_rank": options.get("vol_rank")},
         "support_confluence": _pick_support_confluence(
             scan.get("confluences"), scan.get("price")),
-        "target_put": target,
+        "target_put": _anchored_put(bundle) or target,
+        "strike_basis": _anchored_basis(bundle),
         "grades": {
             "sell_put": grades.get("sell_put"),
             "sell_call": grades.get("sell_call"),

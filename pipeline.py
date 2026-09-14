@@ -873,18 +873,24 @@ def main():
         if ENABLE_PREMIUM:
             # Frank's ask. The premium is in the universe, not the thresholds,
             # so this widens what gets searched rather than lowering the bar.
-            import premium as prem
+            #
+            # The import is INSIDE the try on purpose. On 2026-09-13 it sat
+            # outside and premium.py had not been pushed yet, so a missing
+            # optional module took down the entire Sunday run. An optional
+            # feature must never be able to do that.
             try:
+                import premium as prem
                 vol_tickers = finviz_screen(filters=prem.finviz_volatile_filters(),
                                             label="volatile")
+                before = len(tickers)
+                tickers = list(dict.fromkeys(list(tickers) + vol_tickers
+                                             + prem.BENCHMARKS))
+                log.info(f"Universe: {before} core + {len(vol_tickers)} volatile "
+                         f"+ {len(prem.BENCHMARKS)} benchmarks = "
+                         f"{len(tickers)} unique")
             except Exception as e:
-                log.warning(f"Volatile screen failed, continuing without it: {e}")
-                vol_tickers = []
-            before = len(tickers)
-            tickers = list(dict.fromkeys(list(tickers) + vol_tickers
-                                         + prem.BENCHMARKS))
-            log.info(f"Universe: {before} core + {len(vol_tickers)} volatile "
-                     f"+ {len(prem.BENCHMARKS)} benchmarks = {len(tickers)} unique")
+                log.warning(f"Premium track unavailable, continuing with the "
+                            f"core screen only: {e}")
     if not tickers and mode != "coverage":
         log.error("No tickers to scan — exiting")
         sys.exit(1)
@@ -944,6 +950,8 @@ def main():
     # model is never asked to read a chart and name a pattern.
     pinned_bundles = []
     if pinned:
+        # coverage.py is NOT optional — pinned names are a committed deliverable,
+        # so a failure here should surface rather than be swallowed.
         import coverage as cov
         log.info(f"Measuring weekly candles for {len(pinned)} pinned names...")
         for d in pinned:
@@ -966,14 +974,17 @@ def main():
         # "hold, roll, or take assignment". Attach before deltas so the prompt
         # selection downstream can see it.
         if ENABLE_POSITIONS:
-            import positions as pos_mod
-            open_pos = pos_mod.load_positions()
-            for b in pinned_bundles:
-                if (p := open_pos.get(b["ticker"])):
-                    b["position"] = pos_mod.evaluate(b["ticker"], p, b["scan"],
-                                                     b.get("options") or {})
-                    log.info(f"  {b['ticker']}: OPEN POSITION -> "
-                             f"{b['position']['action']}")
+            try:
+                import positions as pos_mod
+                open_pos = pos_mod.load_positions()
+                for b in pinned_bundles:
+                    if (p := open_pos.get(b["ticker"])):
+                        b["position"] = pos_mod.evaluate(
+                            b["ticker"], p, b["scan"], b.get("options") or {})
+                        log.info(f"  {b['ticker']}: OPEN POSITION -> "
+                                 f"{b['position']['action']}")
+            except Exception as e:
+                log.warning(f"Position tracking skipped: {e}")
 
         prior = cov.load_state()
         n_material = n_search = 0
@@ -1000,15 +1011,20 @@ def main():
     # Premium track: same scanned bundles, different gates and a different sort.
     premium_names, benchmarks = [], []
     if ENABLE_PREMIUM and mode != "coverage" and bundles:
-        import premium as prem
-        chosen = {b["ticker"] for b in tier1}
-        premium_names = prem.rank_premium(bundles, exclude=chosen)
-        benchmarks = prem.build_benchmarks(bundles)
-        log.info(f"Premium track: {len(premium_names)} names above "
-                 f"{prem.MIN_ANN_YIELD}% annualized with IV/HV >= {prem.MIN_IV_HV}")
-        for b in premium_names:
-            log.info(f"  {b['ticker']:<6} {b['_ann_yield']:.1f}% ann, "
-                     f"IV/HV {b.get('_iv_hv') or 0:.2f}")
+        try:
+            import premium as prem
+            chosen = {b["ticker"] for b in tier1}
+            premium_names = prem.rank_premium(bundles, exclude=chosen)
+            benchmarks = prem.build_benchmarks(bundles)
+            log.info(f"Premium track: {len(premium_names)} names above "
+                     f"{prem.MIN_ANN_YIELD}% annualized with "
+                     f"IV/HV >= {prem.MIN_IV_HV}")
+            for b in premium_names:
+                log.info(f"  {b['ticker']:<6} {b['_ann_yield']:.1f}% ann, "
+                         f"IV/HV {b.get('_iv_hv') or 0:.2f}")
+        except Exception as e:
+            log.warning(f"Premium ranking skipped: {e}")
+            premium_names, benchmarks = [], []
 
     if not tier1 and not pinned_bundles:
         log.warning("No names cleared the quality bar and no pinned coverage "
@@ -1062,21 +1078,25 @@ def main():
     # the point of the picture is showing the strike under the support band.
     chart_images = {}
     if ENABLE_CHARTS:
-        import charts as ch
-        import strikes as stk
-        targets = [b for b in pinned_bundles
-                   if (b.get("gate_status") or {}).get("verdict") == "SETUP LIVE"]
-        targets += list(tier1)
-        log.info(f"\nRendering {len(targets)} charts...")
-        for b in targets:
-            scan = b.get("scan") or {}
-            put, _ = stk.select_put(b)
-            png = ch.render_trade_chart(b["ticker"], scan, put, scan.get("vp"))
-            if png:
-                cid = f"chart-{b['ticker'].lower()}"
-                chart_images[cid] = png
-                b["_chart_cid"] = cid
-        log.info(f"  {len(chart_images)}/{len(targets)} rendered")
+        try:
+            import charts as ch
+            import strikes as stk
+            targets = [b for b in pinned_bundles
+                       if (b.get("gate_status") or {}).get("verdict") == "SETUP LIVE"]
+            targets += list(tier1)
+            log.info(f"\nRendering {len(targets)} charts...")
+            for b in targets:
+                scan = b.get("scan") or {}
+                put, _ = stk.select_put(b)
+                png = ch.render_trade_chart(b["ticker"], scan, put, scan.get("vp"))
+                if png:
+                    cid = f"chart-{b['ticker'].lower()}"
+                    chart_images[cid] = png
+                    b["_chart_cid"] = cid
+            log.info(f"  {len(chart_images)}/{len(targets)} rendered")
+        except Exception as e:
+            log.warning(f"Charts skipped, email will send without them: {e}")
+            chart_images = {}
 
     # Step 7 — build + send the watchlist email
     log.info("\nBuilding watchlist email...")

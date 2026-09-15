@@ -80,6 +80,10 @@ def weekly_candle(ticker: str, weeks: int = 60, allow_partial: bool = False) -> 
         if partial and not allow_partial and len(df) >= 13:
             df = df.iloc[:-1]           # drop the unfinished week
             partial = False
+            # week_end must be RECOMPUTED. It was derived from the bar we just
+            # dropped, so leaving it produced "week ending September 18" on a
+            # 2026-09-14 run: a future date attached to the prior week's numbers.
+            week_end = (df.index[-1] + pd.Timedelta(days=4)).date()
         cur, prev = df.iloc[-1], df.iloc[-2]
 
         o, h, l, c = (float(cur["Open"]), float(cur["High"]),
@@ -162,6 +166,13 @@ def weekly_candle(ticker: str, weeks: int = 60, allow_partial: bool = False) -> 
         return {
             "week_ending": str(week_end),
             "in_progress": bool(partial),
+            # Spelled out because the card shows TODAY's price while the candle
+            # describes a week that closed days earlier. Without this the model
+            # has no way to tell the reader which number is which.
+            "note": ("This bar is still open; values are week-to-date."
+                     if partial else
+                     f"This week closed on {week_end}. The current price shown "
+                     f"elsewhere is later than this close."),
             "open": round(o, 2), "high": round(h, 2),
             "low": round(l, 2), "close": round(c, 2),
             "pct_change": round((c / pc - 1) * 100, 2) if pc else None,
@@ -272,6 +283,83 @@ def gate_status(scan: dict, options: dict) -> dict:
 
     return {"verdict": verdict, "gates": gates, "blocking": blocking,
             "all_clear": not blocking}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Verdict hysteresis
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# On 2026-09-14 INTU went AVOID to SETUP LIVE. On 2026-09-15 IIPR went SETUP
+# LIVE to AVOID. Between those two runs IIPR's structure read 34 then 12, AVAV's
+# crash read 61 then 39, ACN's crash read 85 then 40, and every one of the four
+# nearest support confluences relocated by 20% or more. Levels built from moving
+# averages and anchored VWAPs do not move like that in a day.
+#
+# Part of it is stale reads. But part is structural and cannot be debounced
+# away: CrashScore is 50% weighted on the percentile rank of the 5-day return.
+# When one large day enters or leaves that window the percentile can travel from
+# the 90th to the 20th, moving the score 30 points on its own. A gate built on
+# that will flip a verdict roughly every time the stock has a big day.
+#
+# Scoring changes are a separate, larger job. What must not happen meanwhile is
+# Sean acting on SETUP LIVE and seeing it reverse on the next run, because the
+# credibility cost of that is far higher than a day's delay.
+#
+# So a verdict CHANGE must be observed twice before it is published. The first
+# observation is recorded as pending and the previous verdict stands. If the
+# next run agrees, it is promoted. If it does not, it was noise and nothing was
+# ever shown to the reader.
+#
+# Cost: a real change is reported one run late. Wed/Fri/Sun cadence makes that
+# about two days. That is the right trade against publishing reversals.
+
+CONFIRM_VERDICT_CHANGES = os.environ.get("CONFIRM_VERDICT_CHANGES", "1") != "0"
+
+# A verdict may always move STRAIGHT to these without confirmation. Waiting to
+# warn is not symmetric with waiting to recommend: if the gates say stop, say
+# stop now. Only upgrades have to earn a second observation.
+IMMEDIATE_VERDICTS = {"AVOID"}
+
+
+def stabilize_verdict(bundle: dict, prev: dict) -> dict:
+    """
+    Require a verdict change to hold for two runs before publishing it.
+
+    Mutates bundle["gate_status"] so everything downstream — email, prompt,
+    saved state — sees the confirmed verdict rather than the raw one. The raw
+    value is kept for the log.
+    """
+    gs = bundle.get("gate_status") or {}
+    raw = gs.get("verdict")
+    if not CONFIRM_VERDICT_CHANGES or not raw:
+        return gs
+
+    confirmed = prev.get("verdict")
+    pending = prev.get("pending_verdict")
+
+    if not confirmed:
+        gs["_raw_verdict"] = raw
+        return gs                       # first sighting, nothing to compare
+
+    if raw == confirmed:
+        gs["_pending_cleared"] = bool(pending)
+        return gs                       # unchanged; drop any stale pending
+
+    if raw in IMMEDIATE_VERDICTS:
+        gs["_verdict_note"] = f"changed from {confirmed}, published immediately"
+        return gs                       # never delay a warning
+
+    if pending == raw:
+        gs["_verdict_note"] = f"{confirmed} to {raw}, confirmed on a second run"
+        return gs                       # second sighting agrees, publish it
+
+    # First sighting of an upgrade. Hold the old verdict and record the candidate.
+    gs["_raw_verdict"] = raw
+    gs["_pending_verdict"] = raw
+    gs["verdict"] = confirmed
+    gs["_verdict_note"] = (f"reading {raw} this run, holding {confirmed} until a "
+                           f"second run agrees")
+    return gs
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -415,6 +503,11 @@ padding one teaches the reader to skim the ones that matter.
 If a score change is marked unconfirmed, it reversed a recent move in the \
 opposite direction and is probably measurement noise. Do not report it.
 
+If gate_status contains _verdict_note saying a verdict is being held pending a \
+second run, write to the PUBLISHED verdict, not the raw one, and say in one \
+sentence that the gates read differently this run and the change will be \
+confirmed or dropped next run. Do not argue for the unpublished verdict.
+
 Never imply that a small distance to a threshold means a setup is close to \
 triggering. A structure score of 24 against a floor of 25 is failing, and the \
 one-point gap is arithmetic, not a forecast. Report the distance and what would \
@@ -556,7 +649,11 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
 
     kwargs = {
         "model": model,
-        "max_tokens": 700 if not trigger else 1100,
+        # 700 truncated IIPR mid-sentence on 2026-09-14. A coverage note carries
+        # the candle, the level, the contract and the gate story; with search
+        # results on top it needs real headroom. Cheap insurance against an
+        # email that stops mid-word.
+        "max_tokens": 1400 if not trigger else 2000,
         "output_config": {"effort": effort},
         "system": (COVERAGE_SYSTEM_PROMPT
                    + ("\n" + SEARCH_INSTRUCTIONS if trigger else "")
@@ -681,6 +778,13 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
                           f'background:#0f1419;border-radius:5px;padding:6px 9px;'
                           f'margin-bottom:10px">{txt}</div>')
 
+        note = gs.get("_verdict_note")
+        note_html = ""
+        if note and "holding" in note:
+            note_html = (f'<div style="font-size:11px;color:#f59e0b;'
+                         f'background:#1c1508;border-radius:5px;padding:6px 9px;'
+                         f'margin-bottom:10px">Verdict {note}.</div>')
+
         blockers = gs.get("blocking") or []
         blockers_html = ""
         if blockers:
@@ -719,6 +823,7 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
           </div>
           {(__import__("positions").render_position_badge(b["position"]) if b.get("position") else "")}
           {(__import__("charts").chart_img_tag(b["_chart_cid"]) if b.get("_chart_cid") else "")}
+          {note_html}
           {delta_html}
           {f'<div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>' if blurb_html else ''}
           {blockers_html}
@@ -803,6 +908,7 @@ def save_state(bundles: list[dict], run_date: str, path: str = STATE_PATH) -> No
             "crash": scan.get("crash_score"),
             "structure": scan.get("structure_score"),
             "verdict": gs.get("verdict"),
+            "pending_verdict": gs.get("_pending_verdict"),
             "blocking": [g["gate"] for g in (gs.get("blocking") or [])],
             "put_strike": (put or {}).get("strike"),
             "put_expiry": (put or {}).get("expiration"),
@@ -920,11 +1026,19 @@ def delta_sentence(d: dict) -> str:
         bits.append(f"now blocked on {', '.join(d['gates_newly_blocking'])}")
     # A score move can be the ONLY material change (IIPR, 2026-09-09: structure
     # +9 with price flat). Without this the line renders as a bare "(since ...)".
-    for key, label in (("structure", "structure"), ("crash", "crash"),
-                       ("trend", "trend")):
+    # Direction of GOODNESS differs by score: trend and structure up is better,
+    # crash up is worse. "crash +48" next to "SETUP LIVE" read as good news on
+    # 2026-09-14 when it meant crash risk had nearly quadrupled.
+    for key, label, higher_is_better in (("structure", "structure", True),
+                                         ("crash", "crash risk", False),
+                                         ("trend", "trend", True)):
         v = d.get(f"{key}_change")
-        if v is not None and abs(v) >= MATERIAL_SCORE_PTS:
-            bits.append(f"{label} {v:+.0f}")
+        if v is None or abs(v) < MATERIAL_SCORE_PTS:
+            continue
+        direction = "up" if v > 0 else "down"
+        good = (v > 0) == higher_is_better
+        bits.append(f"{label} {direction} {abs(v):.0f}"
+                    + ("" if good else " (worse)"))
     if (c := d.get("put_credit_change_pct")) is not None and abs(c) >= MATERIAL_CREDIT_PCT:
         bits.append(f"premium {c:+.0f}%")
     if not bits:

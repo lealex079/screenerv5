@@ -961,6 +961,17 @@ def main():
             # Sunday reports the CLOSED week. Midweek that bar has not
             # changed, so re-reporting it would be noise — show week-to-date.
             wc = cov.weekly_candle(d["ticker"], allow_partial=(mode == "coverage"))
+            # If today's price is EXACTLY last week's close, the daily bar is
+            # almost certainly stale rather than genuinely unchanged. All four
+            # pinned names hit this on 2026-09-15 and it drove four spurious
+            # "price moved" deltas and four news lookups.
+            wclose = (wc or {}).get("close")
+            if (wclose and d.get("price")
+                    and abs(float(d["price"]) - float(wclose)) < 0.005):
+                log.warning(f"  {d['ticker']}: price {d['price']} equals the "
+                            f"{wc.get('week_ending')} weekly close exactly — "
+                            f"the daily bar may be stale")
+                d["_stale_suspect"] = True
             if wc.get("error"):
                 log.warning(f"  {d['ticker']}: candle unavailable — {wc['error']}")
             gs = cov.gate_status(d, opts)
@@ -991,6 +1002,12 @@ def main():
         prior = cov.load_state()
         n_material = n_search = 0
         for b in pinned_bundles:
+            # Hold an unconfirmed verdict change before anything downstream sees
+            # it, so the delta line, the prompt and the saved state all agree on
+            # what was actually published.
+            gs = cov.stabilize_verdict(b, prior.get(b["ticker"], {}))
+            if gs.get("_verdict_note"):
+                log.info(f"  {b['ticker']}: verdict {gs['_verdict_note']}")
             b["delta"] = cov.compute_delta(prior.get(b["ticker"], {}), b)
             if b["delta"].get("material"):
                 n_material += 1
@@ -1015,9 +1032,12 @@ def main():
     if ENABLE_PREMIUM and mode != "coverage" and bundles:
         try:
             import premium as prem
-            chosen = {b["ticker"] for b in tier1}
+            # Exclude tier2 as well as tier1. On 2026-09-14 COP and CF were
+            # listed in the premium table AND again in "also cleared the gates",
+            # which makes the email look padded and the counts unreliable.
+            chosen = {b["ticker"] for b in tier1} | {b["ticker"] for b in tier2}
             premium_names = prem.rank_premium(bundles, exclude=chosen)
-            benchmarks = prem.build_benchmarks(bundles)
+            benchmarks = prem.build_benchmarks(bundles, extra=pinned_bundles)
             log.info(f"Premium track: {len(premium_names)} names above "
                      f"{prem.MIN_ANN_YIELD}% annualized with "
                      f"IV/HV >= {prem.MIN_IV_HV}")

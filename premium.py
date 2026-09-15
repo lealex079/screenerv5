@@ -164,11 +164,19 @@ def rank_premium(bundles: list[dict], exclude: set[str] | None = None) -> list[d
     return out
 
 
-def build_benchmarks(bundles: list[dict]) -> list[dict]:
-    """AVAV and MU, whatever their state. Reference rows, never recommendations."""
+def build_benchmarks(bundles: list[dict], extra: list[dict] | None = None) -> list[dict]:
+    """
+    AVAV and MU, whatever their state. Reference rows, never recommendations.
+
+    `bundles` holds only the pre-gate survivors, so on 2026-09-14 AVAV showed
+    "no data this run" even though it had been scanned and written up as a
+    pinned name three sections higher in the same email. `extra` takes the
+    pinned bundles so anything already scanned can be found.
+    """
+    pool = list(bundles) + list(extra or [])
     rows = []
     for t in BENCHMARKS:
-        b = next((x for x in bundles if x["ticker"] == t), None)
+        b = next((x for x in pool if x["ticker"] == t), None)
         if not b:
             rows.append({"ticker": t, "unavailable": True})
             continue

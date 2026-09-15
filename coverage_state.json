@@ -1,92 +1,97 @@
 {
   "ACN": {
     "blocking": [
+      "crash",
       "earnings"
     ],
-    "crash": 39.9,
+    "crash": 91.9,
     "date": "2026-09-15",
+    "pending_verdict": null,
     "prev": {
-      "crash": 85.0,
-      "date": "2026-09-14",
-      "price": 193.76,
-      "structure": 44.0,
-      "trend": 67.4,
+      "crash": 39.9,
+      "date": "2026-09-15",
+      "price": 183.9,
+      "structure": 62.0,
+      "trend": 63.1,
       "verdict": "AVOID"
     },
-    "price": 183.9,
-    "put_credit": 4.3,
+    "price": 197.18,
+    "put_credit": 3.8,
     "put_expiry": "Oct 16, 2026",
     "put_strike": 175.0,
-    "structure": 62.0,
+    "structure": 46.0,
     "support": null,
-    "trend": 63.1,
+    "trend": 63.5,
     "verdict": "AVOID"
   },
   "AVAV": {
     "blocking": [
       "structure"
     ],
-    "crash": 38.6,
+    "crash": 59.5,
     "date": "2026-09-15",
+    "pending_verdict": null,
     "prev": {
-      "crash": 61.4,
-      "date": "2026-09-14",
-      "price": 155.82,
-      "structure": 17.0,
-      "trend": 60.0,
+      "crash": 38.6,
+      "date": "2026-09-15",
+      "price": 146.71,
+      "structure": 24.0,
+      "trend": 58.0,
       "verdict": "AVOID"
     },
-    "price": 146.71,
-    "put_credit": 3.0,
+    "price": 156.44,
+    "put_credit": 4.3,
     "put_expiry": "Oct 16, 2026",
-    "put_strike": 135.0,
-    "structure": 24.0,
+    "put_strike": 140.0,
+    "structure": 21.0,
     "support": null,
-    "trend": 58.0,
+    "trend": 59.5,
     "verdict": "AVOID"
   },
   "IIPR": {
-    "blocking": [
-      "structure"
-    ],
-    "crash": 45.4,
+    "blocking": [],
+    "crash": 49.1,
     "date": "2026-09-15",
+    "pending_verdict": "SETUP LIVE",
     "prev": {
-      "crash": 51.6,
-      "date": "2026-09-14",
-      "price": 56.65,
-      "structure": 34.0,
-      "trend": 51.1,
-      "verdict": "SETUP LIVE"
+      "crash": 45.4,
+      "date": "2026-09-15",
+      "price": 56.25,
+      "structure": 12.0,
+      "trend": 49.0,
+      "verdict": "AVOID"
     },
-    "price": 56.25,
+    "price": 56.37,
     "put_credit": 0.4,
     "put_expiry": "Oct 16, 2026",
     "put_strike": 50.0,
-    "structure": 12.0,
+    "structure": 35.0,
     "support": null,
-    "trend": 49.0,
+    "trend": 51.1,
     "verdict": "AVOID"
   },
   "INTU": {
-    "blocking": [],
-    "crash": 19.9,
+    "blocking": [
+      "crash"
+    ],
+    "crash": 70.8,
     "date": "2026-09-15",
+    "pending_verdict": "NOT YET",
     "prev": {
-      "crash": 58.8,
-      "date": "2026-09-14",
-      "price": 338.18,
-      "structure": 32.0,
-      "trend": 58.3,
+      "crash": 19.9,
+      "date": "2026-09-15",
+      "price": 321.57,
+      "structure": 40.0,
+      "trend": 53.2,
       "verdict": "SETUP LIVE"
     },
-    "price": 321.57,
-    "put_credit": 4.5,
+    "price": 335.73,
+    "put_credit": 5.1,
     "put_expiry": "Oct 16, 2026",
     "put_strike": 300.0,
-    "structure": 40.0,
+    "structure": 34.0,
     "support": null,
-    "trend": 53.2,
+    "trend": 54.2,
     "verdict": "SETUP LIVE"
   }
 }

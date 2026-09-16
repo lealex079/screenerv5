@@ -1081,8 +1081,30 @@ def main():
                 b["blurb"] = cov.generate_coverage_blurb(b, client, CLAUDE_MODEL, "medium")
                 log.info(f"  [{i}/{len(writing)}] {b['ticker']}: note ok")
             except Exception as e:
-                b["blurb"] = f"[Coverage note failed: {e}]"
-                log.error(f"  [{i}/{len(writing)}] {b['ticker']}: FAILED — {e}")
+                err_text = str(e)
+                # Billing/credit exhaustion is systemic, not a one-off. On
+                # 2026-09-16 it repeated on every remaining call and the raw
+                # message, including the words "credit balance is too low",
+                # went out to Sean and Frank three times in the same email.
+                # Stopping here means NO email goes out on this failure mode,
+                # rather than one with the account's billing status in it.
+                # ALERT_TO gets told; the client list never sees this class of
+                # error at all.
+                if "credit balance" in err_text.lower() or "billing" in err_text.lower():
+                    log.error(f"  [{i}/{len(writing)}] {b['ticker']}: Anthropic "
+                              f"API credits exhausted. Aborting before the email "
+                              f"is built rather than sending broken notes.")
+                    raise RuntimeError(
+                        "Anthropic API credit balance is too low. Add credits at "
+                        "console.anthropic.com, then rerun. No email was sent."
+                    ) from e
+                # Anything else is treated as a one-off: log it, degrade this
+                # one card to the mechanical box, and keep going. The reader
+                # never sees exception text, only a plain "unavailable" note.
+                b["blurb"] = ""
+                b["_note_failed"] = True
+                log.error(f"  [{i}/{len(writing)}] {b['ticker']}: note failed, "
+                          f"showing status only — {e}")
             time.sleep(0.5)
 
     log.info(f"\nGenerating {len(tier1)} triage blurbs ({CLAUDE_MODEL}, medium)...")

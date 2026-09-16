@@ -315,10 +315,17 @@ def gate_status(scan: dict, options: dict) -> dict:
 
 CONFIRM_VERDICT_CHANGES = os.environ.get("CONFIRM_VERDICT_CHANGES", "1") != "0"
 
-# A verdict may always move STRAIGHT to these without confirmation. Waiting to
-# warn is not symmetric with waiting to recommend: if the gates say stop, say
-# stop now. Only upgrades have to earn a second observation.
-IMMEDIATE_VERDICTS = {"AVOID"}
+# Only a verdict LANDING ON THIS needs confirmation. Every other verdict is a
+# "not tradeable right now" signal and publishes immediately, the same
+# reasoning that lets AVOID through without delay.
+#
+# The 2026-09-15 -> 09-16 INTU sequence caught a gap in an earlier version of
+# this rule, which special-cased the literal string "AVOID" rather than
+# checking against the one favorable verdict. INTU's crash gate tripped and
+# gate_status() returned "NOT YET" (AVOID requires a STRUCTURE or EARNINGS
+# block specifically), so the old check let it sit pending for an extra run
+# even though "the crash gate just tripped" deserved to be said immediately.
+CONFIRM_ON_VERDICT = "SETUP LIVE"
 
 
 def stabilize_verdict(bundle: dict, prev: dict) -> dict:
@@ -345,7 +352,7 @@ def stabilize_verdict(bundle: dict, prev: dict) -> dict:
         gs["_pending_cleared"] = bool(pending)
         return gs                       # unchanged; drop any stale pending
 
-    if raw in IMMEDIATE_VERDICTS:
+    if raw != CONFIRM_ON_VERDICT:
         gs["_verdict_note"] = f"changed from {confirmed}, published immediately"
         return gs                       # never delay a warning
 
@@ -755,6 +762,17 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
 
         raw_blurb = (b.get("blurb") or "").strip()
         blurb_html = ("<br>".join(raw_blurb.split("\n")) if raw_blurb else "")
+
+        # A per-ticker generation failure degrades to this, never to whatever
+        # the exception said. On 2026-09-16 the raw text included the account's
+        # Anthropic billing message, sent verbatim to Sean and Frank three times.
+        note_failed_html = ""
+        if b.get("_note_failed") and not blurb_html:
+            note_failed_html = (
+                '<div style="font-size:11px;color:#64748b;background:#0f1419;'
+                'border-radius:5px;padding:6px 9px;margin-bottom:10px">'
+                'Written note unavailable this run. The status above and the '
+                'blocking gate below are still accurate.</div>')
         price = scan.get("price") or 0
         ts, cs, ss = (scan.get("trend_score"), scan.get("crash_score"),
                       scan.get("structure_score"))
@@ -824,6 +842,7 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
           {(__import__("positions").render_position_badge(b["position"]) if b.get("position") else "")}
           {(__import__("charts").chart_img_tag(b["_chart_cid"]) if b.get("_chart_cid") else "")}
           {note_html}
+          {note_failed_html}
           {delta_html}
           {f'<div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>' if blurb_html else ''}
           {blockers_html}

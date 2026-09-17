@@ -16,18 +16,30 @@ and it runs as a SECOND section rather than replacing the first. Sean already ha
 XOM puts on and said the list was useful; trading his use case for Frank's would
 be a bad deal for both of them.
 
-What is relaxed, and why only this:
-  - The structure gate is dropped. That is the one gate with no evidence behind
-    it: the backtest found structure_score monotonically wrong-signed, so gating
-    on it is the least defensible constraint in the system and it is likely
-    excluding volatile names for no reason.
-  - The crash gate STAYS. It is the one that came closest to holding up, and it
-    is what separates "premium is rich" from "premium is rich because the market
-    knows something."
-  - Earnings and liquidity stay. Neither is a judgment call.
+CORRECTION, 2026-09-17: this module originally dropped the structure gate
+entirely, reasoning that structure_score had "no evidence behind it." That
+conflated two separate, and separately confirmed, findings from the canonical
+validation writeup:
 
-If Frank ever asks why one gate went and the others did not, that is the answer:
-the one with no evidence was relaxed, the ones with evidence were kept.
+  1. structure_score has no DIRECTIONAL signal — it does not predict which
+     names go up, so using it to RANK candidates adds nothing. True, and
+     unaffected by this correction.
+  2. The structure < 25 FLOOR is independently validated as a tail-risk cap:
+     worst-decile CVaR -19% vs -15%, Newey-West t=-4.8. That is a real, tested
+     downside protection, and it is exactly the protection a wider, more
+     volatile universe needs most. Dropping it from THIS track, of all tracks,
+     removed the guard where it mattered most.
+
+So the floor is restored as a hard gate here. What genuinely has no evidence
+behind it, and stays dropped, is using structure_score to RANK or PREFER one
+passing name over another — this module still sorts purely on annualized yield.
+Gate on it, do not rank on it. Those are different claims and only one of them
+was ever unsupported.
+
+  - Crash gate stays. Closest to holding up, and separates "premium is rich"
+    from "premium is rich because the market knows something."
+  - Structure gate is now a floor, restored. See above.
+  - Earnings and liquidity stay. Neither was ever a judgment call.
 """
 
 import logging
@@ -86,14 +98,24 @@ def finviz_volatile_filters() -> list[str]:
 
 
 def premium_gates(scan: dict, options: dict) -> list[str]:
-    """check_gates minus the structure gate. See the module docstring."""
+    """
+    check_gates, with structure now a floor rather than dropped.
+
+    Restored 2026-09-17 per validation-findings.md: the <25 cap is a validated
+    tail-risk protection (see module docstring), not a ranking input. This
+    track still ranks purely on yield — the floor only removes the falling-
+    knife names, it never prefers one passing name over another.
+    """
     active = []
     cs = scan.get("crash_score")
+    ss = scan.get("structure_score")
     liq = (options or {}).get("liquidity_score")
     ed = scan.get("earnings_days")
 
     if cs is not None and cs >= wr.CRASH_GATE:
         active.append(f"crash {cs:.0f}")
+    if ss is not None and ss < wr.STRUCTURE_GATE:
+        active.append(f"structure {ss:.0f}")
     if liq is not None and liq < wr.LIQUIDITY_GATE:
         active.append(f"liquidity {liq:.0f}")
     if ed is not None and 0 <= ed <= wr.EARNINGS_GATE_DAYS:
@@ -278,11 +300,13 @@ def render_premium_section(names: list[dict], benchmarks: list[dict]) -> str:
       </div>
       <div style="font-size:11px;color:#64748b;margin-bottom:12px;line-height:1.5">
         A wider screen: smaller and more volatile names, ranked on annualized
-        yield rather than overall setup quality. The crash, earnings and
-        liquidity tests still apply. The structure test does not, because it is
-        the one with no statistical support behind it. Expect assignment here to
-        be routine rather than rare, since that is what the extra premium pays
-        for.
+        yield rather than overall setup quality. The crash, structure, earnings
+        and liquidity floors all still apply, the same falling-knife protection
+        as the core screen. What is different here is the ranking: this list
+        sorts purely on yield, since structure_score has no directional signal
+        and is used only as a floor, never to prefer one passing name over
+        another. Expect assignment here to be routine rather than rare, since
+        that is what the extra premium pays for.
       </div>
       <div style="background:#1a2332;border-radius:8px;border:1px solid #2a3a4e;padding:14px 16px">
         {body}

@@ -370,6 +370,89 @@ def stabilize_verdict(bundle: dict, prev: dict) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Fundamentals, regime, and flow — from the Equity Research project's own
+# methodology files (knowledge_1, knowledge_8), not previously surfaced to the
+# coverage notes at all. Every real coverage email through 2026-09-17 discussed
+# gates, the candle, the level, and the trade, and never once mentioned a P/E
+# ratio, revenue growth, or margin, despite scan.py computing all of them every
+# run. This closes that gap using the project's own thresholds rather than
+# inventing new ones.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# knowledge_1: Layer 1 valuation thresholds. Absolute, not relative — a 30 P/E
+# is normal for growth and expensive for a utility, which is why the read is
+# reported alongside the regime rather than as a standalone verdict.
+VALUATION_THRESHOLDS = {
+    "pe":      (15, 35),
+    "pb":      (2, 10),
+    "ps":      (2, 10),
+    "ev_ebit": (12, 30),
+}
+
+
+def _valuation_read(value: float, cheap_below: float, expensive_above: float) -> str:
+    if value < cheap_below:
+        return "cheap"
+    if value > expensive_above:
+        return "expensive"
+    return "moderate"
+
+
+def fundamentals_context(scan: dict) -> dict:
+    """
+    Valuation, quality, regime, and flow-divergence — all already computed by
+    scan.py, just not previously threaded into the coverage payload.
+
+    metrics_used respects the sector carve-outs from knowledge_1 (banks: P/E +
+    P/B only; REITs: P/B + P/S only), computed upstream in scan.py — this
+    function only reads what's already been filtered.
+    """
+    metrics_used = scan.get("metrics_used") or ["pe", "pb", "ps", "ev_ebit"]
+    valuation = {}
+    for key in metrics_used:
+        val = scan.get(key)
+        if val is None or key not in VALUATION_THRESHOLDS:
+            continue
+        lo, hi = VALUATION_THRESHOLDS[key]
+        valuation[key] = {"value": val, "read": _valuation_read(val, lo, hi)}
+
+    gm, fcf, rg = scan.get("gross_margin"), scan.get("fcf_yield"), scan.get("rev_growth")
+    quality = {}
+    if gm is not None:
+        quality["gross_margin"] = {"value": gm,
+                                   "read": ("pricing power" if gm > 60 else
+                                            "commoditized" if gm < 20 else "moderate")}
+    if fcf is not None:
+        quality["fcf_yield"] = {"value": fcf,
+                                "read": ("strong" if fcf > 3 else
+                                         "weak" if fcf < 1 else "moderate")}
+    if rg is not None:
+        quality["rev_growth"] = {"value": rg}   # context-dependent, no threshold per knowledge_1
+
+    cmf, obv = scan.get("cmf"), scan.get("obv_roc")
+    divergence = None
+    if cmf is not None and obv is not None:
+        if cmf > 0.05 and obv < -5:
+            divergence = ("CMF positive but OBV negative: price is closing near "
+                          "its highs while cumulative volume is net negative. "
+                          "knowledge_1 flags this as a possible sign of "
+                          "distribution under the surface.")
+        elif cmf < -0.05 and obv > 5:
+            divergence = ("CMF negative but OBV positive: price is closing near "
+                          "its lows while cumulative volume is net positive, an "
+                          "unusual combination worth naming rather than glossing "
+                          "over.")
+
+    return {
+        "valuation": valuation or None,
+        "quality": quality or None,
+        "regime": scan.get("regime"),   # scan.py's own label, matches knowledge_1's table
+        "flow_divergence": divergence,
+        "earnings_days": scan.get("earnings_days"),  # always surfaced; see prompt rule
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Coverage blurb
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -398,64 +481,51 @@ SEARCH_BLOCKED_DOMAINS = [
 ]
 
 
-def search_trigger(delta: dict, scan: dict) -> str | None:
+def search_trigger(delta: dict, scan: dict, verdict: str | None = None) -> str | None:
     """
-    Should this ticker get a news lookup? Returns the reason, or None.
+    Should this ticker get a news lookup? Returns the reason (for the log), or
+    None only when search is switched off entirely.
 
-    Every trigger is something already measured. News explains a move that has
-    happened; it is not used to predict one, and it never gets a vote on the
-    verdict.
+    This used to be gated on a number having moved first, reasoning about cost
+    control after 2026-09-16's billing exhaustion. That gate was wrong for what
+    these reports are actually for: "keep them updated as new news comes out,
+    or if prices change" is two separate conditions, and gating on materiality
+    only ever covered the second one. News that breaks overnight and has not
+    yet moved the price by the time a 6am Wed/Fri run fires would never have
+    been searched for at all. So this checks every pinned name every run.
+    delta and verdict are accepted for the log line only, not to decide
+    whether to search.
     """
-    if not ENABLE_SEARCH or not delta:
+    if not ENABLE_SEARCH:
         return None
-    if delta.get("first_run"):
-        return "first report on this name"
-
-    if "verdict_change" in delta:
-        return f"verdict moved ({delta['verdict_change'].replace('->', 'to')})"
-
-    # Price move scaled to the name's own volatility, so a 4% day flags on ACN
-    # but not on a name that routinely moves 6%.
-    pct = delta.get("price_change_pct")
-    rvol = scan.get("rvol_10d")            # annualised %, from scan.py
-    if pct is not None and rvol:
-        daily = rvol / (252 ** 0.5)        # -> typical daily move, %
-        if daily > 0 and abs(pct) >= 1.5 * daily:
-            return f"price moved {pct:+.1f}%, over 1.5x its typical daily range"
-    elif pct is not None and abs(pct) >= 6.0:
-        return f"price moved {pct:+.1f}%"
-
-    if delta.get("gates_cleared"):
-        return f"cleared {', '.join(delta['gates_cleared'])}"
-    if delta.get("gates_newly_blocking"):
-        return f"newly blocked on {', '.join(delta['gates_newly_blocking'])}"
-    if (c := delta.get("put_credit_change_pct")) is not None and abs(c) >= 25:
-        return f"option premium moved {c:+.0f}%"
-
-    ed = scan.get("earnings_days")
-    if ed is not None and 0 <= ed <= 7:
-        return f"earnings in {ed} days"
-    return None
-
-
+    if verdict:
+        return f"scheduled check ({verdict})"
+    return "scheduled check"
 SEARCH_INSTRUCTIONS = """
-A "search_trigger" field is present, which means something in the numbers moved \
-and you may use web search to find out why.
+Search runs on every ticker every time now, not only when a number moved. A \
+flat score does not mean a quiet week: an 8-K can drop, an earnings date can be \
+preannounced, or an analyst can act before the price catches up. This IS the \
+report's job, not an add-on to it.
 
 Rules for searching:
-- Search only for what explains the trigger. Do not go looking for general \
-commentary, price targets, or outlooks.
-- Restrict yourself to news published since the "since" date in the delta block. \
-Older items did not cause this move.
-- Prefer primary sources: SEC filings such as 8-K and 10-Q, company press \
-releases, and earnings call transcripts. Then major wire services. Ignore \
-opinion pieces, price-target changes, and anything that reads as a stock tip.
-- If you find nothing published in that window that plausibly explains the \
-move, say exactly that in one sentence and move on. Finding nothing is a \
-normal and useful result. Do not substitute a loosely related headline.
-- Report at most two items, each in one sentence, with the date and source.
-- News explains what already happened in the numbers. It does not change your \
-verdict. The verdict comes from the gates.
+- Search for what has been published since the "since" date in the delta \
+block, or roughly the past week on a first report.
+- Prefer primary sources: 8-K, 10-Q, 10-K, earnings call transcripts, and \
+company press releases, over aggregators, price-target pieces, and stock-tip \
+sites.
+- Every source needs a specific date. If you cannot confirm one, leave that \
+item out rather than citing it undated.
+- If you find something, say whether it lines up with what the numbers are \
+doing this week or not. If a real move has nothing behind it in the window, \
+that gap is itself worth a sentence.
+- If genuinely nothing was published, say so plainly in one sentence. That is \
+a normal, expected, useful result, not a failure. Never manufacture \
+significance out of routine analyst commentary or sector-wide chatter to avoid \
+saying nothing was found.
+- Report at most two items, each in one or two sentences, with the date and \
+source.
+- News explains what already happened. It does not change your verdict. The \
+verdict comes from the gates.
 """
 
 
@@ -475,14 +545,16 @@ measurements say. Do not add pattern names that are not in the patterns list. \
 If the candle is marked in_progress, call it week to date and do not describe \
 it as a close.
 
-WHAT TO COVER, in this order, 4 to 6 sentences total, no headers:
+WHAT TO COVER, in this order, 5 to 7 sentences total, no headers:
 
 1. The verdict in caps: SETUP LIVE, NOT YET, or AVOID. Then one sentence on \
 what the stock is doing.
-2. The week, using the candle measurements. Where price closed in the range and \
+2. Whatever the news and filings check this run found, or plainly that \
+nothing was found, plus a brief fundamental clause when it helps explain it.
+3. The week, using the candle measurements. Where price closed in the range and \
 how the range and volume compare to normal.
-3. The nearest support confluence, with its price and what forms it.
-4. If SETUP LIVE, the put: strike, expiry, DTE, delta, credit, annualized yield, \
+4. The nearest support confluence, with its price and what forms it.
+5. If SETUP LIVE, the put: strike, expiry, DTE, delta, credit, annualized yield, \
 breakeven, and how the breakeven sits against that support.
 
 The strike was chosen FROM the support level, not from a delta target. When \
@@ -491,7 +563,7 @@ that zone, treating the delta as the result rather than the goal. When \
 strike_basis is "delta", no support zone was strong or near enough to anchor to. \
 Say that plainly: this is the 0.20 delta contract and there is no structural \
 level behind it.
-5. If NOT YET or AVOID, which gate is blocking, its value and threshold, and \
+6. If NOT YET or AVOID, which gate is blocking, its value and threshold, and \
 what would have to change. This is the most useful sentence in the note. Be \
 specific.
 
@@ -500,12 +572,30 @@ shown the earlier note, only measured changes since it. Lead with what moved, \
 using those numbers, and reach your verdict from today's data rather than \
 defending a previous one.
 
-If delta.material is false, write TWO SENTENCES TOTAL and stop. The first gives \
-the verdict and says nothing material changed. The second names the blocking \
-gate with its value and threshold. Nothing else. Do not describe the candle, do \
-not restate the support level, do not mention small moves in price or premium \
-that fell below the materiality floor. A quiet week gets a quiet note, and \
-padding one teaches the reader to skim the ones that matter.
+If delta.material is false, write TWO SENTENCES and stop, UNLESS the news \
+check found something or fundamentals.flow_divergence is present, in which \
+case one more sentence is permitted for that. Otherwise: the first gives the \
+verdict and says nothing material changed, the second names the blocking gate \
+with its value and threshold. Do not describe the candle, do not restate the \
+support level, do not mention small moves in price or premium that fell below \
+the materiality floor. A quiet week gets a quiet note, and padding one teaches \
+the reader to skim the ones that matter.
+
+FUNDAMENTALS — light background only, not a second scoring layer. When \
+fundamentals.valuation is present (cheap under P/E 15, expensive over 35, \
+similarly for P/B, P/S, EV/EBIT) and it helps explain the news or the move, \
+give it a clause, not a paragraph. Mention the earnings countdown from \
+fundamentals.earnings_days somewhere in the note regardless of whether it is \
+the blocking gate. If fundamentals.flow_divergence is present, include it in \
+one sentence: it is exactly the kind of thing a reader would want flagged and \
+would not otherwise see.
+
+structure_score, liquidity_score, IV/HV, vol_rank, and any trade grade are \
+descriptive and cross-sector-sane, not regression-validated the way TrendScore \
+and CrashScore are. Keep the register appropriately hedged when you cite them \
+("the vol proxy reads...", "liquidity comes in at...") rather than stating them \
+with the same certainty as crash or trend. One clean mention covers this; do \
+not append a disclaimer to every sentence in what is meant to be a short note.
 
 If a score change is marked unconfirmed, it reversed a recent move in the \
 opposite direction and is probably measurement noise. Do not report it.
@@ -556,8 +646,6 @@ Do not editorialize about the setup's quality beyond the verdict and the reason.
 The reader decides. Your job is to report accurately and say what is blocking.
 
 End with nothing. No sign-off, no "let me know"."""
-
-
 def _position_prompt() -> str:
     try:
         import positions
@@ -642,6 +730,7 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
                 payload["strike_rationale"] = strikes.anchor_sentence(put)
     except Exception:
         pass
+    payload["fundamentals"] = fundamentals_context(bundle.get("scan") or {})
     payload["weekly_candle"] = bundle.get("weekly_candle") or {}
     payload["gate_status"] = bundle.get("gate_status") or {}
     if bundle.get("position"):
@@ -749,7 +838,12 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
         return ""
 
     # A run is never "quiet" if money is at risk on any of these names.
-    if all_quiet(pinned) and not any(b.get("position") for b in pinned):
+    # Retired while ENABLE_SEARCH is on: search now runs on every name every
+    # run, so collapsing to the digest would throw away exactly the news
+    # content this report exists to surface. Only re-activates if search is
+    # switched off entirely.
+    if (all_quiet(pinned) and not any(b.get("position") for b in pinned)
+            and not ENABLE_SEARCH):
         return render_quiet_digest(pinned)
 
     cards = ""

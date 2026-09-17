@@ -376,6 +376,12 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     benchmarks = benchmarks or []
     n = len(tier1)
     n_moved = sum(1 for b in pinned if (b.get("delta") or {}).get("material"))
+    # Distinct from n_moved: a ticker just added to PINNED_TICKERS has no prior
+    # state, so compute_delta returns {"first_run": True} with no "material"
+    # key. On 2026-09-17 six names were added at once and each got a full
+    # write-up while the intro still said "No new names" — true only for the
+    # discovery screen, unreadable next to six new cards.
+    n_first = sum(1 for b in pinned if (b.get("delta") or {}).get("first_run"))
     quiet = False
     if pinned:
         try:
@@ -387,7 +393,11 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     if mode == "coverage":
         # Midweek: the subject IS the summary. On a quiet run it should be
         # readable from the notification without opening anything.
-        if n_moved:
+        if n_first and n_moved:
+            subject = f"Coverage — {run_date} | {n_first} new, {n_moved} moved"
+        elif n_first:
+            subject = f"Coverage — {run_date} | {n_first} new to coverage"
+        elif n_moved:
             subject = (f"Coverage — {run_date} | {n_moved} of {len(pinned)} moved")
         elif quiet:
             subject = f"Coverage — {run_date} | nothing to action"
@@ -562,6 +572,21 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
         intro_line = (f"Midweek check on your {len(pinned)} watchlist names. "
                       f"Nothing moved and nothing is tradeable, so this is short "
                       f"by design. The full screen runs Sunday.")
+    elif mode == "coverage" and n_first:
+        # A pinned name with no prior run to diff against — usually because it
+        # was just added — has no "revised against what moved" story to tell.
+        # On 2026-09-17, six names were added at once, each got a full
+        # write-up, and the intro still read "No new names," which is true only
+        # in the narrow sense that no fresh discovery screen ran. Next to six
+        # new cards that line reads as contradicted by the email under it.
+        n_old = len(pinned) - n_first
+        intro_line = (
+            f"First coverage on {n_first} name{'s' if n_first != 1 else ''} "
+            f"just added to the watchlist"
+            + (f", plus an update on your other {n_old}" if n_old else "")
+            + (f", where {n_moved} changed materially" if n_old and n_moved else
+               ", where nothing changed materially" if n_old else "")
+            + ". This is not a fresh screen. The full screen runs Sunday.")
     elif mode == "coverage":
         # No screen ran today, so the copy must not imply one did.
         intro_line = (f"Midweek update on your {len(pinned)} watchlist name"
@@ -569,7 +594,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
                       f"has moved since the last report. "
                       + (f"{n_moved} changed materially."
                          if n_moved else "Nothing changed materially.")
-                      + " No new names. The full screen runs Sunday.")
+                      + " No new names from the discovery screen — that runs Sunday.")
     elif pinned and tier1:
         intro_line = (f"Coverage on your {len(pinned)} watchlist name"
                       f"{'s' if len(pinned) != 1 else ''}, then the {n} new "
@@ -1014,7 +1039,8 @@ def main():
             # Search is gated on the numbers already having moved. A quiet run
             # searches nothing, which is both the cost control and the main
             # defence against a routine headline being written up as a cause.
-            trig = cov.search_trigger(b["delta"], b["scan"])
+            trig = cov.search_trigger(b["delta"], b["scan"],
+                                      verdict=b["gate_status"].get("verdict"))
             if trig:
                 b["search_trigger"] = trig
                 n_search += 1

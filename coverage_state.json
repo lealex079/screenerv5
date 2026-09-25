@@ -1,97 +1,242 @@
 {
   "ACN": {
     "blocking": [
-      "crash",
       "earnings"
     ],
-    "crash": 89.4,
-    "date": "2026-09-16",
+    "crash": 28.1,
+    "date": "2026-09-25",
     "pending_verdict": null,
     "prev": {
-      "crash": 91.9,
-      "date": "2026-09-15",
-      "price": 197.18,
-      "structure": 46.0,
-      "trend": 63.5,
+      "crash": 32.2,
+      "date": "2026-09-23",
+      "price": 185.4,
+      "structure": 35.0,
+      "trend": 60.7,
       "verdict": "AVOID"
     },
-    "price": 191.47,
-    "put_credit": 3.8,
-    "put_expiry": "Oct 16, 2026",
-    "put_strike": 170.0,
-    "structure": 48.0,
+    "price": 177.17,
+    "put_credit": 1.1,
+    "put_expiry": "Oct 23, 2026",
+    "put_strike": 157.5,
+    "structure": 36.0,
     "support": null,
-    "trend": 62.6,
+    "trend": 56.1,
     "verdict": "AVOID"
   },
   "AVAV": {
-    "blocking": [
-      "structure"
-    ],
-    "crash": 59.9,
-    "date": "2026-09-16",
-    "pending_verdict": null,
-    "prev": {
-      "crash": 59.5,
-      "date": "2026-09-15",
-      "price": 156.44,
-      "structure": 21.0,
-      "trend": 59.5,
-      "verdict": "AVOID"
-    },
-    "price": 155.51,
-    "put_credit": 2.7,
-    "put_expiry": "Oct 16, 2026",
-    "put_strike": 135.0,
-    "structure": 23.0,
-    "support": null,
-    "trend": 52.1,
-    "verdict": "AVOID"
-  },
-  "IIPR": {
     "blocking": [],
-    "crash": 53.7,
-    "date": "2026-09-16",
+    "crash": 57.9,
+    "date": "2026-09-23",
+    "pending_verdict": "SETUP LIVE",
+    "prev": {
+      "crash": 70.1,
+      "date": "2026-09-21",
+      "price": 159.95,
+      "structure": 50.0,
+      "trend": 55.4,
+      "verdict": "NOT YET"
+    },
+    "price": 158.3,
+    "put_credit": 3.2,
+    "put_expiry": "Oct 23, 2026",
+    "put_strike": 140.0,
+    "structure": 43.0,
+    "support": null,
+    "trend": 55.7,
+    "verdict": "NOT YET"
+  },
+  "CRDO": {
+    "blocking": [],
+    "crash": 58.2,
+    "date": "2026-09-25",
     "pending_verdict": null,
     "prev": {
-      "crash": 49.1,
-      "date": "2026-09-15",
-      "price": 56.37,
-      "structure": 35.0,
-      "trend": 51.1,
-      "verdict": "AVOID"
+      "crash": 55.3,
+      "date": "2026-09-23",
+      "price": 193.64,
+      "structure": 62.0,
+      "trend": 47.8,
+      "verdict": "SETUP LIVE"
     },
-    "price": 56.45,
-    "put_credit": 0.45,
-    "put_expiry": "Oct 16, 2026",
-    "put_strike": 50.0,
-    "structure": 42.0,
+    "price": 214.04,
+    "put_credit": 5.7,
+    "put_expiry": "Oct 23, 2026",
+    "put_strike": 185.0,
+    "structure": 75.0,
     "support": null,
     "trend": 53.0,
     "verdict": "SETUP LIVE"
+  },
+  "IIPR": {
+    "blocking": [
+      "earnings"
+    ],
+    "crash": 50.8,
+    "date": "2026-09-25",
+    "pending_verdict": null,
+    "prev": {
+      "crash": 43.9,
+      "date": "2026-09-23",
+      "price": 55.76,
+      "structure": 26.0,
+      "trend": 46.7,
+      "verdict": "AVOID"
+    },
+    "price": 55.37,
+    "put_credit": null,
+    "put_expiry": null,
+    "put_strike": null,
+    "structure": 28.0,
+    "support": null,
+    "trend": 50.6,
+    "verdict": "AVOID"
   },
   "INTU": {
     "blocking": [
       "structure"
     ],
-    "crash": 57.2,
-    "date": "2026-09-16",
+    "crash": 7.9,
+    "date": "2026-09-25",
     "pending_verdict": null,
     "prev": {
-      "crash": 70.8,
-      "date": "2026-09-15",
-      "price": 335.73,
-      "structure": 34.0,
-      "trend": 54.2,
-      "verdict": "SETUP LIVE"
+      "crash": 8.1,
+      "date": "2026-09-23",
+      "price": 287.8,
+      "structure": 10.0,
+      "trend": 45.7,
+      "verdict": "AVOID"
     },
-    "price": 322.4,
-    "put_credit": 5.3,
-    "put_expiry": "Oct 16, 2026",
-    "put_strike": 290.0,
-    "structure": 23.0,
+    "price": 275.62,
+    "put_credit": 3.8,
+    "put_expiry": "Oct 23, 2026",
+    "put_strike": 250.0,
+    "structure": 9.0,
     "support": null,
-    "trend": 58.0,
+    "trend": 45.5,
+    "verdict": "AVOID"
+  },
+  "MU": {
+    "blocking": [
+      "crash",
+      "earnings"
+    ],
+    "crash": 72.3,
+    "date": "2026-09-25",
+    "pending_verdict": null,
+    "prev": {
+      "crash": 77.9,
+      "date": "2026-09-23",
+      "price": 1073.28,
+      "structure": 90.0,
+      "trend": 67.9,
+      "verdict": "AVOID"
+    },
+    "price": 1081.43,
+    "put_credit": 22.15,
+    "put_expiry": "Oct 23, 2026",
+    "put_strike": 960.0,
+    "structure": 92.0,
+    "support": null,
+    "trend": 70.8,
+    "verdict": "AVOID"
+  },
+  "MXL": {
+    "blocking": [
+      "crash",
+      "earnings"
+    ],
+    "crash": 86.4,
+    "date": "2026-09-25",
+    "pending_verdict": null,
+    "prev": {
+      "crash": 85.4,
+      "date": "2026-09-23",
+      "price": 83.8,
+      "structure": 91.0,
+      "trend": 65.5,
+      "verdict": "AVOID"
+    },
+    "price": 93.88,
+    "put_credit": null,
+    "put_expiry": null,
+    "put_strike": null,
+    "structure": 96.0,
+    "support": null,
+    "trend": 67.8,
+    "verdict": "AVOID"
+  },
+  "PGY": {
+    "blocking": [
+      "structure"
+    ],
+    "crash": 25.9,
+    "date": "2026-09-25",
+    "pending_verdict": null,
+    "prev": {
+      "crash": 31.4,
+      "date": "2026-09-23",
+      "price": 18.44,
+      "structure": 27.0,
+      "trend": 56.1,
+      "verdict": "NOT YET"
+    },
+    "price": 17.7,
+    "put_credit": null,
+    "put_expiry": null,
+    "put_strike": null,
+    "structure": 22.0,
+    "support": null,
+    "trend": 52.6,
+    "verdict": "AVOID"
+  },
+  "TSEM": {
+    "blocking": [
+      "crash",
+      "earnings"
+    ],
+    "crash": 65.2,
+    "date": "2026-09-25",
+    "pending_verdict": null,
+    "prev": {
+      "crash": 79.4,
+      "date": "2026-09-23",
+      "price": 231.07,
+      "structure": 86.0,
+      "trend": 64.5,
+      "verdict": "NOT YET"
+    },
+    "price": 230.29,
+    "put_credit": 4.9,
+    "put_expiry": "Oct 23, 2026",
+    "put_strike": 200.0,
+    "structure": 86.0,
+    "support": null,
+    "trend": 67.5,
+    "verdict": "AVOID"
+  },
+  "TTMI": {
+    "blocking": [
+      "crash",
+      "earnings"
+    ],
+    "crash": 67.7,
+    "date": "2026-09-25",
+    "pending_verdict": null,
+    "prev": {
+      "crash": 73.9,
+      "date": "2026-09-23",
+      "price": 125.91,
+      "structure": 80.0,
+      "trend": 54.4,
+      "verdict": "AVOID"
+    },
+    "price": 129.91,
+    "put_credit": null,
+    "put_expiry": null,
+    "put_strike": null,
+    "structure": 89.0,
+    "support": null,
+    "trend": 58.9,
     "verdict": "AVOID"
   }
 }

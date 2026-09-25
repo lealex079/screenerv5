@@ -48,7 +48,7 @@ jobs:
       - name: Run coverage update
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_MODEL:      ${{ vars.CLAUDE_MODEL || 'claude-opus-5' }}
+          CLAUDE_MODEL:      ${{ vars.CLAUDE_MODEL || 'claude-opus-5.5' }}
           SMTP_PASS:         ${{ secrets.SMTP_PASS }}
           SMTP_HOST:         ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
           SMTP_PORT:         ${{ vars.SMTP_PORT || '587' }}

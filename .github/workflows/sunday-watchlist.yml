@@ -108,15 +108,17 @@ jobs:
       - name: Commit coverage state
         if: success()
         run: |
-          if [ -n "$(git status --porcelain coverage_state.json)" ]; then
+          if [ -n "$(git status --porcelain coverage_state.json iv_history.json)" ]; then
             git config user.name  "screener-bot"
             git config user.email "actions@github.com"
-            git add coverage_state.json
-            git commit -m "coverage state $(date -u +%Y-%m-%d)"
+            # iv_history.json must be committed too, or the runner discards
+            # it and the IV history never accumulates past one run.
+            git add coverage_state.json iv_history.json 2>/dev/null || git add coverage_state.json
+            git commit -m "coverage state + IV history $(date -u +%Y-%m-%d)"
             git pull --rebase --autostash origin ${{ github.ref_name }} || true
             git push
           else
-            echo "coverage_state.json unchanged — nothing to commit"
+            echo "state files unchanged — nothing to commit"
           fi
 
       # Always upload, including on failure. If the send breaks, this artifact

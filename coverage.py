@@ -328,7 +328,7 @@ CONFIRM_VERDICT_CHANGES = os.environ.get("CONFIRM_VERDICT_CHANGES", "1") != "0"
 CONFIRM_ON_VERDICT = "SETUP LIVE"
 
 
-def stabilize_verdict(bundle: dict, prev: dict) -> dict:
+def stabilize_verdict(bundle: dict, prev: dict, today: str | None = None) -> dict:
     """
     Require a verdict change to hold for two runs before publishing it.
 
@@ -357,6 +357,17 @@ def stabilize_verdict(bundle: dict, prev: dict) -> dict:
         return gs                       # never delay a warning
 
     if pending == raw:
+        # The second sighting has to come from a LATER day. On 2026-10-02 a
+        # manual rerun 90 minutes after the scheduled one "confirmed" MU's
+        # upgrade to SETUP LIVE, but two reads of the same day's data are one
+        # observation, not two. Keep holding until a different day agrees.
+        if today and prev.get("date") == today:
+            gs["_raw_verdict"] = raw
+            gs["_pending_verdict"] = raw
+            gs["verdict"] = confirmed
+            gs["_verdict_note"] = (f"reading {raw} again today, holding {confirmed} "
+                                   f"until a run on a later day agrees")
+            return gs
         gs["_verdict_note"] = f"{confirmed} to {raw}, confirmed on a second run"
         return gs                       # second sighting agrees, publish it
 
@@ -556,7 +567,8 @@ measurements say. Do not add pattern names that are not in the patterns list. \
 If the candle is marked in_progress, call it week to date and do not describe \
 it as a close.
 
-WHAT TO COVER, in this order, 5 to 7 sentences total, no headers:
+WHAT TO COVER, in this order, 5 to 7 sentences total and never more than \
+7, no headers. When the news is substantial, cut candle detail first:
 
 1. The verdict in caps: SETUP LIVE, NOT YET, or AVOID. Then one sentence on \
 what the stock is doing.
@@ -1025,7 +1037,7 @@ def save_state(bundles: list[dict], run_date: str, path: str = STATE_PATH) -> No
     for b in bundles:
         scan = b.get("scan") or {}
         gs   = b.get("gate_status") or {}
-        put  = _target_put(b.get("options") or {})
+        put  = _quoted_put(b)
         prior = state.get(b["ticker"], {})
         state[b["ticker"]] = {
             "date": run_date,
@@ -1052,6 +1064,25 @@ def save_state(bundles: list[dict], run_date: str, path: str = STATE_PATH) -> No
         pass          # a failed snapshot degrades the NEXT run, not this one
 
 
+def _quoted_put(bundle: dict) -> dict | None:
+    """
+    The contract the note actually quotes: support-anchored when a shelf
+    qualifies, else the 0.20-delta one. State and deltas used to track the
+    0.20-delta contract while the note quoted the anchored one, so on
+    2026-10-02 MU's note said the put "was rolled from the 975 strike to 970
+    before landing at the strike below" while quoting a $950 put. Tracking
+    one contract everywhere keeps the change line and the trade in agreement.
+    """
+    try:
+        import strikes
+        put, _ = strikes.select_put(bundle)
+        if put:
+            return put
+    except Exception:
+        pass
+    return _target_put(bundle.get("options") or {})
+
+
 def _target_put(options: dict) -> dict | None:
     return next((p for p in (options.get("puts") or []) if p.get("optimal")), None)
 
@@ -1074,7 +1105,7 @@ def compute_delta(prev: dict, bundle: dict) -> dict:
 
     scan = bundle.get("scan") or {}
     gs   = bundle.get("gate_status") or {}
-    put  = _target_put(bundle.get("options") or {})
+    put  = _quoted_put(bundle)
     d    = {"first_run": False, "since": prev.get("date"), "material": False}
 
     p0, p1 = prev.get("price"), scan.get("price")

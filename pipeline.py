@@ -605,7 +605,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
                       f"has moved since the last report. "
                       + (f"{n_moved} changed materially."
                          if n_moved else "Nothing changed materially.")
-                      + " No new names from the discovery screen — that runs Sunday.")
+                      + " No new names from the discovery screen. That runs Sunday.")
     elif pinned and tier1:
         intro_line = (f"Coverage on your {len(pinned)} watchlist name"
                       f"{'s' if len(pinned) != 1 else ''}, then the {n} new "
@@ -1031,7 +1031,7 @@ def main():
             # Hold an unconfirmed verdict change before anything downstream sees
             # it, so the delta line, the prompt and the saved state all agree on
             # what was actually published.
-            gs = cov.stabilize_verdict(b, prior.get(b["ticker"], {}))
+            gs = cov.stabilize_verdict(b, prior.get(b["ticker"], {}), today=run_date)
             if gs.get("_verdict_note"):
                 log.info(f"  {b['ticker']}: verdict {gs['_verdict_note']}")
             b["delta"] = cov.compute_delta(prior.get(b["ticker"], {}), b)

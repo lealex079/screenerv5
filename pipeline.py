@@ -83,10 +83,10 @@ FINVIZ_MAX_TICKERS = int(os.environ.get("FINVIZ_MAX_TICKERS", "250"))
 # gate: they are reported every run whether or not they qualify, because the
 # reader asked for them by name. Requested by Sean 2026-09-02.
 ENABLE_PREMIUM = os.environ.get("ENABLE_PREMIUM", "1") != "0"
+ENABLE_INCOME  = os.environ.get("ENABLE_INCOME", "0") != "0"   # new, off by default
 # New paths ship OFF so a scheduled run keeps doing exactly what it did before
 # the code landed. Turn each on deliberately after a manual run has proved it.
 ENABLE_CHARTS  = os.environ.get("ENABLE_CHARTS", "0") != "0"
-ENABLE_POSITIONS = os.environ.get("ENABLE_POSITIONS", "0") != "0"
 PINNED_TICKERS = [t.strip().upper() for t in
                   os.environ.get("PINNED_TICKERS", "AVAV,IIPR,INTU,ACN").split(",")
                   if t.strip()]
@@ -359,7 +359,8 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
                           run_date: str, pinned: list[dict] | None = None,
                           mode: str = "full",
                           premium: list[dict] | None = None,
-                          benchmarks: list[dict] | None = None) -> tuple[str, str]:
+                          benchmarks: list[dict] | None = None,
+                          income: list[dict] | None = None) -> tuple[str, str]:
     """
     The triage watchlist email. Two tracks, in this order:
 
@@ -374,6 +375,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     pinned = pinned or []
     premium = premium or []
     benchmarks = benchmarks or []
+    income = income or []
     n = len(tier1)
     n_moved = sum(1 for b in pinned if (b.get("delta") or {}).get("material"))
     # Distinct from n_moved: a ticker just added to PINNED_TICKERS has no prior
@@ -434,6 +436,15 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
             premium_html = _prem.render_premium_section(premium, benchmarks)
         except Exception as e:
             log.error(f"Premium section failed to render: {e}")
+
+    # ── Oversold income section ────────────────────────────────────────────────
+    income_html = ""
+    if income:
+        try:
+            import income as _inc
+            income_html = _inc.render_income_section(income, dividend_field_live=False)
+        except Exception as e:
+            log.error(f"Income section failed to render: {e}")
 
     # ── Tier 1 cards ──────────────────────────────────────────────────────────
     cards = ""
@@ -639,6 +650,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
   {discovery_header}
   {cards}
   {premium_html}
+  {income_html}
   {tier2_html}
   {blocked_html}
 
@@ -991,7 +1003,11 @@ def main():
             # pinned names hit this on 2026-09-15 and it drove four spurious
             # "price moved" deltas and four news lookups.
             wclose = (wc or {}).get("close")
-            if (wclose and d.get("price")
+            # Only meaningful against a CLOSED week. Midweek the candle is the
+            # week in progress, whose "close" IS today's price, so an exact
+            # match there is expected, not a sign of stale data. On 2026-10-02
+            # this fired false warnings on IIPR, AVAV and PGY for that reason.
+            if (wclose and d.get("price") and not (wc or {}).get("in_progress")
                     and abs(float(d["price"]) - float(wclose)) < 0.005):
                 log.warning(f"  {d['ticker']}: price {d['price']} equals the "
                             f"{wc.get('week_ending')} weekly close exactly — "
@@ -1008,21 +1024,6 @@ def main():
                 "weekly_candle": wc, "gate_status": gs,
             })
 
-        # Open positions change the question from "should we enter" to
-        # "hold, roll, or take assignment". Attach before deltas so the prompt
-        # selection downstream can see it.
-        if ENABLE_POSITIONS:
-            try:
-                import positions as pos_mod
-                open_pos = pos_mod.load_positions()
-                for b in pinned_bundles:
-                    if (p := open_pos.get(b["ticker"])):
-                        b["position"] = pos_mod.evaluate(
-                            b["ticker"], p, b["scan"], b.get("options") or {})
-                        log.info(f"  {b['ticker']}: OPEN POSITION -> "
-                                 f"{b['position']['action']}")
-            except Exception as e:
-                log.warning(f"Position tracking skipped: {e}")
 
         prior = cov.load_state()
         n_material = n_search = 0
@@ -1073,6 +1074,27 @@ def main():
         except Exception as e:
             log.warning(f"Premium ranking skipped: {e}")
             premium_names, benchmarks = [], []
+
+    # Income track: oversold, dividend-paying, still clears every falling-knife
+    # floor. Off by default — the dividend criterion is unverified against a
+    # live Finviz pull (see income.py), so this should run manually a few
+    # times before it reaches a scheduled send.
+    income_names = []
+    if ENABLE_INCOME and mode != "coverage" and bundles:
+        try:
+            import income as inc
+            chosen = ({b["ticker"] for b in tier1} | {b["ticker"] for b in tier2}
+                     | {b["ticker"] for b in premium_names})
+            income_names = inc.rank_income(bundles, exclude=chosen)
+            log.info(f"Income track: {len(income_names)} oversold dividend "
+                     f"names above {inc.MIN_ANN_YIELD}% annualized")
+            for b in income_names:
+                log.info(f"  {b['ticker']:<6} RSI {b.get('_rsi') or 0:.0f}, "
+                         f"{b['_ann_yield']:.1f}% ann, div "
+                         f"{b.get('_dividend_yield') or 0:.1f}%")
+        except Exception as e:
+            log.warning(f"Income ranking skipped: {e}")
+            income_names = []
 
     if not tier1 and not pinned_bundles:
         log.warning("No names cleared the quality bar and no pinned coverage "
@@ -1129,9 +1151,23 @@ def main():
                 # never sees exception text, only a plain "unavailable" note.
                 b["blurb"] = ""
                 b["_note_failed"] = True
+                b["_note_error"] = f"{type(e).__name__}: {e}"
                 log.error(f"  [{i}/{len(writing)}] {b['ticker']}: note failed, "
                           f"showing status only — {e}")
             time.sleep(0.5)
+
+        # One failed note is a one-off. EVERY note failing is systemic, the
+        # same class of problem as the billing check above, and it should be
+        # handled the same way. On 2026-10-02 all 11 notes failed with a
+        # non-billing error and the email still went to five people with
+        # "Written note unavailable" on every card. Abort instead: no email,
+        # the failure-notify step alerts ALERT_TO with the error below.
+        failed = [b for b in writing if b.get("_note_failed")]
+        if writing and len(failed) == len(writing):
+            kinds = sorted({b["_note_error"].split(":")[0] for b in failed})
+            raise RuntimeError(
+                f"All {len(failed)} coverage notes failed ({', '.join(kinds)}). "
+                f"First error: {failed[0]['_note_error'][:400]}. No email was sent.")
 
     log.info(f"\nGenerating {len(tier1)} triage blurbs ({CLAUDE_MODEL}, medium)...")
     for i, b in enumerate(tier1, 1):
@@ -1139,10 +1175,28 @@ def main():
             b["blurb"] = wrep.generate_blurb(b, client, CLAUDE_MODEL, "medium")
             log.info(f"  [{i}/{len(tier1)}] {b['ticker']}: blurb ok")
         except Exception as e:
-            b["blurb"] = f"[Blurb generation failed: {e}]"
+            err_text = str(e)
+            if "credit balance" in err_text.lower() or "billing" in err_text.lower():
+                raise RuntimeError(
+                    "Anthropic API credit balance is too low. Add credits at "
+                    "console.anthropic.com, then rerun. No email was sent."
+                ) from e
+            # Same rule as the coverage notes: the reader never sees exception
+            # text. This path used to write f"[Blurb generation failed: {e}]"
+            # straight into the Sunday email.
+            b["blurb"] = ("Written note unavailable this run. The scores and "
+                          "contract details above are still accurate.")
+            b["_note_failed"] = True
+            b["_note_error"] = f"{type(e).__name__}: {e}"
             log.error(f"  [{i}/{len(tier1)}] {b['ticker']}: FAILED — {e}")
         if i < len(tier1):
             time.sleep(0.5)
+
+    failed_t1 = [b for b in tier1 if b.get("_note_failed")]
+    if tier1 and len(failed_t1) == len(tier1):
+        raise RuntimeError(
+            f"All {len(failed_t1)} triage blurbs failed. First error: "
+            f"{failed_t1[0]['_note_error'][:400]}. No email was sent.")
 
     # Step 6b — charts. Rendered for the names that carry a quoted trade, since
     # the point of the picture is showing the strike under the support band.
@@ -1151,29 +1205,45 @@ def main():
         try:
             import charts as ch
             import strikes as stk
+        except Exception as e:
+            log.warning(f"Charts module unavailable, email will send without "
+                        f"them: {e}")
+            ch = stk = None
+        if ch and stk:
             targets = [b for b in pinned_bundles
                        if (b.get("gate_status") or {}).get("verdict") == "SETUP LIVE"]
             targets += list(tier1)
             log.info(f"\nRendering {len(targets)} charts...")
+            n_failed = 0
             for b in targets:
-                scan = b.get("scan") or {}
-                put, _ = stk.select_put(b)
-                png = ch.render_trade_chart(b["ticker"], scan, put, scan.get("vp"))
-                if png:
-                    cid = f"chart-{b['ticker'].lower()}"
-                    chart_images[cid] = png
-                    b["_chart_cid"] = cid
-            log.info(f"  {len(chart_images)}/{len(targets)} rendered")
-        except Exception as e:
-            log.warning(f"Charts skipped, email will send without them: {e}")
-            chart_images = {}
+                # Isolated per ticker. The old version wrapped this whole loop
+                # in one try/except, so ONE ticker throwing — malformed scan
+                # data, a yfinance hiccup, anything — discarded every chart
+                # that had already rendered successfully before it, for the
+                # whole run. Across 10+ tickers a single failure was likely on
+                # nearly every run, which is why no email ever had an image.
+                try:
+                    scan = b.get("scan") or {}
+                    put, _ = stk.select_put(b)
+                    png = ch.render_trade_chart(b["ticker"], scan, put, scan.get("vp"))
+                    if png:
+                        cid = f"chart-{b['ticker'].lower()}"
+                        chart_images[cid] = png
+                        b["_chart_cid"] = cid
+                except Exception as e:
+                    n_failed += 1
+                    log.warning(f"  chart for {b['ticker']} failed, skipping "
+                                f"just this one: {e}")
+            log.info(f"  {len(chart_images)}/{len(targets)} rendered"
+                     + (f", {n_failed} failed" if n_failed else ""))
 
     # Step 7 — build + send the watchlist email
     log.info("\nBuilding watchlist email...")
     subject, html = build_watchlist_email(tier1, tier2, blocked, run_date,
                                           pinned=pinned_bundles, mode=mode,
                                           premium=premium_names,
-                                          benchmarks=benchmarks)
+                                          benchmarks=benchmarks,
+                                          income=income_names)
     send_email(subject, html, images=chart_images)
 
     # Snapshot only after the email is away. If the send throws, the state
@@ -1182,6 +1252,16 @@ def main():
         import coverage as cov
         cov.save_state(pinned_bundles, run_date)
         log.info(f"Coverage state saved for {len(pinned_bundles)} names.")
+        # Flagged since early September, built 2026-09-30. Free, 20 lines, and
+        # every run this doesn't fire is a week of IV history that can never
+        # be recovered. Runs on both Sunday and Wed/Fri so the series fills in
+        # roughly 3x a week rather than once.
+        try:
+            import iv_history as ivh
+            ivh.append_snapshot(pinned_bundles, run_date)
+            log.info(f"IV snapshot appended for {len(pinned_bundles)} names.")
+        except Exception as e:
+            log.warning(f"IV snapshot failed, continuing without it: {e}")
 
     log.info("\nPipeline complete.")
     log.info(f"  Scanned: {len(tickers)}  |  Viable after pre-gate: {len(pre)}")

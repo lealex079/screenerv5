@@ -443,10 +443,21 @@ def fundamentals_context(scan: dict) -> dict:
                           "unusual combination worth naming rather than glossing "
                           "over.")
 
+    # Meeting 2026-09-30: Sean asked for volatility rank surfaced explicitly.
+    # rvol_10d and vol_rank are already computed by scan.py and already drive
+    # the gates; this was never threaded into the coverage payload as its own
+    # named field, so the note had no way to state it directly.
+    rvol = scan.get("rvol_10d")
+    vrank = scan.get("vol_rank")
+    volatility = None
+    if rvol is not None or vrank is not None:
+        volatility = {"rvol_10d": rvol, "vol_rank": vrank}
+
     return {
         "valuation": valuation or None,
         "quality": quality or None,
         "regime": scan.get("regime"),   # scan.py's own label, matches knowledge_1's table
+        "volatility": volatility,
         "flow_divergence": divergence,
         "earnings_days": scan.get("earnings_days"),  # always surfaced; see prompt rule
     }
@@ -563,6 +574,21 @@ that zone, treating the delta as the result rather than the goal. When \
 strike_basis is "delta", no support zone was strong or near enough to anchor to. \
 Say that plainly: this is the 0.20 delta contract and there is no structural \
 level behind it.
+
+If SETUP LIVE and exit_plan is present, state the exit plan, not just the \
+entry: the price to buy the put back at (profit_take_cost, which captures \
+profit_take_pct percent of the credit) and, when stop_price is not null, the \
+level that invalidates the thesis (stop_basis, verbatim in substance). When \
+stop_price IS null, say plainly that this strike has no structural stop \
+because it came from a delta target rather than a level, matching \
+strike_basis above. Do not invent a stop level when none is given.
+
+If implied_move is present, you may use its pct and the low/high range as one \
+clause of context for how far the market is pricing this name to move by that \
+expiry, when it adds something the candle and the level have not already said. \
+It is a different kind of number from realized volatility: forward-looking and \
+priced by the market, not backward-looking and statistical. Do not force it in \
+if it is redundant with what you have already said.
 6. If NOT YET or AVOID, which gate is blocking, its value and threshold, and \
 what would have to change. This is the most useful sentence in the note. Be \
 specific.
@@ -586,9 +612,12 @@ fundamentals.valuation is present (cheap under P/E 15, expensive over 35, \
 similarly for P/B, P/S, EV/EBIT) and it helps explain the news or the move, \
 give it a clause, not a paragraph. Mention the earnings countdown from \
 fundamentals.earnings_days somewhere in the note regardless of whether it is \
-the blocking gate. If fundamentals.flow_divergence is present, include it in \
-one sentence: it is exactly the kind of thing a reader would want flagged and \
-would not otherwise see.
+the blocking gate. When fundamentals.volatility is present, vol_rank is this \
+ticker's 10-day realized vol as a percentile of its own trailing year, cite it \
+the same hedged way as the other descriptive metrics here, not with the \
+certainty of crash or trend. If fundamentals.flow_divergence is present, \
+include it in one sentence: it is exactly the kind of thing a reader would \
+want flagged and would not otherwise see.
 
 structure_score, liquidity_score, IV/HV, vol_rank, and any trade grade are \
 descriptive and cross-sector-sane, not regression-validated the way TrendScore \
@@ -646,14 +675,6 @@ Do not editorialize about the setup's quality beyond the verdict and the reason.
 The reader decides. Your job is to report accurately and say what is blocking.
 
 End with nothing. No sign-off, no "let me know"."""
-def _position_prompt() -> str:
-    try:
-        import positions
-        return positions.POSITION_PROMPT
-    except Exception:
-        return ""
-
-
 def _quiet_but_live(bundle: dict) -> bool:
     """Unchanged, but tradeable. The one case where a quiet name still needs prose."""
     d = bundle.get("delta") or {}
@@ -690,10 +711,6 @@ def needs_prose(bundle: dict) -> bool:
         return True
     if bundle.get("search_trigger"):
         return True
-    # An open position always gets written up. "Nothing changed" is not an
-    # acceptable answer about money already at risk.
-    if bundle.get("position"):
-        return True
     return False
 
 
@@ -728,13 +745,15 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
             payload["strike_basis"] = how
             if how == "confluence":
                 payload["strike_rationale"] = strikes.anchor_sentence(put)
+            # Exits, not just entries. Meeting 2026-09-30.
+            payload["exit_plan"] = strikes.exit_plan(put, how)
+        payload["implied_move"] = strikes.implied_move(
+            bundle.get("options") or {}, (bundle.get("scan") or {}).get("price"))
     except Exception:
         pass
     payload["fundamentals"] = fundamentals_context(bundle.get("scan") or {})
     payload["weekly_candle"] = bundle.get("weekly_candle") or {}
     payload["gate_status"] = bundle.get("gate_status") or {}
-    if bundle.get("position"):
-        payload["position"] = bundle["position"]
     trigger = bundle.get("search_trigger")
     if trigger:
         payload["search_trigger"] = trigger
@@ -754,7 +773,7 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
         "system": (COVERAGE_SYSTEM_PROMPT
                    + ("\n" + SEARCH_INSTRUCTIONS if trigger else "")
                    + (QUIET_NOTE_ADDENDUM if _quiet_but_live(bundle) else "")
-                   + (_position_prompt() if bundle.get("position") else "")),
+                   ),
         "messages": [{"role": "user", "content": json.dumps(payload, default=str)}],
     }
     if trigger:
@@ -842,8 +861,7 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
     # run, so collapsing to the digest would throw away exactly the news
     # content this report exists to surface. Only re-activates if search is
     # switched off entirely.
-    if (all_quiet(pinned) and not any(b.get("position") for b in pinned)
-            and not ENABLE_SEARCH):
+    if all_quiet(pinned) and not ENABLE_SEARCH:
         return render_quiet_digest(pinned)
 
     cards = ""
@@ -933,7 +951,6 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
             <span style="color:#64748b">Crash <b style="color:{score_color(cs, True)}">{s(cs)}</b></span>
             <span style="color:#64748b">Structure <b style="color:{score_color(ss)}">{s(ss)}</b></span>
           </div>
-          {(__import__("positions").render_position_badge(b["position"]) if b.get("position") else "")}
           {(__import__("charts").chart_img_tag(b["_chart_cid"]) if b.get("_chart_cid") else "")}
           {note_html}
           {note_failed_html}

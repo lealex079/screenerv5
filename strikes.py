@@ -141,3 +141,123 @@ def anchor_sentence(put: dict | None) -> str:
             f"${a['zone_lo']:.2f} to ${a['zone_hi']:.2f} ({src_txt}), "
             f"{abs(a['zone_dist_pct']):.1f}% below spot. "
             f"Delta came out at {abs(put.get('delta') or 0):.2f}.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Implied move
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Meeting, 2026-09-30: Sean wants implied move surfaced. Standard retail
+# definition: the ATM straddle (call + put at the strike nearest spot, same
+# expiry) divided by spot. That is the market's own priced-in expectation of
+# how far the stock moves by that expiry, which is a genuinely different
+# number from realized vol or IV/HV: it is forward-looking and instrument-
+# priced rather than backward-looking and statistical.
+#
+# Uses the SAME chain already pulled for strike selection. No new data call.
+
+def implied_move(options: dict, price: float, dte: int | None = None) -> dict | None:
+    """
+    ATM straddle / spot, as a percent, for the nearest expiry already in the
+    chain (or the one closest to `dte` if given). Returns None rather than a
+    wrong number when the chain does not have a clean ATM pair at one expiry.
+    """
+    puts = options.get("puts") or []
+    calls = options.get("calls") or []
+    if not puts or not calls or not price:
+        return None
+
+    expiries = {c.get("expiration") for c in calls if c.get("expiration")}
+    if dte is not None:
+        by_dte = {c.get("expiration"): c.get("dte") for c in calls if c.get("expiration")}
+        expiries = sorted(expiries, key=lambda e: abs((by_dte.get(e) or 0) - dte))
+    else:
+        expiries = sorted(expiries, key=lambda e:
+                          min((c.get("dte") or 999) for c in calls
+                              if c.get("expiration") == e))
+    if not expiries:
+        return None
+    target_exp = expiries[0]
+
+    def atm(contracts, exp):
+        pool = [c for c in contracts if c.get("expiration") == exp and c.get("bid")]
+        if not pool:
+            return None
+        return min(pool, key=lambda c: abs((c.get("strike") or 0) - price))
+
+    c = atm(calls, target_exp)
+    p = atm(puts, target_exp)
+    if not c or not p or c.get("strike") != p.get("strike"):
+        return None  # chain doesn't have a matched ATM pair at this expiry
+
+    straddle = (c.get("bid") or 0) + (p.get("bid") or 0)
+    if straddle <= 0:
+        return None
+    pct = straddle / price * 100
+    return {
+        "expiration": target_exp,
+        "dte": c.get("dte"),
+        "strike": c.get("strike"),
+        "straddle_price": round(straddle, 2),
+        "pct": round(pct, 1),
+        "low": round(price * (1 - pct / 100), 2),
+        "high": round(price * (1 + pct / 100), 2),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Exits — profit target and invalidation, not just the entry
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Meeting, 2026-09-30: "find way to provide exits, not just entries... find
+# logical levels to tp at or find ways to determine when to exit."
+#
+# This is narrower than the position-tracking system that was scrapped. That
+# was for a put ALREADY SOLD, deciding hold/roll/close against the real fill.
+# This is the reverse: stating the exit plan AT THE TIME OF THE RECOMMENDATION,
+# before any position exists, the same way knowledge_3's report template
+# already requires a Target and a Stop/invalidation on every trade idea, a
+# requirement the automated coverage notes never carried over.
+#
+# Two numbers, neither invented:
+#   - Profit target: industry-standard convention is closing a short option
+#     once a majority of the credit is captured rather than holding for every
+#     last cent, which is where theta decay slows and gamma risk grows fastest
+#     relative to what is left to collect. 50% is the common retail default.
+#   - Invalidation: the support confluence the strike was anchored under, in
+#     select_put() above. If price closes below that zone, the structural
+#     argument for the strike is gone, not just dented.
+#
+# When strike_basis is "delta" (no shelf qualified), there is no structural
+# invalidation level to give, and the note should say so rather than inventing
+# one off the strike or breakeven.
+
+PROFIT_TAKE_PCT = 50.0  # % of credit captured at which to close, not ride to zero
+
+
+def exit_plan(put: dict | None, basis: str) -> dict | None:
+    """Profit-take price and, when a shelf anchored the strike, the stop level."""
+    if not put or not put.get("bid"):
+        return None
+
+    credit = put["bid"]
+    target_cost = round(credit * (1 - PROFIT_TAKE_PCT / 100), 2)
+    plan = {
+        "profit_take_pct": PROFIT_TAKE_PCT,
+        "profit_take_cost": target_cost,
+        "credit_captured_at_target": round(credit - target_cost, 2),
+    }
+
+    anchor = put.get("_anchor")
+    if basis == "confluence" and anchor:
+        stop = anchor.get("zone_lo")
+        plan["stop_price"] = stop
+        plan["stop_basis"] = (f"a close below ${stop:.2f}, the floor of the "
+                              f"{anchor.get('strength')}-source zone the strike "
+                              f"was anchored under")
+    else:
+        plan["stop_price"] = None
+        plan["stop_basis"] = ("no structural stop — this strike came from a "
+                              "delta target, not a support level, so there is "
+                              "no zone whose failure defines invalidation")
+    return plan

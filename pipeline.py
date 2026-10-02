@@ -75,7 +75,7 @@ SMTP_PASS         = os.environ.get("SMTP_PASS", "")
 EMAIL_FROM        = os.environ.get("EMAIL_FROM", "")
 EMAIL_TO          = os.environ.get("EMAIL_TO", "")
 EMAIL_MODE        = os.environ.get("EMAIL_MODE", "send")   # "send" | "print"
-CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-opus-5")
+CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
 MAX_WORKERS       = int(os.environ.get("MAX_WORKERS", "4"))
 FINVIZ_MAX_TICKERS = int(os.environ.get("FINVIZ_MAX_TICKERS", "250"))
 

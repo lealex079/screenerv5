@@ -9,8 +9,8 @@ on:
     # 6:07 AM Pacific Wed and Fri, before the open. Both DST halves registered;
     # pipeline.py's SCHEDULES table no-ops whichever does not own today.
     # MUST match SCHEDULES in pipeline.py exactly.
-    - cron: "7 13 * * 3,5"   # 6:07 AM PDT, active Mar–Nov
-    - cron: "7 14 * * 3,5"   # 6:07 AM PST, active Nov–Mar
+    - cron: "7 14 * * 3,5"   # 7:07 AM PDT, active Mar–Nov
+    - cron: "7 15 * * 3,5"   # 7:07 AM PST, active Nov–Mar
 
   workflow_dispatch:
     inputs:

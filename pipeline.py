@@ -360,7 +360,9 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
                           mode: str = "full",
                           premium: list[dict] | None = None,
                           benchmarks: list[dict] | None = None,
-                          income: list[dict] | None = None) -> tuple[str, str]:
+                          income: list[dict] | None = None,
+                          quotes_live: bool = True,
+                          n_pregate: int = 0) -> tuple[str, str]:
     """
     The triage watchlist email. Two tracks, in this order:
 
@@ -611,6 +613,17 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
                       f"{'s' if len(pinned) != 1 else ''}, then the {n} new "
                       f"name{'s' if n != 1 else ''} from today's screen that "
                       f"cleared all four put-selling gates, ranked.")
+    elif pinned and not quotes_live:
+        # "Nothing cleared" was false on 2026-10-04: the names never got tested
+        # on premium because no option quotes existed when the run started.
+        intro_line = (f"Coverage on your {len(pinned)} watchlist name"
+                      f"{'s' if len(pinned) != 1 else ''}. Option quotes were not "
+                      f"available when this ran because the market was closed, so "
+                      f"no new names could be priced, and strikes, credits and exit "
+                      f"levels are missing below. {n_pregate} name"
+                      f"{'s' if n_pregate != 1 else ''} passed the crash, structure "
+                      f"and earnings checks and will be priced on the next run "
+                      f"during market hours.")
     elif pinned:
         intro_line = (f"Coverage on your {len(pinned)} watchlist name"
                       f"{'s' if len(pinned) != 1 else ''}. Nothing new cleared "
@@ -805,9 +818,31 @@ def parse_args():
 SCHEDULES = {
     "7 1 * * 1":    ("full",     18, True),    # Sun 6:07 PM PDT (01:07 UTC Mon)
     "7 2 * * 1":    ("full",     18, False),   # Sun 6:07 PM PST (02:07 UTC Mon)
-    "7 13 * * 3,5": ("coverage",  6, True),    # Wed/Fri 6:07 AM PDT
-    "7 14 * * 3,5": ("coverage",  6, False),   # Wed/Fri 6:07 AM PST
+    "7 14 * * 3,5": ("coverage",  7, True),    # Wed/Fri 7:07 AM PDT, after the open
+    "7 15 * * 3,5": ("coverage",  7, False),   # Wed/Fri 7:07 AM PST, after the open
 }
+
+
+def market_session_now() -> bool:
+    """
+    True during the regular US equity session, Mon-Fri 9:30-16:00 Eastern.
+
+    Yahoo blanks option bids outside the session, and scan.py drops any
+    contract bidding under $0.05, so off-hours every chain comes back empty.
+    That is why the 2026-09-27 and 2026-10-04 Sunday screens (which GitHub
+    started near midnight Pacific) produced no new names: 19 names passed the
+    crash, structure and earnings checks on 10/04 and all of them failed only
+    for lack of a quote. Holidays are not modelled here; the empty-chain check
+    in main() catches those.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return True
+    if now.weekday() >= 5:
+        return False
+    return datetime.time(9, 30) <= now.time() <= datetime.time(16, 0)
 
 
 def resolve_schedule() -> tuple[bool, str]:
@@ -1007,7 +1042,11 @@ def main():
             # week in progress, whose "close" IS today's price, so an exact
             # match there is expected, not a sign of stale data. On 2026-10-02
             # this fired false warnings on IIPR, AVAV and PGY for that reason.
+            # Also only during the session: on a weekend or before the open,
+            # today's price IS last Friday's close, so a match is expected.
+            # On 2026-10-05 this fired on all 11 names for that reason.
             if (wclose and d.get("price") and not (wc or {}).get("in_progress")
+                    and market_session_now()
                     and abs(float(d["price"]) - float(wclose)) < 0.005):
                 log.warning(f"  {d['ticker']}: price {d['price']} equals the "
                             f"{wc.get('week_ending')} weekly close exactly — "
@@ -1239,11 +1278,19 @@ def main():
 
     # Step 7 — build + send the watchlist email
     log.info("\nBuilding watchlist email...")
+    # Any quotable put anywhere means the chain data was live.
+    quotes_live = any((b.get("options") or {}).get("puts")
+                      for b in list(pinned_bundles) + list(bundles))
+    if not quotes_live:
+        log.warning("No quotable puts on any name: market closed or Yahoo returned "
+                    "empty chains. Email will say so instead of 'nothing cleared'.")
     subject, html = build_watchlist_email(tier1, tier2, blocked, run_date,
                                           pinned=pinned_bundles, mode=mode,
                                           premium=premium_names,
                                           benchmarks=benchmarks,
-                                          income=income_names)
+                                          income=income_names,
+                                          quotes_live=quotes_live,
+                                          n_pregate=len(pre))
     send_email(subject, html, images=chart_images)
 
     # Snapshot only after the email is away. If the send throws, the state
@@ -1256,12 +1303,22 @@ def main():
         # every run this doesn't fire is a week of IV history that can never
         # be recovered. Runs on both Sunday and Wed/Fri so the series fills in
         # roughly 3x a week rather than once.
-        try:
-            import iv_history as ivh
-            ivh.append_snapshot(pinned_bundles, run_date)
-            log.info(f"IV snapshot appended for {len(pinned_bundles)} names.")
-        except Exception as e:
-            log.warning(f"IV snapshot failed, continuing without it: {e}")
+        # Only during the session. Off-hours, Yahoo either blanks the chain
+        # (nothing recorded, harmless) or returns stale marks like the 649%
+        # "yields" of 2026-09-14, which would corrupt the history being built.
+        if market_session_now():
+            try:
+                import iv_history as ivh
+                before = {t: len(v) for t, v in ivh.load_history().items()}
+                ivh.append_snapshot(pinned_bundles, run_date)
+                after = ivh.load_history()
+                added = sum(1 for t, v in after.items() if len(v) > before.get(t, 0))
+                log.info(f"IV snapshot recorded for {added}/{len(pinned_bundles)} names.")
+            except Exception as e:
+                log.warning(f"IV snapshot failed, continuing without it: {e}")
+        else:
+            log.info("Market closed, IV snapshot skipped to keep off-hours "
+                     "quotes out of the history.")
 
     log.info("\nPipeline complete.")
     log.info(f"  Scanned: {len(tickers)}  |  Viable after pre-gate: {len(pre)}")

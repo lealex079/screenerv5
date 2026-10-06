@@ -66,13 +66,16 @@ jobs:
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_MODEL:      ${{ vars.CLAUDE_MODEL || 'claude-opus-5' }}
+          CLAUDE_MODEL:      ${{ vars.CLAUDE_MODEL || 'claude-opus-5-5' }}
           SMTP_PASS:         ${{ secrets.SMTP_PASS }}
           SMTP_HOST:         ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
           SMTP_PORT:         ${{ vars.SMTP_PORT || '587' }}
           SMTP_USER:         ${{ secrets.SMTP_USER }}
           EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:          ${{ secrets.EMAIL_TO }}
+          # Unusual Whales lines on pinned cards. Off until ENABLE_UW is set to 1.
+          UW_API_KEY:        ${{ secrets.UW_API_KEY }}
+          ENABLE_UW:         ${{ vars.ENABLE_UW || '0' }}
           TOP_N:             ${{ github.event.inputs.top_n || '10' }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SCHEDULE_CRON:     ${{ github.event.schedule }}

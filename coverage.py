@@ -945,6 +945,15 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
         def s(v):
             return f"{v:.0f}" if v is not None else "—"
 
+        # Unusual Whales lines (ENABLE_UW). Absent or failed -> empty strings.
+        uw_html = uw_chip = ""
+        if b.get("uw"):
+            try:
+                import uw_report as _uwr
+                uw_html, uw_chip = _uwr.render_card_block(b["uw"]), _uwr.iv_rank_chip(b["uw"])
+            except Exception:
+                uw_html = uw_chip = ""
+
         cards += f"""
         <div style="background:#1a2332;border-radius:8px;border:1px solid #2a3a4e;
                     border-left:3px solid {vcolor};padding:16px 18px;margin-bottom:14px">
@@ -962,12 +971,14 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
             <span style="color:#64748b">Trend <b style="color:{score_color(ts)}">{s(ts)}</b></span>
             <span style="color:#64748b">Crash <b style="color:{score_color(cs, True)}">{s(cs)}</b></span>
             <span style="color:#64748b">Structure <b style="color:{score_color(ss)}">{s(ss)}</b></span>
+            {uw_chip}
           </div>
           {(__import__("charts").chart_img_tag(b["_chart_cid"]) if b.get("_chart_cid") else "")}
           {note_html}
           {note_failed_html}
           {delta_html}
           {f'<div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>' if blurb_html else ''}
+          {uw_html}
           {blockers_html}
         </div>"""
 

@@ -87,6 +87,9 @@ ENABLE_INCOME  = os.environ.get("ENABLE_INCOME", "0") != "0"   # new, off by def
 # New paths ship OFF so a scheduled run keeps doing exactly what it did before
 # the code landed. Turn each on deliberately after a manual run has proved it.
 ENABLE_CHARTS  = os.environ.get("ENABLE_CHARTS", "0") != "0"
+# Unusual Whales lines on pinned cards (IV rank, options flow, dark pool,
+# insiders). Reports their data as-is: no score, never changes a verdict.
+ENABLE_UW      = os.environ.get("ENABLE_UW", "0") != "0"
 PINNED_TICKERS = [t.strip().upper() for t in
                   os.environ.get("PINNED_TICKERS", "AVAV,IIPR,INTU,ACN").split(",")
                   if t.strip()]
@@ -668,7 +671,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
   {blocked_html}
 
   <div style="border-top:1px solid #1e2a35;margin-top:22px;padding-top:12px;font-size:10px;color:#334155;text-align:center">
-    TrendScore and CrashScore: regression-validated. structure_score, grades, composite rank: provisional screens. Not financial advice.
+    TrendScore and CrashScore: weights informed by regression tests on past data, not a backtested trading result. Large-trader activity lines are Unusual Whales data, reported as recorded. structure_score, grades, composite rank: provisional screens. Not financial advice.
   </div>
 </div></body></html>"""
     return subject, html
@@ -828,7 +831,7 @@ def market_session_now() -> bool:
     True during the regular US equity session, Mon-Fri 9:30-16:00 Eastern.
 
     Yahoo blanks option bids outside the session, and scan.py drops any
-    contract bidding under $0.05, so off-hours every chain comes back empty.
+    contract bidding under $0.10, so off-hours every chain comes back empty.
     That is why the 2026-09-27 and 2026-10-04 Sunday screens (which GitHub
     started near midnight Pacific) produced no new names: 19 names passed the
     crash, structure and earnings checks on 10/04 and all of them failed only
@@ -892,6 +895,44 @@ def resolve_schedule() -> tuple[bool, str]:
                     f"delay, not a pipeline fault.")
     log.info(f"Scheduled run: cron '{cron}' -> mode '{mode}'")
     return True, mode
+
+
+def attach_unusual_whales(pinned_bundles: list[dict], prior: dict) -> None:
+    """
+    Attach b["uw"] (IV rank + plain report lines) to each pinned bundle.
+    Window = since that ticker's previous report, else the last 5 days, capped
+    at 7. Optional by design: a missing module, missing key or API failure
+    logs a warning and leaves the cards exactly as they were.
+    """
+    try:
+        import uw_client, uw_report
+    except Exception as e:
+        log.warning(f"ENABLE_UW is on but the UW modules failed to import: {type(e).__name__}")
+        return
+    client = uw_client.UWClient()
+    if not client.enabled:
+        log.warning("ENABLE_UW is on but UW_API_KEY is not set. Skipping.")
+        return
+    now = datetime.datetime.now(datetime.timezone.utc)
+    floor = now - datetime.timedelta(days=7)
+    for b in pinned_bundles:
+        since = now - datetime.timedelta(days=5)
+        try:
+            d = datetime.date.fromisoformat(str((prior.get(b["ticker"]) or {}).get("date")))
+            # Same-day reruns would give an empty window; look back a day instead.
+            if d >= now.date():
+                d = now.date() - datetime.timedelta(days=1)
+            since = datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc)
+        except (TypeError, ValueError):
+            pass
+        since = max(since, floor)
+        try:
+            b["uw"] = uw_report.build_ticker_report(client, b["ticker"], since, now=now)
+        except Exception as e:
+            log.warning(f"  {b['ticker']}: UW report failed ({type(e).__name__})")
+    n_ok = sum(1 for b in pinned_bundles if (b.get("uw") or {}).get("iv_rank") is not None)
+    log.info(f"Unusual Whales: {n_ok}/{len(pinned_bundles)} names with IV rank, "
+             f"{client.requests_made} requests, usage headers {client.last_usage or 'none seen'}")
 
 
 def _pre_gate_scan_only(results: list[dict]) -> list[dict]:
@@ -1088,6 +1129,9 @@ def main():
         if prior:
             log.info(f"Change vs last run: {n_material}/{len(pinned_bundles)} "
                      f"materially moved, {n_search} news lookups")
+
+        if ENABLE_UW:
+            attach_unusual_whales(pinned_bundles, prior)
 
     # Step 5 — full gate (adds liquidity) + composite rank → top 5
     tier1, tier2, blocked = wr.rank_candidates(bundles)

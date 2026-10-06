@@ -41,7 +41,7 @@ MAX_DELTA = 0.35
 
 # Below this the premium does not pay for the assignment risk, and the fill is
 # usually theoretical.
-MIN_BID = 0.05
+MIN_BID = 0.10
 
 
 def _puts(options: dict) -> list[dict]:

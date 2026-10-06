@@ -663,6 +663,12 @@ def compute_liquidity(all_puts, all_calls, spot, total_chain_oi, avg_volume, tod
     }
 
 
+# Contract floors, matching the project's trading rules. Raised 2026-10-05 from
+# bid $0.05 / OI 1, which let untradeable contracts into the chain.
+MIN_OPTION_BID = 0.10
+MIN_OPTION_OI = 5
+
+
 def fetch_options(ticker, ctx=None):
     """Fetch full options chain for all expirations in 27-45 DTE window."""
     import datetime
@@ -708,7 +714,7 @@ def fetch_options(ticker, ctx=None):
             vol = int(vol_raw) if vol_raw and not np.isnan(float(vol_raw)) else 0
             sym = str(getattr(row, "contractSymbol", ""))
 
-            if bid < 0.05 or oi < 1 or iv <= 0:
+            if bid < MIN_OPTION_BID or oi < MIN_OPTION_OI or iv <= 0:
                 return None
 
             delta = bs_delta(spot, strike, dte_days, iv, is_put=is_put)
@@ -1284,6 +1290,17 @@ def scan_ticker(ticker):
                 rev_growth = float(rv.iloc[0]) / float(rv.iloc[4]) - 1
 
     metrics_used = SECTOR_METRICS.get(sector, ["pe", "pb", "ps", "ev_ebit"])
+
+    # Dividend yield (%): forward annual dividend rate / current price. None for
+    # non-payers. Payout safety (coverage by earnings or FCF) is NOT checked here.
+    dividend_yield = None
+    try:
+        _div_rate = info.get("dividendRate")
+        _px = float(last["Close"])
+        if _div_rate and _px > 0:
+            dividend_yield = round(float(_div_rate) / _px * 100, 2)
+    except Exception:
+        dividend_yield = None
     cmf = float(last["cmf_20"]) if pd.notna(last["cmf_20"]) else 0
     obv_roc = float(last["obv_roc_20"]) if pd.notna(last["obv_roc_20"]) else 0
 
@@ -1551,6 +1568,7 @@ def scan_ticker(ticker):
         "resistance_strength": resistance_strength,
         "fundamental_score": fundamental_score,
         "structure_score": structure_score,
+        "dividend_yield": dividend_yield,
         "chart_data": chart_data,
     }
 

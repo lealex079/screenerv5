@@ -43,6 +43,20 @@ after a week of real output.
 | `EMAIL_FROM`        | e.g. `screener@cpa-cfo-now.com` (must be on an authed domain — step 3) |
 | `EMAIL_TO`          | comma-separated: `sean@firm.com,franklin@firm.com` |
 
+### Unusual Whales (optional)
+
+Adds large-trader activity and IV rank lines to the pinned-name cards. UW's numbers are reported as recorded; nothing is scored or re-rated.
+
+| Name | Kind | What |
+|---|---|---|
+| `UW_API_KEY` | secret | Unusual Whales API token |
+| `ENABLE_UW` | variable | `1` turns it on. Default `0`. Leave off until a manual run shows the lines render. |
+| `UW_FLOW_MIN_PREMIUM` | variable | Smallest options trade, in dollars of premium, counted as large. Default `10000`. |
+| `UW_DARKPOOL_MIN_PREMIUM` | variable | Smallest dark pool print, in dollars, reported. Default `250000`. |
+| `UW_SHOW_13F` | variable | `1` adds the quarterly institutional ownership line. Default off (data is up to 45 days old). |
+
+If a call fails, that name simply shows no UW lines. The report still sends.
+
 ## 2. Confirm the model string is still current
 
 `pipeline.py` hardcodes `claude-opus-4-8`. Model IDs change; a stale one 404s the

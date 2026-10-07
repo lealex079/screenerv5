@@ -92,6 +92,9 @@ blk = uw_report.render_card_block({"lines": ["IV rank (1 year): 5 out of 100.", 
 assert "&lt;none&gt; &amp; more" in blk and "IV rank (1 year): 5" in blk and "\u2014" not in blk
 assert uw_report.render_card_block(None) == "" and uw_report.iv_rank_chip({"iv_rank": None}) == ""
 assert ">39<" in uw_report.iv_rank_chip({"iv_rank": 38.99})
+late = datetime.datetime(2026, 10, 6, 2, 48, tzinfo=UTC)          # 7:48 PM Pacific on Oct 5
+assert uw_report.market_date(late) == datetime.date(2026, 10, 5)
+assert uw_report._session_days(datetime.datetime(2026, 10, 5, tzinfo=UTC), uw_report.market_date(late)) == [datetime.date(2026, 10, 5)]
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

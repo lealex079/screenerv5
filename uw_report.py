@@ -192,6 +192,16 @@ def ownership_line(rows):
 
 
 # -- orchestration ----------------------------------------------------------------
+def market_date(now):
+    """Today's date on the US market calendar (Eastern). A run at 7:45 PM
+    Pacific is already 'tomorrow' in UTC, and UW rejects future dates (422)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return now.astimezone(ZoneInfo("America/New_York")).date()
+    except Exception:
+        return (now - datetime.timedelta(hours=5)).date()
+
+
 def _session_days(since, today):
     days, d = [], since.date() if isinstance(since, datetime.datetime) else since
     while d <= today:
@@ -220,7 +230,7 @@ def build_ticker_report(client, ticker, since, now=None):
         out["lines"].append(flow_line(summarize_flow(alerts), window, trunc))
 
         prints, trunc_any, failed = [], False, False
-        for day in _session_days(since, now.date()):
+        for day in _session_days(since, market_date(now)):
             rows, trunc = client.darkpool(ticker, date=day, min_premium=DARKPOOL_MIN_PREMIUM)
             if rows is None:
                 failed = True

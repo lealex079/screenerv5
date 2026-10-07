@@ -1254,14 +1254,23 @@ def scan_ticker(ticker):
     capex = get_ttm(cf_q, "Capital Expenditure")
     tax_prov = get_ttm(inc_q, "Tax Provision")
 
-    ev = (mcap + debt - cash) if mcap and debt is not None and cash is not None else None
-    pe = sdiv(mcap, net_inc, True)
-    pb = sdiv(mcap, equity, True)
-    ps = sdiv(mcap, revenue, True)
-    ev_ebit = sdiv(ev, ebit, True)
+    # Foreign filers (TSM, ASML, etc.): market cap is quoted in the listing
+    # currency but the statements are in the reporting currency. Dividing one by
+    # the other gives multiples that are wrong by the exchange rate (TSM showed a
+    # P/E near 1). Blank the cross-currency multiples rather than show them.
+    # Ratios built only from statement lines (margins, ROIC) are unaffected.
+    fin_ccy = info.get("financialCurrency")
+    list_ccy = info.get("currency")
+    currency_mismatch = bool(fin_ccy and list_ccy and str(fin_ccy).upper() != str(list_ccy).upper())
+
+    ev = (mcap + debt - cash) if mcap and debt is not None and cash is not None and not currency_mismatch else None
+    pe = None if currency_mismatch else sdiv(mcap, net_inc, True)
+    pb = None if currency_mismatch else sdiv(mcap, equity, True)
+    ps = None if currency_mismatch else sdiv(mcap, revenue, True)
+    ev_ebit = None if currency_mismatch else sdiv(ev, ebit, True)
     gm = sdiv(gross_p, revenue)
     fcf = (op_cf + capex) if op_cf is not None and capex is not None else None
-    fcf_yield = sdiv(fcf, mcap)
+    fcf_yield = None if currency_mismatch else sdiv(fcf, mcap)
 
     peg = info.get("trailingPegRatio") or info.get("pegRatio")
     if peg is not None:
@@ -1569,6 +1578,7 @@ def scan_ticker(ticker):
         "fundamental_score": fundamental_score,
         "structure_score": structure_score,
         "dividend_yield": dividend_yield,
+        "currency_mismatch": currency_mismatch,
         "chart_data": chart_data,
     }
 

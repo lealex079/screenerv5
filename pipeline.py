@@ -358,6 +358,14 @@ def fetch_options_for_top(top: list[dict]) -> None:
 # Email — the triage watchlist digest
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _clean_prose(text: str) -> str:
+    try:
+        import coverage as _cov
+        return _cov.clean_prose(text)
+    except Exception:
+        return text
+
+
 def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[dict],
                           run_date: str, pinned: list[dict] | None = None,
                           mode: str = "full",
@@ -401,22 +409,22 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
         # Midweek: the subject IS the summary. On a quiet run it should be
         # readable from the notification without opening anything.
         if n_first and n_moved:
-            subject = f"Coverage — {run_date} | {n_first} new, {n_moved} moved"
+            subject = f"Coverage, {run_date} | {n_first} new, {n_moved} moved"
         elif n_first:
-            subject = f"Coverage — {run_date} | {n_first} new to coverage"
+            subject = f"Coverage, {run_date} | {n_first} new to coverage"
         elif n_moved:
-            subject = (f"Coverage — {run_date} | {n_moved} of {len(pinned)} moved")
+            subject = (f"Coverage, {run_date} | {n_moved} of {len(pinned)} moved")
         elif quiet:
-            subject = f"Coverage — {run_date} | nothing to action"
+            subject = f"Coverage, {run_date} | nothing to action"
         else:
-            subject = f"Coverage — {run_date} | no material change"
+            subject = f"Coverage, {run_date} | no material change"
     elif pinned and not tier1:
-        subject = f"Watchlist — {run_date} | coverage update, no new names"
+        subject = f"Watchlist, {run_date} | coverage update, no new names"
     elif pinned:
-        subject = (f"Watchlist — {run_date} | {len(pinned)} on coverage, "
+        subject = (f"Watchlist, {run_date} | {len(pinned)} on coverage, "
                    f"{n} new name{'s' if n != 1 else ''}")
     else:
-        subject = f"Watchlist — {run_date} | {n} name{'s' if n != 1 else ''} worth researching"
+        subject = f"Watchlist, {run_date} | {n} name{'s' if n != 1 else ''} worth researching"
 
     def score_color(v, high_bad=False):
         if v is None: return "#94a3b8"
@@ -456,7 +464,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     for i, b in enumerate(tier1, 1):
         scan = b.get("scan") or {}
         blurb_html = "<br>".join(
-            (b.get("blurb") or "").split("\n")
+            _clean_prose(b.get("blurb") or "").split("\n")
         ) or "[no blurb]"
         # Sector comes from yt.info, which intermittently 401s under Yahoo
         # throttling — scan.py then defaults it to "Unknown". Printing that adds
@@ -535,11 +543,13 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
                 </tr>"""
             for name, c, desc in legend_items
         )
+        tier2_lead = (f"Ranked below the top {len(tier1)}" if tier1
+                      else "No name made the top tier this run")
         tier2_html = f"""
         <div style="margin-top:26px">
           <div style="font-size:12px;color:#94a3b8;margin-bottom:2px">Also cleared the gates</div>
           <div style="font-size:11px;color:#475569;margin-bottom:10px;line-height:1.5">
-            Ranked below the top {len(tier1)}, shown as data only — no write-up.
+            {tier2_lead}, shown as data only, no write-up.
             The flag says <i>why</i> the name sits here. It's read off the numbers,
             not a verdict — unlike the calls above, nothing analyzed these.
           </div>
@@ -570,7 +580,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     if blocked:
         rows = "".join(
             f'<div style="font-size:11px;color:#64748b;padding:3px 0">'
-            f'{b["ticker"]} — blocked: {", ".join(b.get("_gates", []))}</div>'
+            f'{b["ticker"]}: blocked by {", ".join(b.get("_gates", []))}</div>'
             for b in sorted(blocked, key=lambda x: x["ticker"])
         )
         blocked_html = f"""

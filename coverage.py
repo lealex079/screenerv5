@@ -23,6 +23,7 @@ Two things live here:
 import datetime
 import json
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -834,12 +835,26 @@ def all_quiet(pinned: list[dict]) -> bool:
     )
 
 
+def clean_prose(text: str) -> str:
+    """Strip markdown emphasis and dashes from model text before it is rendered.
+
+    The email is HTML, so raw ** shows up literally around verdicts. The prompts
+    already ban em and en dashes; this is the backstop for when one slips through.
+    """
+    if not text:
+        return text
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    t = t.replace("**", "").replace("__", "")
+    t = re.sub(r"\s*[\u2014\u2013]\s*", ", ", t)
+    return t
+
+
 def render_quiet_digest(pinned: list[dict]) -> str:
     """One compact block for a run where nothing moved and nothing is live."""
     rows = ""
     for b in pinned:
         gs = b.get("gate_status") or {}
-        blocking = ", ".join(g["gate"] for g in (gs.get("blocking") or [])) or "—"
+        blocking = ", ".join(g["gate"] for g in (gs.get("blocking") or [])) or "none"
         vcolor = VERDICT_COLOR.get(gs.get("verdict"), "#94a3b8")
         price = (b.get("scan") or {}).get("price") or 0
         rows += (f'<tr>'
@@ -884,7 +899,7 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
         verdict = gs.get("verdict", "—")
         vcolor  = VERDICT_COLOR.get(verdict, "#94a3b8")
 
-        raw_blurb = (b.get("blurb") or "").strip()
+        raw_blurb = clean_prose((b.get("blurb") or "").strip())
         blurb_html = ("<br>".join(raw_blurb.split("\n")) if raw_blurb else "")
 
         # A per-ticker generation failure degrades to this, never to whatever
@@ -934,7 +949,7 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
                 f'<div style="font-size:11px;color:#94a3b8;margin-top:3px">'
                 f'<b style="color:#f59e0b">{g["gate"]}</b> at {g["value"]} '
                 f'(needs {g["threshold"]})'
-                f'{" — " + g["needs"] if g.get("needs") else ""}</div>'
+                f'{". " + g["needs"] if g.get("needs") else ""}</div>'
                 for g in blockers)
             blockers_html = (f'<div style="background:#0f1419;border-radius:6px;'
                              f'padding:8px 10px;margin-top:10px">'
@@ -1118,6 +1133,12 @@ def compute_delta(prev: dict, bundle: dict) -> dict:
     gs   = bundle.get("gate_status") or {}
     put  = _quoted_put(bundle)
     d    = {"first_run": False, "since": prev.get("date"), "material": False}
+    try:
+        from datetime import date as _date
+        if prev.get("date") and str(prev.get("date"))[:10] == _date.today().isoformat():
+            d["same_day"] = True
+    except Exception:
+        pass
 
     p0, p1 = prev.get("price"), scan.get("price")
     if p0 and p1:
@@ -1186,6 +1207,8 @@ def delta_sentence(d: dict) -> str:
     if not d or d.get("first_run"):
         return "First report on this name."
     if not d.get("material"):
+        if d.get("same_day"):
+            return "No material change since the earlier report today."
         return f"No material change since {d.get('since', 'the last report')}."
     bits = []
     if "verdict_change" in d:

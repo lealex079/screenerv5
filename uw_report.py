@@ -286,6 +286,66 @@ def earnings_move_line(summary, price=None, today=None):
     return " ".join(parts)
 
 
+def summarize_insiders(rows, today=None):
+    """Structured insider totals for the past INSIDER_LOOKBACK_DAYS. None = no data.
+    cluster is True when UW shows two or more different insiders buying on one
+    filing day (UW's own uniq_insiders count); it is a flag, not a score."""
+    if rows is None:
+        return None
+    today = today or datetime.date.today()
+    cut = today - datetime.timedelta(days=INSIDER_LOOKBACK_DAYS)
+    o = {"buy_usd": 0.0, "sell_usd": 0.0, "buy_n": 0, "sell_n": 0, "plan_pct": None,
+         "max_buyers": 0, "cluster": False, "days": INSIDER_LOOKBACK_DAYS}
+    plan = 0.0
+    for r in rows:
+        d = _d(r.get("date"))
+        if not d or d < cut:
+            continue
+        p = abs(num(r.get("premium"), 0))
+        n = int(r.get("transactions") or 0)
+        if r.get("buy_sell") == "buy":
+            o["buy_usd"] += p; o["buy_n"] += n
+            o["max_buyers"] = max(o["max_buyers"], int(r.get("uniq_insiders") or 0))
+        else:
+            o["sell_usd"] += p; o["sell_n"] += n
+            plan += abs(num(r.get("premium_10b5"), 0))
+    if o["sell_usd"] > 0 and plan > 0:
+        o["plan_pct"] = round(plan / o["sell_usd"] * 100)
+    o["cluster"] = o["max_buyers"] >= 2
+    return o
+
+
+def build_tiles(stats, flow, dark, insiders, moves, price=None, today=None):
+    """Plain structured numbers for the visual card. Every field is UW's, counted
+    or summed; nothing here is a score. Missing pieces are None."""
+    today = today or datetime.date.today()
+    t = {"iv": None, "earnings": None, "flow": None, "dark": None, "insiders": insiders}
+    r = iv_rank_value(stats)
+    if r is not None:
+        g = lambda k: num((stats or {}).get(k))
+        t["iv"] = {"rank": r, "iv": g("iv"), "lo": g("iv_low"), "hi": g("iv_high"), "rv": g("rv")}
+    n = (moves or {}).get("next")
+    if n:
+        days = (n["date"] - today).days
+        e = {"date": n["date"].isoformat(), "days": days, "confirmed": n["confirmed"],
+             "implied_pct": n.get("implied_pct"), "lo": None, "hi": None,
+             "history": [{"realized": h["realized_pct"], "implied": h["implied_pct"]}
+                         for h in (moves.get("history") or [])],
+             "beat": moves.get("beat", 0)}
+        if price and n.get("implied_pct") is not None:
+            e["lo"] = price * (1 - n["implied_pct"] / 100)
+            e["hi"] = price * (1 + n["implied_pct"] / 100)
+        t["earnings"] = e
+    if flow is not None:
+        tot = flow["total"] or 0
+        t["flow"] = {"n": flow["n"], "call": flow["call"], "put": flow["put"], "total": flow["total"],
+                     "ask_pct": round(flow["ask"] / tot * 100) if tot else None,
+                     "bid_pct": round(flow["bid"] / tot * 100) if tot else None}
+    if dark is not None:
+        t["dark"] = {"n": dark["n"], "total": dark["total"]}
+    return t
+
+
 def build_ticker_report(client, ticker, since, now=None, price=None):
     """
     Fetch and summarize everything for one ticker. `since` is a UTC datetime
@@ -302,7 +362,8 @@ def build_ticker_report(client, ticker, since, now=None, price=None):
         out["lines"].append(iv_line(stats))
 
         alerts, trunc = client.flow_alerts(ticker, since, min_premium=FLOW_MIN_PREMIUM)
-        out["lines"].append(flow_line(summarize_flow(alerts), window, trunc))
+        flow_s = summarize_flow(alerts)
+        out["lines"].append(flow_line(flow_s, window, trunc))
 
         prints, trunc_any, failed = [], False, False
         for day in _session_days(since, market_date(now)):
@@ -312,10 +373,11 @@ def build_ticker_report(client, ticker, since, now=None, price=None):
                 continue
             prints.extend(rows)
             trunc_any = trunc_any or trunc
-        out["lines"].append(darkpool_line(
-            None if (failed and not prints) else summarize_darkpool(prints), window, trunc_any))
+        dark_s = None if (failed and not prints) else summarize_darkpool(prints)
+        out["lines"].append(darkpool_line(dark_s, window, trunc_any))
 
-        out["lines"].append(insider_line(client.insider_flow(ticker), today=now.date()))
+        ins_rows = client.insider_flow(ticker)
+        out["lines"].append(insider_line(ins_rows, today=now.date()))
         if SHOW_13F:
             out["lines"].append(ownership_line(client.ownership(ticker)))
         erows = client.earnings(ticker)
@@ -324,24 +386,95 @@ def build_ticker_report(client, ticker, since, now=None, price=None):
         em = earnings_move_line(out["earnings_moves"], price=price, today=now.date())
         if em:
             out["lines"].insert(1, em)
+        out["tiles"] = build_tiles(stats, flow_s, dark_s, summarize_insiders(ins_rows, now.date()),
+                                   out["earnings_moves"], price=price, today=now.date())
+        out["tiles"]["window_days"] = (now.date() - since.date()).days
     except Exception:
         out["lines"].append("Unusual Whales data unavailable this run.")
     return out
 
 
+def _email_tile(title, big, sub, color="#334155", bar=None):
+    import html as _h
+    bar_html = ""
+    if bar is not None:       # bar = (green_pct, red_pct) or ("rank", pct)
+        g, r = bar
+        bar_html = ('<table width="100%%" cellpadding="0" cellspacing="0" style="margin:5px 0 2px"><tr>'
+                    '<td width="%d%%" style="height:6px;background:%s;font-size:0">&nbsp;</td>'
+                    '<td width="%d%%" style="height:6px;background:%s;font-size:0">&nbsp;</td></tr></table>'
+                    % (max(1, round(g)), "#22c55e" if r else "#3b82f6", max(0, round(r if r else 100 - g)),
+                       "#ef4444" if r else "#1e2a35"))
+    return ('<td valign="top" width="50%%" style="padding:3px"><div style="border-left:3px solid %s;'
+            'background:#131a22;border-radius:5px;padding:7px 9px">'
+            '<div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">%s</div>'
+            '<div style="font-size:16px;font-weight:600;color:#e2e8f0">%s</div>%s'
+            '<div style="font-size:11px;color:#94a3b8;line-height:1.4">%s</div></div></td>'
+            % (color, _h.escape(title), _h.escape(big), bar_html, _h.escape(sub)))
+
+
 def render_card_block(uw):
-    """Small HTML block for a pinned card. Empty string when there is nothing."""
+    """Compact visual block for a pinned card (tiles in a 2-column table).
+    Falls back to the plain lines if no structured data. Empty when nothing."""
     import html as _html
+    t = (uw or {}).get("tiles")
     lines = list((uw or {}).get("lines") or [])
-    if not lines:
+    if not t and not lines:
         return ""
-    items = "".join('<div style="font-size:11px;line-height:1.5;color:#94a3b8;margin-top:4px">%s</div>'
-                    % _html.escape(l) for l in lines)
-    return ('<div style="background:#0f1419;border-radius:6px;padding:8px 10px;margin-top:10px">'
-            '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px">'
-            'Large-trader activity (as reported by Unusual Whales)</div>%s'
-            '<div style="font-size:10px;color:#475569;margin-top:6px">These lines report recorded trades only. '
-            'They do not say why a trade was made and do not change the verdict.</div></div>' % items)
+    foot = ('<div style="font-size:10px;color:#475569;margin-top:6px">Recorded trades only. They do not '
+            'say why a trade was made and do not change the verdict.</div>')
+    head = ('<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;'
+            'margin-bottom:3px">Large-trader activity (Unusual Whales)</div>')
+    if not t:
+        items = "".join('<div style="font-size:11px;line-height:1.5;color:#94a3b8;margin-top:4px">%s</div>'
+                        % _html.escape(l) for l in lines)
+        return ('<div style="background:#0f1419;border-radius:6px;padding:8px 10px;margin-top:10px">%s%s%s</div>'
+                % (head, items, foot))
+    cells = []
+    iv = t.get("iv")
+    if iv:
+        r = iv["rank"]
+        sub = ("High. Sellers get paid more than usual." if r >= 70 else
+               "Low. Sellers get paid less than usual." if r <= 30 else "Middle of its past-year range.")
+        cells.append(_email_tile("Option prices vs past year", "IV rank %.0f" % r, sub,
+                                 "#22c55e" if r >= 70 else "#f59e0b" if r <= 20 else "#334155",
+                                 bar=(r, 0)))
+    e = t.get("earnings")
+    if e:
+        when = "today" if e["days"] == 0 else "tomorrow" if e["days"] == 1 else "in %d days" % e["days"]
+        sub = "%s, %s." % (when, "confirmed" if e["confirmed"] else "estimated")
+        if e.get("implied_pct") is not None:
+            sub += " Options expect about %.1f%% either way." % e["implied_pct"]
+        cells.append(_email_tile("Next earnings", _md(_d(e["date"])), sub,
+                                 "#f59e0b" if 0 <= e["days"] <= 14 else "#334155"))
+    fl = t.get("flow")
+    if fl:
+        if fl["n"]:
+            tot = (fl["call"] + fl["put"]) or 1
+            cp = fl["call"] / tot * 100
+            skew = max(fl["call"], fl["put"]) / tot
+            cells.append(_email_tile(
+                "Options money", money(fl["total"]),
+                "Calls %s, puts %s (%s)." % (money(fl["call"]), money(fl["put"]), _n(fl["n"], "large trade")),
+                ("#22c55e" if fl["call"] >= fl["put"] else "#ef4444") if skew >= 0.75 else "#334155",
+                bar=(cp, 100 - cp)))
+        else:
+            cells.append(_email_tile("Options money", "None", "No large options trades lately."))
+    ins = t.get("insiders")
+    if ins:
+        if ins["buy_n"] or ins["sell_n"]:
+            sub = "%s. Sells %s (%d)." % (_n(ins["buy_n"], "purchase"), money(ins["sell_usd"]), ins["sell_n"])
+            if ins["cluster"]:
+                sub = "%d+ insiders bought. " % ins["max_buyers"] + sub
+            cells.append(_email_tile("Insiders, %d days" % ins["days"], "Buys " + money(ins["buy_usd"]), sub,
+                                     "#22c55e" if ins["buy_usd"] > 0 else "#334155"))
+        else:
+            cells.append(_email_tile("Insiders, %d days" % ins["days"], "None", "No reported insider trades."))
+    if not cells:
+        return ""
+    rows = "".join("<tr>%s%s</tr>" % (cells[i], cells[i + 1] if i + 1 < len(cells) else "<td></td>")
+                   for i in range(0, len(cells), 2))
+    return ('<div style="background:#0f1419;border-radius:6px;padding:8px 10px;margin-top:10px">%s'
+            '<table width="100%%" cellpadding="0" cellspacing="0">%s</table>%s</div>' % (head, rows, foot))
 
 
 def iv_rank_chip(uw):

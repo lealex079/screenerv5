@@ -157,6 +157,7 @@ assert r["quotes_filled"] == 1 and r["quote_source"] == "uw_nbbo", r.get("quotes
 assert [p["strike"] for p in r["puts"]] == [170.0] and r["puts"][0]["bid"] == 1.9, r["puts"]
 assert r["puts"][0]["openInterest"] == 900 and r["puts"][0]["impliedVolatility"] == 0.30
 assert r["iv_rank"] == 61.0 and r["iv_rank_source"] == "uw" and r["iv_1y_low"] == 19.0, r
+assert r["atm_iv"] == 30.0, r["atm_iv"]   # displayed ATM IV is the UW IV the ratio uses
 os.environ["UW_FILL_QUOTES"] = "0"
 r2 = scan.fetch_options("RTX"); assert r2["quotes_filled"] == 0 and not r2["puts"]
 os.environ.pop("UW_FILL_QUOTES")

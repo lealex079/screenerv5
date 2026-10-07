@@ -121,3 +121,11 @@ for fn in ("fetch_chart", "scan_ticker", "fetch_options", "fetch_uw"):
     missing = [n for n in code.co_names if n.isupper() and n not in glob and n not in dir(__builtins__)]
     assert not missing, (fn, missing)
 print("chart constants: passed")
+
+# 7. OI by expiration table is wanted by the team; keep it on the card
+assert "OI by expiration (entire chain" in src, "OI by expiration table must stay on the card"
+print("oi table: passed")
+
+# 8. moving average grid is wanted by the team; keep it on the card and in the copy text
+assert "function renderMTFInline" in src and "renderMTFInline(d) +" in src and "MULTI-TIMEFRAME MOVING AVERAGES" in src
+print("mtf grid: passed")

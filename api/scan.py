@@ -1816,14 +1816,14 @@ function uwSplit(a, b, ca, cb) {
 function uwIvTile(iv) {
   const r = iv.rank;
   const t = uwTile('Option prices vs past year',
-    r >= 70 ? 'High' : r <= 30 ? 'Low' : 'Middle', r >= 70 ? 'green' : r <= 20 ? 'amber' : '');
+    r >= 70 ? 'High' : r < 30 ? 'Low' : 'Middle', '');
   t.appendChild(uwEl('div', 'uw-big', 'IV rank ' + Math.round(r)));
   const m = uwEl('div', 'uw-meter');
   const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, r)) + '%';
   m.appendChild(f);
   t.appendChild(uwViz(m));
-  let cap = r >= 70 ? 'Sellers get paid more than usual.' : r <= 30 ? 'Sellers get paid less than usual.' : 'Middle of its past-year range.';
-  if (iv.iv != null && iv.rv != null) cap += ' Options price in ' + Math.round(iv.iv * 100) + '% swings; the stock has moved ' + Math.round(iv.rv * 100) + '%.';
+  let cap = r >= 70 ? 'Options are priced higher than usual for this stock.' : r < 30 ? 'Options are priced lower than usual for this stock.' : 'In the middle of its past-year range.';
+  if (iv.iv != null && iv.rv != null) cap += ' They imply about ' + Math.round(iv.iv * 100) + '% a year of movement; the stock has recently moved at about ' + Math.round(iv.rv * 100) + '% a year.';
   t.appendChild(uwEl('div', 'uw-sub', cap));
   return t;
 }
@@ -2551,8 +2551,8 @@ function renderLiqIVHV(data){
   }
   if(data.iv_hv!=null){
     const r=data.iv_hv;
-    const col = r>=1.2?'#22c55e':r>=0.9?'#94a3b8':'#ef4444';
-    const lbl = r>=1.2?'options rich vs realized':r>=0.9?'fairly priced':'options cheap vs realized';
+    const col = '#94a3b8';
+    const lbl = r>=1.2?'options price in more movement than the stock has had':r>=0.9?'about in line with recent movement':'options price in less movement than the stock has had';
     const detail = (data.atm_iv!=null&&data.hv30!=null)?' (IV '+data.atm_iv+'% / HV '+data.hv30+'%)':'';
     out += '<span class="mini-badge" style="border-color:'+col+';color:'+col+'">IV/HV '+r.toFixed(2)+'x</span>'+
       '<span class="mini-badge-dim">'+lbl+detail+'</span>';
@@ -2595,11 +2595,10 @@ function buildOptionsTabs(data, crashScore, ticker) {
   let ivRankBanner = '';
   if (data.iv_rank != null) {
     const ivr = data.iv_rank;
-    const ivrColor = ivr >= 80 ? '#86efac' : ivr >= 50 ? '#22c55e' : ivr >= 30 ? '#94a3b8' : '#64748b';
-    const ivrLabel = ivr >= 80 ? 'Very elevated — excellent for premium selling'
-      : ivr >= 50 ? 'Elevated — favorable for premium selling'
-      : ivr >= 30 ? 'Moderate — acceptable conditions'
-      : 'Low — premium selling less attractive, wait or size down';
+    const ivrColor = '#94a3b8';
+    const ivrLabel = ivr >= 70 ? 'High: options are priced higher than usual for this stock'
+      : ivr >= 30 ? 'Middle of its past-year range'
+      : 'Low: options are priced lower than usual for this stock';
     ivRankBanner = '<div style="background:#0f1419;border:1px solid #1e2a35;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + ivrColor + '">' +
       '📊 IV Rank: <strong>' + ivr.toFixed(0) + '/100</strong> — ' + ivrLabel +
       (data.iv_rank_source === 'uw'
@@ -2841,10 +2840,9 @@ function formatForClaude(d) {
     // ── CHANGE 2 in Copy for Claude: IV rank ─────────────────────────────────
     if (_optD.iv_rank != null) {
       const ivr = _optD.iv_rank;
-      const ivrLabel = ivr >= 80 ? 'very elevated — excellent for premium selling'
-        : ivr >= 50 ? 'elevated — favorable for premium selling'
-        : ivr >= 30 ? 'moderate'
-        : 'low — premium selling less attractive';
+      const ivrLabel = ivr >= 70 ? 'high: options priced higher than usual for this stock'
+        : ivr >= 30 ? 'middle of its past-year range'
+        : 'low: options priced lower than usual for this stock';
       L.push('');
       L.push('IV RANK: ' + ivr.toFixed(0) + '/100 (' + ivrLabel + ')');
       if (_optD.iv_rank_source === 'uw') {
@@ -2856,9 +2854,9 @@ function formatForClaude(d) {
     // IV/HV ratio
     if (_optD.iv_hv != null) {
       const rr = _optD.iv_hv;
-      const lbl = rr >= 1.2 ? 'options rich vs realized — favorable for selling'
-        : rr >= 0.9 ? 'fairly priced'
-        : 'options cheap vs realized — selling less attractive';
+      const lbl = rr >= 1.2 ? 'options price in more movement than the stock has had'
+        : rr >= 0.9 ? 'about in line with recent movement'
+        : 'options price in less movement than the stock has had';
       L.push('');
       L.push('IV/HV RATIO: ' + rr.toFixed(2) + 'x (' + lbl + ')');
       if (_optD.atm_iv != null && _optD.hv30 != null) {

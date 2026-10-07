@@ -1593,6 +1593,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <title>Screener v5</title>
 <script src="/api/scan?lib=lwc"></script>
 <style>
+  .uw-box { background: #0f1419; border: 0.5px solid #1e2a35; border-radius: 8px; padding: 10px 12px; margin: 12px 0; }
+  .uw-title { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .uw-line { font-size: 12px; line-height: 1.5; color: #94a3b8; margin-top: 5px; }
+  .uw-note { font-size: 10px; color: #475569; margin-top: 8px; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; background: #0a0e13; color: #e2e8f0; min-height: 100vh; }
   .app { max-width: 860px; margin: 0 auto; padding: 0 16px; }
@@ -1786,6 +1790,7 @@ async function runScan() {
     scanResults = data.results.filter(d => !d.error);
     resultsDiv.innerHTML = data.results.map(renderCard).join('');
     scanResults.forEach(d => setTimeout(() => loadVP(d.ticker), 100));
+    scanResults.forEach((d, i) => setTimeout(() => loadUW(d.ticker, d.price), 400 + i * 700));
     // Init charts after DOM settles
     scanResults.forEach(d => setTimeout(() => initChart(d.ticker), 150));
     if (scanResults.length > 1) {
@@ -1796,6 +1801,38 @@ async function runScan() {
   } finally {
     btn.disabled = false; btn.textContent = 'Scan';
   }
+}
+
+const uwData = {};   // ticker -> report from /api/scan?uw=
+
+// Unusual Whales panel. Silent when the feature is off or the call fails, so
+// the scan page looks exactly as before. Text goes in via textContent, never HTML.
+async function loadUW(ticker, price) {
+  const el = document.getElementById('uw-' + ticker);
+  if (!el) return;
+  try {
+    const res = await fetch('/api/scan?uw=' + encodeURIComponent(ticker) + '&price=' + encodeURIComponent(price));
+    const j = await res.json();
+    if (!j || !j.enabled || j.error || !j.lines || !j.lines.length) return;
+    uwData[ticker] = j;
+    const box = document.createElement('div');
+    box.className = 'uw-box';
+    const title = document.createElement('div');
+    title.className = 'uw-title';
+    title.textContent = 'Large-trader activity (as reported by Unusual Whales)';
+    box.appendChild(title);
+    j.lines.forEach(t => {
+      const row = document.createElement('div');
+      row.className = 'uw-line';
+      row.textContent = t;
+      box.appendChild(row);
+    });
+    const note = document.createElement('div');
+    note.className = 'uw-note';
+    note.textContent = 'Recorded trades only. They do not say why a trade was made and do not change the scores above.';
+    box.appendChild(note);
+    el.appendChild(box);
+  } catch (e) { /* leave the panel empty */ }
 }
 
 function renderCard(d) {
@@ -1891,6 +1928,7 @@ function renderCard(d) {
     renderAVWAP(d) +
     renderConfluences(d) +
     renderVPSection(d.ticker) +
+    '<div id="uw-'+d.ticker+'"></div>' +
 
     '<hr class="section-divider">' +
     renderOptionsSection(d) +
@@ -3047,6 +3085,8 @@ function formatForClaude(d) {
   if (d.gross_margin) L.push('  Gross margin: '+d.gross_margin.toFixed(1)+'%');
   if (d.fcf_yield) L.push('  FCF yield: '+d.fcf_yield.toFixed(1)+'%');
   if (d.rev_growth) L.push('  Revenue growth YoY: '+pct(d.rev_growth,1));
+  const uw = uwData[d.ticker];
+  if (uw && uw.lines && uw.lines.length) { L.push(''); L.push('UNUSUAL WHALES (as reported, not scored)'); uw.lines.forEach(x => L.push('  '+x)); }
 
   return L.join('\n');
 }
@@ -3067,6 +3107,69 @@ function copyAll(btnEl) {
 </html>"""
 
 
+# ── Unusual Whales panel (optional, server-side only) ────────────────────────
+# Off unless ENABLE_UW=1 and UW_API_KEY is set as a Vercel environment variable.
+# The key never reaches the browser: the page calls /api/scan?uw=TICKER and
+# gets back plain report lines. Lines are what UW recorded; nothing is scored.
+import os as _os
+import re as _re
+import sys as _sys
+import time as _time
+import datetime as _dt
+
+_UW_CACHE = {}                 # ticker -> (unix time, result); lives per warm instance
+_UW_CACHE_SECONDS = 300
+_UW_WINDOW_DAYS = 5
+_UW_TICKER_RE = _re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+_uw_client_factory = None      # tests replace this to avoid the network
+
+
+def _uw_modules():
+    """Import uw_client / uw_report from the repo root or from api/."""
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    for p in (here, _os.path.dirname(here)):
+        if p not in _sys.path:
+            _sys.path.append(p)
+    import uw_client, uw_report
+    return uw_client, uw_report
+
+
+def fetch_uw(ticker, price=None):
+    """Plain-language UW lines for one ticker. Never raises."""
+    if _os.environ.get("ENABLE_UW", "0") == "0":
+        return {"enabled": False}
+    ticker = (ticker or "").strip().upper()
+    if not _UW_TICKER_RE.match(ticker):
+        return {"enabled": True, "error": "bad ticker"}
+    hit = _UW_CACHE.get(ticker)
+    if hit and _time.time() - hit[0] < _UW_CACHE_SECONDS:
+        return hit[1]
+    try:
+        uw_client, uw_report = _uw_modules()
+        client = _uw_client_factory() if _uw_client_factory else uw_client.UWClient()
+        if not client.enabled:
+            return {"enabled": False}
+        now = _dt.datetime.now(_dt.timezone.utc)
+        since = now - _dt.timedelta(days=_UW_WINDOW_DAYS)
+        rep = uw_report.build_ticker_report(client, ticker, since, now=now, price=price)
+        ne = rep.get("next_earnings") or {}
+        out = {
+            "enabled": True,
+            "ticker": ticker,
+            "iv_rank": rep.get("iv_rank"),
+            "next_earnings": ({"date": ne["date"].isoformat(), "confirmed": ne["confirmed"]}
+                              if ne.get("date") else None),
+            "lines": rep.get("lines") or [],
+            "window_days": _UW_WINDOW_DAYS,
+            "as_of": now.isoformat(timespec="seconds"),
+        }
+    except Exception as e:
+        # Class name only: never put exception text (could echo URLs) in a response.
+        return {"enabled": True, "error": "Unusual Whales data unavailable (%s)" % type(e).__name__}
+    _UW_CACHE[ticker] = (_time.time(), out)
+    return out
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -3085,8 +3188,9 @@ class handler(BaseHTTPRequestHandler):
         options_ticker = params.get("options", [""])[0].strip().upper()
         vp_ticker = params.get("vp", [""])[0].strip().upper()
         chart_ticker = params.get("chart", [""])[0].strip().upper()
+        uw_ticker = params.get("uw", [""])[0].strip().upper()
 
-        if not any([tickers_raw, options_ticker, vp_ticker, chart_ticker]):
+        if not any([tickers_raw, options_ticker, vp_ticker, chart_ticker, uw_ticker]):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -3097,6 +3201,15 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+
+        if uw_ticker:
+            _px = None
+            try:
+                _px = float(params.get("price", [""])[0])
+            except (TypeError, ValueError):
+                _px = None
+            self.wfile.write(json.dumps(fetch_uw(uw_ticker, price=_px)).encode())
+            return
 
         if options_ticker:
             ctx = None

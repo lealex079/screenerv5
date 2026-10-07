@@ -268,8 +268,9 @@ def earnings_move_line(summary, price=None, today=None):
     h = summary.get("history") or []
     if h:
         moves = ", ".join("%+.1f%% vs %.1f%% implied" % (x["realized_pct"], x["implied_pct"]) for x in h)
-        seg = "Last %s: the stock moved more than implied %d time%s (next-day move vs implied: %s)." % (
-            _n(len(h), "report"), summary["beat"], "" if summary["beat"] == 1 else "s", moves)
+        seg = "%s: the stock moved more than implied %d time%s (next-day move vs implied: %s)." % (
+            "Last report" if len(h) == 1 else "Last %d reports" % len(h),
+            summary["beat"], "" if summary["beat"] == 1 else "s", moves)
         parts.append(seg)
         if summary.get("avg_long_straddle_1d_pct") is not None:
             parts.append("A straddle bought before those reports and sold the next day averaged %+.0f%% "

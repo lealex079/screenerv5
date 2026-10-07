@@ -51,6 +51,15 @@ Free. Vercel Hobby plan supports Python serverless functions at no cost.
 
 The Sunday and midweek emails can add large options trades, dark pool prints, IV rank, insider trades and (optionally) institutional ownership to each pinned name. They are reported as Unusual Whales records them. Setup and settings (`ENABLE_UW`, `UW_API_KEY`, `UW_FLOW_MIN_PREMIUM`, `UW_DARKPOOL_MIN_PREMIUM`, `UW_SHOW_13F`) are in `SETUP.md`. Tests: `python3 tests/test_uw.py`.
 
+## Unusual Whales panel in the web app (optional)
+
+Each scanned card can show a "Large-trader activity" panel (IV rank, earnings implied move, large options trades, dark pool prints, insider trades), loaded after the scan so it never slows the scan itself.
+
+1. In Vercel, Project Settings, Environment Variables, add `UW_API_KEY` (your token) and `ENABLE_UW` = `1`. Redeploy. The key stays on the server; the page only receives plain report lines.
+2. Use a Preview deployment first. If the panel never appears, the function could not import `uw_client.py` / `uw_report.py` from the repo root. Fix: copy those two files into `api/` and redeploy.
+3. Protect the app (Vercel password protection or login) before turning this on. A public URL would let anyone spend your UW requests and see UW data.
+4. Results are cached for 5 minutes per ticker. Turn it off by setting `ENABLE_UW` to `0`; the page then looks exactly as before.
+
 ## Limitations
 
 - Vercel free tier has a 60-second timeout. Scanning 5 tickers usually finishes in 50-60 seconds. If it times out, scan fewer tickers at once.

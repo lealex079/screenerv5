@@ -95,6 +95,24 @@ assert ">39<" in uw_report.iv_rank_chip({"iv_rank": 38.99})
 late = datetime.datetime(2026, 10, 6, 2, 48, tzinfo=UTC)          # 7:48 PM Pacific on Oct 5
 assert uw_report.market_date(late) == datetime.date(2026, 10, 5)
 assert uw_report._session_days(datetime.datetime(2026, 10, 5, tzinfo=UTC), uw_report.market_date(late)) == [datetime.date(2026, 10, 5)]
+# earnings implied move summary
+_er = [
+ {"report_date": "2026-10-21", "source": "company", "expected_move_perc": "0.05", "expected_move": "9.0"},
+ {"report_date": "2026-07-22", "expected_move_perc": "0.04", "post_earnings_move_1d": "-0.06", "long_straddle_1d": "0.5"},
+ {"report_date": "2026-04-22", "expected_move_perc": "0.05", "post_earnings_move_1d": "0.01", "long_straddle_1d": "-0.5"},
+ {"report_date": "2026-01-22", "expected_move_perc": "0.05", "post_earnings_move_1d": None},
+]
+_sm = uw_report.summarize_earnings_moves(_er, today=datetime.date(2026, 10, 7))
+assert _sm["next"]["date"] == datetime.date(2026, 10, 21) and _sm["next"]["confirmed"]
+assert abs(_sm["next"]["implied_pct"] - 5.0) < 1e-9
+assert len(_sm["history"]) == 2 and _sm["beat"] == 1 and _sm["n_straddle"] == 2
+assert abs(_sm["avg_long_straddle_1d_pct"]) < 1e-9
+_ln = uw_report.earnings_move_line(_sm, price=100.0, today=datetime.date(2026, 10, 7))
+assert "5.0% either way" in _ln and "$95.00 to $105.00" in _ln and "more than implied 1 time" in _ln, _ln
+assert "\u2014" not in _ln
+assert uw_report.summarize_earnings_moves([], today=datetime.date(2026, 10, 7)) is None
+assert uw_report.earnings_move_line(None) == ""
+assert uw_client.next_earnings_from_rows(_er, datetime.date(2026, 10, 7))["date"] == datetime.date(2026, 10, 21)
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

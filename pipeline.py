@@ -937,7 +937,8 @@ def attach_unusual_whales(pinned_bundles: list[dict], prior: dict) -> None:
             pass
         since = max(since, floor)
         try:
-            b["uw"] = uw_report.build_ticker_report(client, b["ticker"], since, now=now)
+            b["uw"] = uw_report.build_ticker_report(client, b["ticker"], since, now=now,
+                                                      price=(b.get("scan") or {}).get("price"))
         except Exception as e:
             log.warning(f"  {b['ticker']}: UW report failed ({type(e).__name__})")
     n_ok = sum(1 for b in pinned_bundles if (b.get("uw") or {}).get("iv_rank") is not None)

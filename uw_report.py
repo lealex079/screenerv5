@@ -9,7 +9,7 @@ hedge, so direction is left to the reader. No em dashes (reader-facing text).
 import datetime
 import os
 
-from uw_client import num
+from uw_client import num, next_earnings_from_rows
 
 FLOW_MIN_PREMIUM = float(os.environ.get("UW_FLOW_MIN_PREMIUM", "10000"))
 DARKPOOL_MIN_PREMIUM = float(os.environ.get("UW_DARKPOOL_MIN_PREMIUM", "250000"))
@@ -211,7 +211,74 @@ def _session_days(since, today):
     return days[-3:]      # at most the three latest sessions, to bound requests
 
 
-def build_ticker_report(client, ticker, since, now=None):
+def summarize_earnings_moves(rows, today=None, max_hist=4):
+    """
+    From UW's earnings rows: the options-implied move for the next report and,
+    for the last few reports, implied versus what the stock then did the next
+    day. Only reads UW fields (expected_move_perc, post_earnings_move_1d,
+    long_straddle_1d). Counting and averaging only; no score.
+    Returns None when there is no usable upcoming or past data.
+    """
+    today = today or datetime.date.today()
+    nxt, hist = None, []
+    for r in rows or []:
+        d = _d(r.get("report_date"))
+        if d is None:
+            continue
+        implied = num(r.get("expected_move_perc"))
+        if d >= today:
+            if nxt is None or d < nxt["date"]:
+                nxt = {"date": d, "confirmed": r.get("source") != "estimation",
+                       "implied_pct": None if implied is None else implied * 100,
+                       "implied_dollars": num(r.get("expected_move"))}
+        else:
+            realized = num(r.get("post_earnings_move_1d"))
+            if implied is not None and realized is not None:
+                hist.append({"date": d, "implied_pct": implied * 100,
+                             "realized_pct": realized * 100,
+                             "long_straddle_1d": num(r.get("long_straddle_1d"))})
+    hist.sort(key=lambda h: h["date"], reverse=True)
+    hist = hist[:max_hist]
+    if nxt is None and not hist:
+        return None
+    ls = [h["long_straddle_1d"] * 100 for h in hist if h["long_straddle_1d"] is not None]
+    return {"next": nxt, "history": hist,
+            "beat": sum(1 for h in hist if abs(h["realized_pct"]) > h["implied_pct"]),
+            "avg_long_straddle_1d_pct": (sum(ls) / len(ls)) if ls else None,
+            "n_straddle": len(ls)}
+
+
+def earnings_move_line(summary, price=None, today=None):
+    """One plain line. Empty string when there is nothing to say."""
+    if not summary:
+        return ""
+    today = today or datetime.date.today()
+    parts = []
+    n = summary.get("next")
+    if n:
+        when = "%s (%s)" % (_md(n["date"], today), "confirmed" if n["confirmed"] else "estimated")
+        if n.get("implied_pct") is not None:
+            seg = "Next earnings %s: options imply a move of about %.1f%% either way" % (when, n["implied_pct"])
+            if price:
+                lo, hi = price * (1 - n["implied_pct"] / 100), price * (1 + n["implied_pct"] / 100)
+                seg += " ($%.2f to $%.2f from $%.2f)" % (lo, hi, price)
+            parts.append(seg + ".")
+        else:
+            parts.append("Next earnings %s: no implied move reported yet." % when)
+    h = summary.get("history") or []
+    if h:
+        moves = ", ".join("%+.1f%% vs %.1f%% implied" % (x["realized_pct"], x["implied_pct"]) for x in h)
+        seg = "Last %s: the stock moved more than implied %d time%s (next-day move vs implied: %s)." % (
+            _n(len(h), "report"), summary["beat"], "" if summary["beat"] == 1 else "s", moves)
+        parts.append(seg)
+        if summary.get("avg_long_straddle_1d_pct") is not None:
+            parts.append("A straddle bought before those reports and sold the next day averaged %+.0f%% "
+                         "(UW's figure, %s)." % (summary["avg_long_straddle_1d_pct"],
+                                                 _n(summary["n_straddle"], "report")))
+    return " ".join(parts)
+
+
+def build_ticker_report(client, ticker, since, now=None, price=None):
     """
     Fetch and summarize everything for one ticker. `since` is a UTC datetime
     (normally the previous report's send time). Returns
@@ -243,7 +310,12 @@ def build_ticker_report(client, ticker, since, now=None):
         out["lines"].append(insider_line(client.insider_flow(ticker), today=now.date()))
         if SHOW_13F:
             out["lines"].append(ownership_line(client.ownership(ticker)))
-        out["next_earnings"] = client.next_earnings_date(ticker, today=now.date())
+        erows = client.earnings(ticker)
+        out["next_earnings"] = next_earnings_from_rows(erows, now.date())
+        out["earnings_moves"] = summarize_earnings_moves(erows, now.date())
+        em = earnings_move_line(out["earnings_moves"], price=price, today=now.date())
+        if em:
+            out["lines"].insert(1, em)
     except Exception:
         out["lines"].append("Unusual Whales data unavailable this run.")
     return out

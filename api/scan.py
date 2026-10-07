@@ -182,6 +182,40 @@ def fetch_mtf_inline(ticker, price):
     return result
 
 
+# ── Yahoo-style chart endpoint: range + interval, lazy-loaded per card ────────
+# Range sets only the INITIAL visible window. We fetch the maximum history the
+# interval allows so the user can scroll back through full history and the
+# moving averages stay fully populated all the way back (Yahoo's behavior).
+CHART_RANGE_INTERVALS = {
+    "1D":  ["1m", "2m", "5m"],
+    "5D":  ["1m", "5m", "15m", "30m"],
+    "1M":  ["15m", "30m", "1h", "4h", "1d"],
+    "3M":  ["1h", "4h", "1d"],
+    "6M":  ["1h", "4h", "1d"],
+    "YTD": ["4h", "1d", "1wk"],
+    "1Y":  ["4h", "1d", "1wk", "1mo", "3mo"],
+    "5Y":  ["1d", "1wk", "1mo"],
+    "All": ["1wk", "1mo", "3mo"],
+}
+CHART_RANGE_DEFAULT_IV = {
+    "1D": "1m", "5D": "5m", "1M": "30m", "3M": "1d", "6M": "1d",
+    "YTD": "1d", "1Y": "1d", "5Y": "1wk", "All": "1mo",
+}
+# Max history to pull per interval (capped by Yahoo's intraday-history limits).
+INTERVAL_FETCH_PERIOD = {
+    "1m": "7d", "2m": "60d", "5m": "60d", "15m": "60d", "30m": "60d",
+    "1h": "730d", "4h": "730d",   # 4h is resampled from 1h
+    "1d": "max", "1wk": "max", "1mo": "max", "3mo": "max",
+}
+# Initial visible window per range, in calendar days (None = show all = "All").
+RANGE_LOOKBACK_DAYS = {
+    "1D": 1, "5D": 5, "1M": 31, "3M": 92, "6M": 183,
+    "1Y": 366, "5Y": 1827, "All": None,
+}
+
+
+
+
 def fetch_chart(ticker, rng, interval):
     """Yahoo-style chart data. Fetches max history for the chosen interval (so
     MAs are full and the user can scroll back), and returns visible_from so the

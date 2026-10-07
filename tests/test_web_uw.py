@@ -110,3 +110,14 @@ for gone in ("renderAVWAP", "renderVPSection", "loadVP", "renderTradeGrades", "T
     assert gone not in src, gone
 assert "renderConfluences" in src and "vpBars" in src, "confluences and the chart overlay must stay"
 print("tiles tests: passed")
+
+# 6. chart constants must survive edits (a past cut removed them and broke every chart)
+for name in ("CHART_RANGE_INTERVALS", "CHART_RANGE_DEFAULT_IV", "INTERVAL_FETCH_PERIOD", "RANGE_LOOKBACK_DAYS"):
+    assert hasattr(scan, name), name
+import inspect
+glob = set(vars(scan))
+for fn in ("fetch_chart", "scan_ticker", "fetch_options", "fetch_uw"):
+    code = getattr(scan, fn).__code__
+    missing = [n for n in code.co_names if n.isupper() and n not in glob and n not in dir(__builtins__)]
+    assert not missing, (fn, missing)
+print("chart constants: passed")

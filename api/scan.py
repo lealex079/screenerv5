@@ -1562,6 +1562,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <title>Screener v5</title>
 <script src="/api/scan?lib=lwc"></script>
 <style>
+  .mtf-inline-section { margin: 10px 0 14px; }
+  .mtf-inline-grid { display: flex; flex-direction: column; gap: 4px; }
+  .mtf-inline-row { display: flex; align-items: center; gap: 16px; background: #0f1419; border-radius: 6px; padding: 5px 10px; }
+  .mtf-inline-tf { font-size: 11px; font-weight: 500; color: #64748b; min-width: 28px; }
+  .mtf-inline-pair { display: flex; align-items: center; gap: 5px; flex: 1; }
   .uw-box { background:#0f1419; border:0.5px solid #1e2a35; border-radius:8px; padding:10px 12px; margin:12px 0; }
   .uw-title { font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px; }
   .uw-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
@@ -2008,6 +2013,7 @@ function renderCard(d) {
         '<span class="detail-key">200 MA dist</span><span class="'+(d.ma_distance>=0?'c-green':'c-red')+'">'+(d.ma_distance>=0?'+':'')+d.ma_distance.toFixed(1)+'%</span>' +
       '</div></div>' +
     '</div>' +
+    renderMTFInline(d) +
     renderConfluences(d) +
     '<div id="uw-'+d.ticker+'"></div>' +
 
@@ -2454,6 +2460,30 @@ function renderEarningsFlag(d) {
     icon + label + extra + '</div>';
 }
 
+function renderMTFInline(d) {
+  const mtf = d.mtf || {};
+  const price = d.price;
+  const tfs = [['4h','4h'],['1d','1D'],['1wk','1W'],['1mo','1M']];
+  function maSpan(ma, dist) {
+    if (!ma) return '<span class="c-dim">N/A</span>';
+    const c = price > ma ? 'c-green' : 'c-red';
+    const sign = dist >= 0 ? '+' : '';
+    const distHtml = dist != null ? ' <span style="font-size:10px;color:#475569">(' + sign + dist.toFixed(2) + ')</span>' : '';
+    return '<span class="' + c + '">$' + ma.toFixed(2) + distHtml + '</span>';
+  }
+  let rows = '';
+  tfs.forEach(function(pair) {
+    const key = pair[0], label = pair[1];
+    const tf = mtf[key] || {};
+    rows += '<div class="mtf-inline-row">' +
+      '<span class="mtf-inline-tf">' + label + '</span>' +
+      '<span class="mtf-inline-pair"><span class="detail-key" style="font-size:10px">50 MA</span>' + maSpan(tf.ma50, tf.ma50_dist) + '</span>' +
+      '<span class="mtf-inline-pair"><span class="detail-key" style="font-size:10px">200 MA</span>' + maSpan(tf.ma200, tf.ma200_dist) + '</span>' +
+    '</div>';
+  });
+  return '<div class="mtf-inline-section"><div class="detail-title" style="margin-bottom:6px">Moving Averages — Multi-Timeframe</div><div class="mtf-inline-grid">' + rows + '</div></div>';
+}
+
 function renderConfluences(d) {
   const conf = d.confluences || [];
   if (!conf.length) return '';
@@ -2684,6 +2714,27 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<tbody>' + topRows + '</tbody>' +
       '</table>' +
       '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of chain OI — unusual concentration (within 27–45 DTE window)</div>' +
+      (function(){
+        const exps = data.all_exp_oi || [];
+        if (!exps.length) return '';
+        let expRows = '';
+        exps.forEach(function(e){
+          const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
+          const mark = e.in_window ? ' <span style="color:#22c55e">•</span>' : '';
+          expRows += '<tr>' +
+            '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)' + mark + '</td>' +
+            '<td style="text-align:right" class="c-green">' + (e.call_oi||0).toLocaleString() + '</td>' +
+            '<td style="text-align:right" class="c-red">' + (e.put_oi||0).toLocaleString() + '</td>' +
+            '<td style="text-align:right;color:#e2e8f0">' + (e.total_oi||0).toLocaleString() + '</td>' +
+            '<td style="text-align:right" class="c-muted">' + r + '</td>' +
+          '</tr>';
+        });
+        return '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">OI by expiration (entire chain · <span style="color:#22c55e">•</span> = 27–45 DTE tradeable window)</div>' +
+          '<table class="opts-table">' +
+            '<thead><tr><th>Expiration</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
+            '<tbody>' + expRows + '</tbody>' +
+          '</table>';
+      })() +
     '</div>';
   }
   // ─────────────────────────────────────────────────────────────────────────
@@ -2784,6 +2835,23 @@ function formatForClaude(d) {
       ? d.volume_surge.toFixed(1) + 'x 20-day avg — elevated, institutional activity likely'
       : d.volume_surge.toFixed(1) + 'x 20-day avg — normal range';
     L.push('Volume surge: ' + volLabel);
+  }
+
+  // MTF MAs
+  const mtf = d.mtf || {};
+  if (Object.keys(mtf).length) {
+    L.push('');
+    L.push('MULTI-TIMEFRAME MOVING AVERAGES (current price $'+d.price.toFixed(2)+')');
+    [['4h','4h'],['1d','1D'],['1wk','1W'],['1mo','1M']].forEach(([key, label]) => {
+      const tf = mtf[key] || {};
+      function fmtMA(ma, dist) {
+        if (!ma) return 'N/A';
+        const dir = d.price > ma ? 'above' : 'below';
+        const sign = dist >= 0 ? '+' : '';
+        return '$'+ma.toFixed(2)+' ('+dir+', '+sign+'$'+dist.toFixed(2)+')';
+      }
+      L.push('  '+label.padEnd(5)+' 50 MA: '+fmtMA(tf.ma50, tf.ma50_dist)+'   200 MA: '+fmtMA(tf.ma200, tf.ma200_dist));
+    });
   }
 
   // Earnings (always emitted, in or out of the options window)

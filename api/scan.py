@@ -1044,6 +1044,8 @@ def fetch_options(ticker, ctx=None):
         iv_rank_source = "uw"
         if uw_iv.get("iv_hv") is not None:
             iv_hv = uw_iv["iv_hv"]
+        if uw_iv.get("iv_uw") is not None:
+            atm_iv = uw_iv["iv_uw"]      # show the same IV the ratio uses
 
     _total_oi = unusual_oi["total_chain_oi"] if unusual_oi else 0
     try:
@@ -2665,7 +2667,7 @@ function renderLiqIVHV(data){
     const vr=data.vol_rank;
     const col = vr>=70?'#22c55e':vr>=40?'#94a3b8':'#64748b';
     out += '<span class="mini-badge" style="border-color:'+col+';color:'+col+'">Vol Rank '+vr.toFixed(0)+'</span>'+
-      '<span class="mini-badge-dim">30d HV vs own 1yr range — drives premium grade</span>';
+      '<span class="mini-badge-dim">30d HV vs own 1yr range' + (data.iv_rank_source === 'uw' ? ' (context only; premium grade uses the IV rank)' : ' — drives premium grade') + '</span>';
   }
   return out ? '<div class="badge-row">'+out+'</div>' : '';
 }
@@ -3035,7 +3037,7 @@ function formatForClaude(d) {
         : vr >= 40 ? 'moderate'
         : 'low — vol subdued vs its own 1yr range';
       L.push('');
-      L.push('VOL RANK (30d HV vs 1yr): ' + vr.toFixed(0) + '/100 (' + vlbl + ') — drives premium grade');
+      L.push('VOL RANK (30d HV vs 1yr): ' + vr.toFixed(0) + '/100 (' + vlbl + ')' + (_optD.iv_rank_source === 'uw' ? ' - context only; the premium grade uses the Unusual Whales IV rank' : ' — drives premium grade'));
     }
     // Liquidity score
     if (_optD.liquidity) {

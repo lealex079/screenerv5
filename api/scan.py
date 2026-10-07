@@ -1564,20 +1564,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <style>
   .uw-box { background:#0f1419; border:0.5px solid #1e2a35; border-radius:8px; padding:10px 12px; margin:12px 0; }
   .uw-title { font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px; }
-  .uw-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:8px; }
-  .uw-tile { background:#131a22; border:0.5px solid #1e2a35; border-left:3px solid #1e2a35; border-radius:6px; padding:8px 10px; }
-  .uw-tile.hot-green { border-left-color:#22c55e; } .uw-tile.hot-amber { border-left-color:#f59e0b; } .uw-tile.hot-red { border-left-color:#ef4444; }
-  .uw-h { font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; }
-  .uw-big { font-size:20px; font-weight:600; color:#e2e8f0; line-height:1.2; margin-top:2px; }
-  .uw-sub { font-size:11px; color:#94a3b8; margin-top:3px; line-height:1.4; }
-  .uw-meter { position:relative; height:6px; background:#1e2a35; border-radius:3px; margin:8px 0 3px; }
-  .uw-meter > i { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:#3b82f6; }
-  .uw-split { display:flex; height:8px; border-radius:4px; overflow:hidden; background:#1e2a35; margin:8px 0 4px; }
+  .uw-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+  @media (max-width:620px) { .uw-grid { grid-template-columns:minmax(0,1fr); } }
+  .uw-tile { background:#131a22; border:1px solid #1e2a35; border-radius:8px; padding:12px 14px; display:flex; flex-direction:column; min-height:132px; }
+  .uw-tile.wide { grid-column:1 / -1; }
+  .uw-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .uw-h { font-size:11px; color:#94a3b8; font-weight:500; }
+  .uw-chip { font-size:10px; padding:2px 8px; border-radius:10px; background:#1b2430; color:#94a3b8; white-space:nowrap; }
+  .uw-chip.green { background:#12301f; color:#4ade80; } .uw-chip.red { background:#351a1a; color:#f87171; } .uw-chip.amber { background:#332a12; color:#fbbf24; }
+  .uw-big { font-size:22px; font-weight:600; color:#e2e8f0; line-height:1.15; margin-top:8px; }
+  .uw-viz { height:20px; display:flex; align-items:center; margin-top:8px; }
+  .uw-sub { font-size:12px; color:#94a3b8; margin-top:auto; padding-top:8px; line-height:1.4; }
+  .uw-meter { position:relative; height:6px; width:100%; background:#1e2a35; border-radius:3px; }
+  .uw-meter > i { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:#60a5fa; }
+  .uw-split { display:flex; height:6px; width:100%; border-radius:3px; overflow:hidden; background:#1e2a35; }
   .uw-split > i { display:block; height:100%; }
-  .uw-row2 { display:flex; justify-content:space-between; font-size:11px; }
-  .uw-dots { display:flex; gap:5px; margin-top:6px; align-items:center; }
-  .uw-dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
-  .uw-badge { display:inline-block; font-size:10px; padding:1px 6px; border-radius:8px; background:#14301f; color:#22c55e; margin-left:6px; vertical-align:middle; }
+  .uw-dots { display:flex; gap:6px; align-items:center; }
+  .uw-dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
   .uw-note { font-size:10px; color:#475569; margin-top:8px; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; background: #0a0e13; color: #e2e8f0; min-height: 100vh; }
@@ -1789,94 +1792,103 @@ function uwMonthDay(iso) {
   const p = String(iso).split('-');
   return m[parseInt(p[1], 10) - 1] + ' ' + parseInt(p[2], 10);
 }
-function uwTile(title, hot) {
-  const t = uwEl('div', 'uw-tile' + (hot ? ' hot-' + hot : ''));
-  t.appendChild(uwEl('div', 'uw-h', title));
+function uwTile(title, chipText, chipColor) {
+  const t = uwEl('div', 'uw-tile');
+  const h = uwEl('div', 'uw-head');
+  h.appendChild(uwEl('span', 'uw-h', title));
+  if (chipText) h.appendChild(uwEl('span', 'uw-chip' + (chipColor ? ' ' + chipColor : ''), chipText));
+  t.appendChild(h);
   return t;
+}
+function uwViz(node) {
+  const v = uwEl('div', 'uw-viz');
+  if (node) v.appendChild(node);
+  return v;
+}
+function uwSplit(a, b, ca, cb) {
+  const sp = uwEl('div', 'uw-split');
+  const tot = (a + b) || 1;
+  const x = uwEl('i'); x.style.width = (a / tot * 100) + '%'; x.style.background = ca;
+  const y = uwEl('i'); y.style.width = (b / tot * 100) + '%'; y.style.background = cb;
+  sp.appendChild(x); sp.appendChild(y);
+  return sp;
 }
 function uwIvTile(iv) {
   const r = iv.rank;
-  const hot = (r >= 70) ? 'green' : (r <= 20 ? 'amber' : '');
-  const t = uwTile('Option prices vs past year', hot);
+  const t = uwTile('Option prices vs past year',
+    r >= 70 ? 'High' : r <= 30 ? 'Low' : 'Middle', r >= 70 ? 'green' : r <= 20 ? 'amber' : '');
   t.appendChild(uwEl('div', 'uw-big', 'IV rank ' + Math.round(r)));
   const m = uwEl('div', 'uw-meter');
   const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, r)) + '%';
-  m.appendChild(f); t.appendChild(m);
-  t.appendChild(uwEl('div', 'uw-sub', r >= 70 ? 'High. Sellers get paid more than usual.'
-    : r <= 30 ? 'Low. Sellers get paid less than usual.' : 'Middle of its range for the past year.'));
-  if (iv.iv != null && iv.rv != null)
-    t.appendChild(uwEl('div', 'uw-sub', 'Options price in ' + Math.round(iv.iv * 100) + '% swings; the stock has actually moved ' + Math.round(iv.rv * 100) + '%.'));
+  m.appendChild(f);
+  t.appendChild(uwViz(m));
+  let cap = r >= 70 ? 'Sellers get paid more than usual.' : r <= 30 ? 'Sellers get paid less than usual.' : 'Middle of its past-year range.';
+  if (iv.iv != null && iv.rv != null) cap += ' Options price in ' + Math.round(iv.iv * 100) + '% swings; the stock has moved ' + Math.round(iv.rv * 100) + '%.';
+  t.appendChild(uwEl('div', 'uw-sub', cap));
   return t;
 }
 function uwEarnTile(e) {
-  const hot = (e.days != null && e.days >= 0 && e.days <= 14) ? 'amber' : '';
-  const t = uwTile('Next earnings', hot);
-  t.appendChild(uwEl('div', 'uw-big', uwMonthDay(e.date)));
-  t.appendChild(uwEl('div', 'uw-sub', (e.days === 0 ? 'today' : e.days === 1 ? 'tomorrow' : 'in ' + e.days + ' days') + (e.confirmed ? ', confirmed' : ', estimated')));
+  const when = e.days === 0 ? 'Today' : e.days === 1 ? 'Tomorrow' : 'In ' + e.days + ' days';
+  const t = uwTile('Next earnings', when, (e.days >= 0 && e.days <= 14) ? 'amber' : '');
+  t.appendChild(uwEl('div', 'uw-big', uwMonthDay(e.date) + (e.confirmed ? '' : ' (est.)')));
+  const dots = uwEl('div', 'uw-dots');
+  (e.history || []).forEach(h => {
+    const d = uwEl('span', 'uw-dot');
+    d.style.background = Math.abs(h.realized) > h.implied ? '#f87171' : '#4ade80';
+    d.title = (h.realized >= 0 ? '+' : '') + h.realized.toFixed(1) + '% moved vs ' + h.implied.toFixed(1) + '% expected';
+    dots.appendChild(d);
+  });
+  t.appendChild(uwViz((e.history || []).length ? dots : null));
+  let cap = '';
   if (e.implied_pct != null) {
-    let s = 'Options expect a move of about ' + e.implied_pct.toFixed(1) + '% either way';
-    if (e.lo != null) s += ' ($' + e.lo.toFixed(0) + ' to $' + e.hi.toFixed(0) + ')';
-    t.appendChild(uwEl('div', 'uw-sub', s + '.'));
+    cap = 'Options expect about ' + e.implied_pct.toFixed(1) + '% either way';
+    if (e.lo != null) cap += ' ($' + e.lo.toFixed(0) + ' to $' + e.hi.toFixed(0) + ')';
+    cap += '.';
   }
-  if (e.history && e.history.length) {
-    const dots = uwEl('div', 'uw-dots');
-    e.history.forEach(h => {
-      const d = uwEl('span', 'uw-dot');
-      const over = Math.abs(h.realized) > h.implied;
-      d.style.background = over ? '#ef4444' : '#22c55e';
-      d.title = (h.realized >= 0 ? '+' : '') + h.realized.toFixed(1) + '% moved vs ' + h.implied.toFixed(1) + '% expected';
-      dots.appendChild(d);
-    });
-    dots.appendChild(uwEl('span', 'uw-sub', ' last ' + e.history.length + ': moved more than expected ' + e.beat + 'x'));
-    t.appendChild(dots);
-  }
+  if ((e.history || []).length) cap += ' Last ' + e.history.length + ' reports: red dot = moved more than expected (' + e.beat + ').';
+  t.appendChild(uwEl('div', 'uw-sub', cap || 'No implied move reported yet.'));
   return t;
 }
 function uwFlowTile(fl, dark, days) {
   const tot = (fl.call || 0) + (fl.put || 0);
   const skew = tot > 0 ? Math.max(fl.call, fl.put) / tot : 0;
-  const t = uwTile('Where options money is going', (fl.n > 0 && skew >= 0.75) ? (fl.call >= fl.put ? 'green' : 'red') : '');
-  if (!fl.n) {
-    t.appendChild(uwEl('div', 'uw-sub', 'No large options trades in the past ' + days + ' days.'));
-  } else {
-    t.appendChild(uwEl('div', 'uw-big', uwMoney(fl.total)));
-    const sp = uwEl('div', 'uw-split');
-    const c = uwEl('i'); c.style.width = (fl.call / tot * 100) + '%'; c.style.background = '#22c55e';
-    const p = uwEl('i'); p.style.width = (fl.put / tot * 100) + '%'; p.style.background = '#ef4444';
-    sp.appendChild(c); sp.appendChild(p); t.appendChild(sp);
-    const r = uwEl('div', 'uw-row2');
-    r.appendChild(uwEl('span', 'c-green', 'Calls ' + uwMoney(fl.call)));
-    r.appendChild(uwEl('span', 'c-red', 'Puts ' + uwMoney(fl.put)));
-    t.appendChild(r);
-    t.appendChild(uwEl('div', 'uw-sub', fl.n + ' large trade' + (fl.n === 1 ? '' : 's') + ' in ' + days + ' days' + (fl.ask_pct != null ? ', ' + fl.ask_pct + '% bought at the ask price' : '') + '.'));
-  }
-  if (dark && dark.n) t.appendChild(uwEl('div', 'uw-sub', 'Off-exchange: ' + uwMoney(dark.total) + ' in ' + dark.n + ' big trade' + (dark.n === 1 ? '' : 's') + '.'));
+  let chip = fl.n ? 'Balanced' : 'Quiet', col = '';
+  if (fl.n && skew >= 0.65) { chip = fl.call >= fl.put ? 'Mostly calls' : 'Mostly puts'; col = fl.call >= fl.put ? 'green' : 'red'; }
+  const t = uwTile('Where options money is going', chip, col);
+  t.appendChild(uwEl('div', 'uw-big', fl.n ? uwMoney(fl.total) : 'None'));
+  t.appendChild(uwViz(fl.n ? uwSplit(fl.call, fl.put, '#4ade80', '#f87171') : null));
+  let cap;
+  if (!fl.n) cap = 'No large options trades in the past ' + days + ' days.';
+  else cap = 'Calls ' + uwMoney(fl.call) + ', puts ' + uwMoney(fl.put) + ' across ' + fl.n + ' large trade' + (fl.n === 1 ? '' : 's') + (fl.ask_pct != null ? '; ' + fl.ask_pct + '% bought at the ask.' : '.');
+  if (dark && dark.n) cap += ' Off-exchange: ' + uwMoney(dark.total) + '.';
+  t.appendChild(uwEl('div', 'uw-sub', cap));
   return t;
 }
 function uwInsiderTile(ins) {
-  const hot = ins.buy_usd > 0 ? 'green' : '';
-  const t = uwTile('Insiders, past ' + ins.days + ' days', hot);
+  let chip = 'Quiet', col = '';
+  if (ins.cluster) { chip = 'Cluster buying'; col = 'green'; }
+  else if (ins.buy_n && ins.sell_n) chip = 'Mixed';
+  else if (ins.buy_n) { chip = 'Buying'; col = 'green'; }
+  else if (ins.sell_n) chip = 'Selling only';
+  const t = uwTile('Insiders, past ' + ins.days + ' days', chip, col);
   if (!ins.buy_n && !ins.sell_n) {
+    t.appendChild(uwEl('div', 'uw-big', 'None'));
+    t.appendChild(uwViz(null));
     t.appendChild(uwEl('div', 'uw-sub', 'No reported insider trades.'));
     return t;
   }
-  const row = uwEl('div', 'uw-row2');
-  row.style.marginTop = '4px';
-  const mk = (label, usd, n, cls) => {
-    const c = uwEl('div');
-    c.appendChild(uwEl('div', 'uw-sub', label));
-    c.appendChild(uwEl('div', 'uw-big ' + (n ? cls : 'c-dim'), n ? uwMoney(usd) : 'None'));
-    c.appendChild(uwEl('div', 'uw-sub', n + (label === 'Bought' ? ' purchase' : ' sale') + (n === 1 ? '' : 's')));
-    return c;
-  };
-  row.appendChild(mk('Bought', ins.buy_usd, ins.buy_n, 'c-green'));
-  row.appendChild(mk('Sold', ins.sell_usd, ins.sell_n, 'c-red'));
-  t.appendChild(row);
-  if (ins.cluster) t.appendChild(uwEl('div', 'uw-sub', ins.max_buyers + '+ different insiders bought. That is a stronger signal than one purchase.'));
-  if (ins.sell_n && ins.plan_pct != null)
-    t.appendChild(uwEl('div', 'uw-sub', ins.plan_pct + '% of the selling was pre-scheduled, so it says little.'));
-  else if (ins.sell_n)
-    t.appendChild(uwEl('div', 'uw-sub', 'Sales are not marked as pre-scheduled.'));
+  const big = uwEl('div', 'uw-big');
+  big.appendChild(uwEl('span', ins.buy_n ? 'c-green' : 'c-dim', uwMoney(ins.buy_usd)));
+  big.appendChild(uwEl('span', 'c-dim', ' bought · '));
+  big.appendChild(uwEl('span', ins.sell_n ? 'c-red' : 'c-dim', uwMoney(ins.sell_usd)));
+  big.appendChild(uwEl('span', 'c-dim', ' sold'));
+  big.style.fontSize = '17px';
+  t.appendChild(big);
+  t.appendChild(uwViz(uwSplit(ins.buy_usd, ins.sell_usd, '#4ade80', '#f87171')));
+  let cap = ins.buy_n + ' purchase' + (ins.buy_n === 1 ? '' : 's') + ', ' + ins.sell_n + ' sale' + (ins.sell_n === 1 ? '' : 's') + '.';
+  if (ins.cluster) cap += ' ' + ins.max_buyers + '+ different insiders bought.';
+  if (ins.sell_n && ins.plan_pct != null) cap += ' ' + ins.plan_pct + '% of selling was pre-scheduled.';
+  t.appendChild(uwEl('div', 'uw-sub', cap));
   return t;
 }
 async function loadUW(ticker, price) {
@@ -1896,6 +1908,7 @@ async function loadUW(ticker, price) {
       if (T.earnings) grid.appendChild(uwEarnTile(T.earnings));
       if (T.flow) grid.appendChild(uwFlowTile(T.flow, T.dark, T.window_days || j.window_days));
       if (T.insiders) grid.appendChild(uwInsiderTile(T.insiders));
+      if (grid.children.length % 2 === 1) grid.lastChild.classList.add('wide');
       box.appendChild(grid);
     } else {
       j.lines.forEach(t => box.appendChild(uwEl('div', 'uw-sub', t)));

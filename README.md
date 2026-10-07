@@ -47,10 +47,15 @@ screener-v5-app/
 
 Free. Vercel Hobby plan supports Python serverless functions at no cost.
 
+## Unusual Whales lines (automated email reports only)
+
+The Sunday and midweek emails can add large options trades, dark pool prints, IV rank, insider trades and (optionally) institutional ownership to each pinned name. They are reported as Unusual Whales records them. Setup and settings (`ENABLE_UW`, `UW_API_KEY`, `UW_FLOW_MIN_PREMIUM`, `UW_DARKPOOL_MIN_PREMIUM`, `UW_SHOW_13F`) are in `SETUP.md`. Tests: `python3 tests/test_uw.py`.
+
 ## Limitations
 
 - Vercel free tier has a 60-second timeout. Scanning 5 tickers usually finishes in 50-60 seconds. If it times out, scan fewer tickers at once.
 - yfinance occasionally rate-limits. If scans start failing, wait a few minutes.
+- Foreign filers (TSM, ASML) report in a different currency than they trade in, so P/E, P/B, P/S, EV/EBIT and FCF yield are left blank for them rather than shown wrong.
 - Fundamentals data depends on yfinance parsing Yahoo Finance's quarterly statements. Some tickers may show N/A for certain fields.
 
 ## Methodology

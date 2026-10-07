@@ -462,10 +462,11 @@ def render_card_block(uw):
     ins = t.get("insiders")
     if ins:
         if ins["buy_n"] or ins["sell_n"]:
-            sub = "%s. Sells %s (%d)." % (_n(ins["buy_n"], "purchase"), money(ins["sell_usd"]), ins["sell_n"])
+            sub = "%s, %s." % (_n(ins["buy_n"], "purchase"), _n(ins["sell_n"], "sale"))
             if ins["cluster"]:
                 sub = "%d+ insiders bought. " % ins["max_buyers"] + sub
-            cells.append(_email_tile("Insiders, %d days" % ins["days"], "Buys " + money(ins["buy_usd"]), sub,
+            cells.append(_email_tile("Insiders, %d days" % ins["days"],
+                                     "Bought %s, sold %s" % (money(ins["buy_usd"]), money(ins["sell_usd"])), sub,
                                      "#22c55e" if ins["buy_usd"] > 0 else "#334155"))
         else:
             cells.append(_email_tile("Insiders, %d days" % ins["days"], "None", "No reported insider trades."))

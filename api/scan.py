@@ -1854,19 +1854,29 @@ function uwFlowTile(fl, dark, days) {
   return t;
 }
 function uwInsiderTile(ins) {
-  const hot = ins.cluster ? 'green' : (ins.buy_usd > 0 ? 'green' : '');
+  const hot = ins.buy_usd > 0 ? 'green' : '';
   const t = uwTile('Insiders, past ' + ins.days + ' days', hot);
   if (!ins.buy_n && !ins.sell_n) {
     t.appendChild(uwEl('div', 'uw-sub', 'No reported insider trades.'));
     return t;
   }
-  const big = uwEl('div', 'uw-big');
-  const b = uwEl('span', ins.buy_usd > 0 ? 'c-green' : 'c-dim', 'Buys ' + uwMoney(ins.buy_usd));
-  big.appendChild(b);
-  if (ins.cluster) big.appendChild(uwEl('span', 'uw-badge', ins.max_buyers + '+ insiders bought'));
-  t.appendChild(big);
-  t.appendChild(uwEl('div', 'uw-sub', ins.buy_n + ' purchase' + (ins.buy_n === 1 ? '' : 's') + '. Sells ' + uwMoney(ins.sell_usd) + ' (' + ins.sell_n + ').'));
-  if (ins.plan_pct != null) t.appendChild(uwEl('div', 'uw-sub', ins.plan_pct + '% of the selling was pre-scheduled, so it says little.'));
+  const row = uwEl('div', 'uw-row2');
+  row.style.marginTop = '4px';
+  const mk = (label, usd, n, cls) => {
+    const c = uwEl('div');
+    c.appendChild(uwEl('div', 'uw-sub', label));
+    c.appendChild(uwEl('div', 'uw-big ' + (n ? cls : 'c-dim'), n ? uwMoney(usd) : 'None'));
+    c.appendChild(uwEl('div', 'uw-sub', n + (label === 'Bought' ? ' purchase' : ' sale') + (n === 1 ? '' : 's')));
+    return c;
+  };
+  row.appendChild(mk('Bought', ins.buy_usd, ins.buy_n, 'c-green'));
+  row.appendChild(mk('Sold', ins.sell_usd, ins.sell_n, 'c-red'));
+  t.appendChild(row);
+  if (ins.cluster) t.appendChild(uwEl('div', 'uw-sub', ins.max_buyers + '+ different insiders bought. That is a stronger signal than one purchase.'));
+  if (ins.sell_n && ins.plan_pct != null)
+    t.appendChild(uwEl('div', 'uw-sub', ins.plan_pct + '% of the selling was pre-scheduled, so it says little.'));
+  else if (ins.sell_n)
+    t.appendChild(uwEl('div', 'uw-sub', 'Sales are not marked as pre-scheduled.'));
   return t;
 }
 async function loadUW(ticker, price) {

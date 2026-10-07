@@ -145,7 +145,14 @@ def iv_line(stats):
     if None not in (iv, lo, hi):
         rng = " Implied volatility is %.0f%%; its range over the past year was %.0f%% to %.0f%%." % (
             iv * 100, lo * 100, hi * 100)
-    return "IV rank (1 year): %.0f out of 100.%s" % (r, rng)
+    rv, rlo, rhi = (num(stats.get(k)) for k in ("rv", "rv_low", "rv_high"))
+    real = ""
+    if rv is not None:
+        real = " Realized volatility is %.0f%%" % (rv * 100)
+        if rlo is not None and rhi is not None:
+            real += " (past-year range %.0f%% to %.0f%%)" % (rlo * 100, rhi * 100)
+        real += "."
+    return "IV rank (1 year): %.0f out of 100.%s%s" % (r, rng, real)
 
 
 # -- insiders -------------------------------------------------------------------

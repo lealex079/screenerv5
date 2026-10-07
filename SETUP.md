@@ -53,9 +53,16 @@ Adds large-trader activity and IV rank lines to the pinned-name cards. UW's numb
 | `ENABLE_UW` | variable | `1` turns it on. Default `0`. Leave off until a manual run shows the lines render. |
 | `UW_FLOW_MIN_PREMIUM` | variable | Smallest options trade, in dollars of premium, counted as large. Default `10000`. |
 | `UW_DARKPOOL_MIN_PREMIUM` | variable | Smallest dark pool print, in dollars, reported. Default `250000`. |
+| `UW_FILL_QUOTES` | variable | Default on when `ENABLE_UW` is 1. `0` stops filling blank after-hours option quotes from UW. |
 | `UW_SHOW_13F` | variable | `1` adds the quarterly institutional ownership line. Default off (data is up to 45 days old). |
 
-If a call fails, that name simply shows no UW lines. The report still sends.
+With `ENABLE_UW` on, UW also replaces some inputs, not just adds lines:
+- **IV rank** is UW's real 1-year rank, not the old chain-based estimate. The premium part of the Sell Put, Wheel and Sell Call grades uses it instead of the realized-vol percentile. IV/HV uses UW's ATM IV over our own 30-day realized vol.
+- **Earnings date** is cross-checked against UW for pinned names and pre-gate survivors. A confirmed UW date wins over Yahoo. Disagreements of 3+ days are logged and shown on the card.
+- **Blank option quotes** (Yahoo returns no bid or ask outside market hours) are filled from UW NBBO, along with open interest. Real Yahoo quotes are never overwritten. Run `python3 tools/uw_probe_chain.py RTX` once to confirm UW's expiry filter works.
+- The home-built IV history snapshot is skipped when every pinned name has a UW IV rank.
+
+If a call fails, that name falls back to the old Yahoo-based values and the report still sends.
 
 ## 2. Confirm the model string is still current
 

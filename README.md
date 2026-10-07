@@ -58,7 +58,8 @@ Each scanned card can show a "Large-trader activity" panel (IV rank, earnings im
 1. In Vercel, Project Settings, Environment Variables, add `UW_API_KEY` (your token) and `ENABLE_UW` = `1`. Redeploy. The key stays on the server; the page only receives plain report lines.
 2. Use a Preview deployment first. If the panel never appears, the function could not import `uw_client.py` / `uw_report.py` from the repo root. Fix: copy those two files into `api/` and redeploy.
 3. Protect the app (Vercel password protection or login) before turning this on. A public URL would let anyone spend your UW requests and see UW data.
-4. Results are cached for 5 minutes per ticker. Turn it off by setting `ENABLE_UW` to `0`; the page then looks exactly as before.
+4. With UW on, the options view also uses UW's real 1-year IV rank (labeled as such), the scan cross-checks the earnings date against UW and shows the move options imply on the report, and blank after-hours option quotes are filled from UW. If UW is off or fails, the old Yahoo-based values are used and the IV rank is labeled as a rough estimate.
+5. Results are cached for 5 minutes per ticker. Turn it off by setting `ENABLE_UW` to `0`; the page then looks exactly as before.
 
 ## Limitations
 

@@ -1067,6 +1067,18 @@ def main():
     # Step 4 — options (with ctx) on the pre-gate survivors AND every pinned name
     log.info(f"\nFetching options for {len(pre)} survivors"
              f"{f' + {len(pinned)} pinned' if pinned else ''}...")
+    if ENABLE_UW:
+        # Cross-check earnings dates against Unusual Whales BEFORE options and
+        # gates, so ctx, grades and gate_status all see the same date. Pre-gate
+        # survivors and pinned names only (not the whole scanned universe).
+        _n_ed = 0
+        for _d in pre + pinned:
+            _scan_mod.apply_uw_earnings(_d)
+            if _d.get("earnings_source") == "uw":
+                _n_ed += 1
+            if _d.get("earnings_note"):
+                log.info(f"  {_d['ticker']}: {_d['earnings_note']}")
+        log.info(f"Earnings dates from Unusual Whales: {_n_ed}/{len(pre) + len(pinned)} names")
     fetch_options_for_top(pre + pinned)   # attaches d["options"], threads ctx
     bundles = [{"ticker": d["ticker"], "scan": d, "options": d.get("options") or {}}
                for d in pre]
@@ -1361,7 +1373,12 @@ def main():
         # Only during the session. Off-hours, Yahoo either blanks the chain
         # (nothing recorded, harmless) or returns stale marks like the 649%
         # "yields" of 2026-09-14, which would corrupt the history being built.
-        if market_session_now():
+        _uw_ranked = ENABLE_UW and pinned_bundles and all(
+            (b.get("options") or {}).get("iv_rank_source") == "uw" for b in pinned_bundles)
+        if _uw_ranked:
+            log.info("IV snapshot skipped: IV rank now comes from Unusual Whales "
+                     "(real 1-year history), so the home-built history is not needed.")
+        elif market_session_now():
             try:
                 import iv_history as ivh
                 before = {t: len(v) for t, v in ivh.load_history().items()}

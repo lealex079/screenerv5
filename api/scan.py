@@ -476,17 +476,20 @@ def compute_fundamental_score(pe, pb, ps, ev_ebit, gross_margin, fcf_yield, roic
     return round(0.60 * val_score + 0.40 * qual_score, 0)
 
 
-def premium_score(vol_rank, iv_hv):
-    """Premium richness 0-100. Blends realized-vol rank (current 30d HV vs the
-    stock's own trailing 1-year range) and IV/HV, weighted toward IV/HV since it
-    directly measures whether options are rich vs what the stock is realizing.
-    IV/HV ~1.0 is treated as fairly priced (50), not penalized."""
+def premium_score(vol_rank, iv_hv, iv_rank=None):
+    """Premium richness 0-100. Blends a rank term and IV/HV, weighted toward
+    IV/HV since it directly measures whether options are rich vs what the stock
+    is realizing. IV/HV ~1.0 is treated as fairly priced (50), not penalized.
+    The rank term is Unusual Whales' real 1-year IV rank when iv_rank is passed;
+    otherwise it falls back to the old surrogate (realized-vol rank: current 30d
+    HV vs the stock's own trailing 1-year range)."""
     parts, weights = [], []
     if iv_hv is not None:
         # IV/HV: 0.7x -> 0, 1.0x -> 50, 1.3x -> 100.
         parts.append(_clamp((iv_hv - 0.7) / (1.3 - 0.7) * 100)); weights.append(0.6)
-    if vol_rank is not None:
-        parts.append(_clamp(vol_rank)); weights.append(0.4)
+    _rank = iv_rank if iv_rank is not None else vol_rank
+    if _rank is not None:
+        parts.append(_clamp(_rank)); weights.append(0.4)
     if not parts:
         return 50.0
     return sum(p * w for p, w in zip(parts, weights)) / sum(weights)
@@ -542,7 +545,9 @@ def compute_trade_grades(ctx, opt):
     rally20 = _g(ctx, "rally_20d", None)
 
     liq  = _clamp(_g(opt, "liquidity_score", 50))
-    prem = premium_score(opt.get("vol_rank"), opt.get("iv_hv"))
+    _uw_iv = opt.get("iv_rank") if opt.get("iv_rank_source") == "uw" else None
+    prem = premium_score(opt.get("vol_rank"), opt.get("iv_hv"), _uw_iv)
+    prem_txt = "premium %d%s" % (prem, " (UW IV rank)" if _uw_iv is not None else "")
     ed   = opt.get("earnings_days")
 
     # vol_safety (0-100): the VALIDATED Sell-Put risk driver. Notebook 08 raced
@@ -588,7 +593,7 @@ def compute_trade_grades(ctx, opt):
     # it survives only as (a) the structure<25 falling-knife cap and (b) displayed
     # trend context. See knowledge_2 / knowledge_8 for the validation.
     sp_base = (0.55 * vol_safety + 0.25 * prem + 0.20 * liq)
-    sp_reasons = ["%s (driver)" % vol_src, "premium %d" % prem,
+    sp_reasons = ["%s (driver)" % vol_src, prem_txt,
                   "liquidity %d" % liq, "structure %d" % struct]
     sp, sp_reasons = apply_put_caps(sp_base, sp_reasons)
 
@@ -596,7 +601,7 @@ def compute_trade_grades(ctx, opt):
     #    lift broken structure. A cheap falling knife is still a falling knife.
     #    Inherits the volatility-led sp_base above. ──
     wh = 0.70 * sp_base + 0.30 * fund_v
-    wh_reasons = ["%s (driver)" % vol_src, "premium %d" % prem, "liquidity %d" % liq,
+    wh_reasons = ["%s (driver)" % vol_src, prem_txt, "liquidity %d" % liq,
                   "structure %d" % struct, "fundamentals %d" % fund_v]
     if struct < 30 and fund_v > 60:
         wh = min(wh, sp_base)
@@ -607,7 +612,7 @@ def compute_trade_grades(ctx, opt):
     trend_inv  = _clamp(100 - trend)
     overbought = _clamp((rsi - 50) * 2)
     sc = (0.35 * resist + 0.25 * prem + 0.20 * trend_inv + 0.10 * liq + 0.10 * overbought)
-    sc_reasons = ["resistance %d" % resist, "premium %d" % prem,
+    sc_reasons = ["resistance %d" % resist, prem_txt,
                   "trend-fade %d" % trend_inv, "liquidity %d" % liq]
 
     def pack(score, reasons):
@@ -701,11 +706,37 @@ def fetch_options(ticker, ctx=None):
     except Exception:
         spot = 0
 
+    # Yahoo blanks bid/ask (and often open interest) outside market hours, which
+    # used to leave the weekend screen with no usable contracts. When that
+    # happens, quotes are filled from Unusual Whales NBBO, loaded once and only if
+    # needed. Off with UW_FILL_QUOTES=0 or ENABLE_UW=0; Yahoo is used whenever it
+    # has a real quote.
+    _fill = {"quotes": None, "filled": 0}
+
+    def uw_quote_for(sym):
+        if _os.environ.get("ENABLE_UW", "0") == "0" or _os.environ.get("UW_FILL_QUOTES", "1") == "0":
+            return None
+        if _fill["quotes"] is None:
+            _fill["quotes"] = {}
+            try:
+                _c = _uw_client_or_none()
+                if _c and _UW_TICKER_RE.match(ticker.upper()):
+                    _fill["quotes"] = uw_chain_quotes(
+                        _c, ticker.upper(),
+                        [datetime.date.fromisoformat(e) for e, _d in valid_exps])
+            except Exception:
+                _fill["quotes"] = {}
+        return _fill["quotes"].get(str(sym).upper())
+
     def clean_contract(row, dte_days, is_put):
         try:
             strike = float(getattr(row, "strike", 0) or 0)
             bid = float(getattr(row, "bid", 0) or 0)
             ask = float(getattr(row, "ask", 0) or 0)
+            if np.isnan(bid):
+                bid = 0.0
+            if np.isnan(ask):
+                ask = 0.0
             iv_raw = getattr(row, "impliedVolatility", 0)
             iv = float(iv_raw) if iv_raw and not np.isnan(float(iv_raw)) else 0
             oi_raw = getattr(row, "openInterest", 0)
@@ -713,6 +744,19 @@ def fetch_options(ticker, ctx=None):
             vol_raw = getattr(row, "volume", 0)
             vol = int(vol_raw) if vol_raw and not np.isnan(float(vol_raw)) else 0
             sym = str(getattr(row, "contractSymbol", ""))
+
+            if bid <= 0 and ask <= 0:
+                # Truly blank quote (not merely a small real bid): ask UW.
+                _q = uw_quote_for(sym)
+                if _q:
+                    bid, ask = _q["bid"], _q["ask"]
+                    if iv <= 0:
+                        iv = _q["iv"]
+                    if _q["oi"] > oi:      # Yahoo's OI is unreliable when its quote is blank
+                        oi = _q["oi"]
+                    if not vol:
+                        vol = _q["volume"]
+                    _fill["filled"] += 1
 
             if bid < MIN_OPTION_BID or oi < MIN_OPTION_OI or iv <= 0:
                 return None
@@ -986,6 +1030,21 @@ def fetch_options(ticker, ctx=None):
     if atm_iv and hv30 and hv30 > 0:
         iv_hv = round(atm_iv / hv30, 2)
 
+    # Unusual Whales replaces the chain-derived IV rank (a proxy that never looked
+    # at the stock's own history) and supplies ATM IV for IV/HV when the Yahoo
+    # chain is stale or blank. hv30 stays ours: it is the validated risk driver.
+    iv_rank_source = "proxy" if iv_rank is not None else None
+    uw_iv = {}
+    try:
+        uw_iv = uw_iv_fields(_uw_stats(ticker), hv30) or {}
+    except Exception:
+        uw_iv = {}
+    if uw_iv:
+        iv_rank = uw_iv["iv_rank"]
+        iv_rank_source = "uw"
+        if uw_iv.get("iv_hv") is not None:
+            iv_hv = uw_iv["iv_hv"]
+
     _total_oi = unusual_oi["total_chain_oi"] if unusual_oi else 0
     try:
         liquidity = compute_liquidity(all_puts, all_calls, spot, _total_oi, avg_volume)
@@ -998,6 +1057,7 @@ def fetch_options(ticker, ctx=None):
             _opt = {
                 "vol_rank": vol_rank,
                 "iv_rank": iv_rank,
+                "iv_rank_source": iv_rank_source,
                 "iv_hv": iv_hv,
                 "hv30": hv30,
                 "liquidity_score": liquidity["score"] if liquidity else None,
@@ -1063,7 +1123,14 @@ def fetch_options(ticker, ctx=None):
         "calls": all_calls,
         "implied_move": implied_move,
         "skew": skew,
+        "quotes_filled": _fill["filled"],
+        "quote_source": "uw_nbbo" if _fill["filled"] else "yahoo",
         "iv_rank": iv_rank,
+        "iv_rank_source": iv_rank_source,
+        "iv_uw": uw_iv.get("iv_uw"),
+        "iv_1y_low": uw_iv.get("iv_1y_low"),
+        "iv_1y_high": uw_iv.get("iv_1y_high"),
+        "rv_uw": uw_iv.get("rv_uw"),
         "unusual_oi": unusual_oi,
         "full_chain_oi": full_chain_oi,
         "all_exp_oi": all_exp_oi,
@@ -2365,8 +2432,12 @@ function renderEarningsFlag(d) {
     ? 'EARNINGS ' + d.earnings_date + inDays + ' \u2014 within options window. Do not sell puts through earnings.'
     : 'Next earnings: ' + d.earnings_date + inDays;
   const col = inWindow ? '#fca5a5' : (soon ? '#fbbf24' : '#94a3b8');
+  let extra = '';
+  if (d.earnings_source === 'uw') extra += d.earnings_confirmed ? ' [confirmed, Unusual Whales]' : ' [estimated, Unusual Whales]';
+  if (d.earnings_implied_move_pct != null) extra += ' Options imply about &plusmn;' + d.earnings_implied_move_pct.toFixed(1) + '% on the report.';
+  if (d.earnings_note) extra += ' ' + d.earnings_note;
   return '<div style="' + bg + ';border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + col + '">' +
-    icon + label + '</div>';
+    icon + label + extra + '</div>';
 }
 
 function renderMTFInline(d) {
@@ -2635,7 +2706,9 @@ function buildOptionsTabs(data, crashScore, ticker) {
       : 'Low — premium selling less attractive, wait or size down';
     ivRankBanner = '<div style="background:#0f1419;border:1px solid #1e2a35;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + ivrColor + '">' +
       '📊 IV Rank: <strong>' + ivr.toFixed(0) + '/100</strong> — ' + ivrLabel +
-      ' <span style="color:#475569;font-size:10px">(cross-sectional proxy from current chain)</span>' +
+      (data.iv_rank_source === 'uw'
+        ? ' <span style="color:#475569;font-size:10px">(1-year rank, Unusual Whales' + (data.iv_uw != null && data.iv_1y_low != null && data.iv_1y_high != null ? '. IV now ' + data.iv_uw.toFixed(0) + '%, past-year range ' + data.iv_1y_low.toFixed(0) + '% to ' + data.iv_1y_high.toFixed(0) + '%' : '') + ')</span>'
+        : ' <span style="color:#475569;font-size:10px">(rough estimate from the current chain, not a 1-year rank)</span>') +
     '</div>';
   }
 
@@ -2742,7 +2815,12 @@ function buildOptionsTabs(data, crashScore, ticker) {
   const putsTable = buildOptsTable(data.puts, false, crashScore);
   const callsTable = buildOptsTable(data.calls, true, crashScore);
 
-  return renderTradeGrades(data) + renderLiqIVHV(data) + imBanner + skewBanner + ivRankBanner + unusualOISection +
+  let quoteBanner = '';
+  if (data.quotes_filled > 0) {
+    quoteBanner = '<div style="background:#0f1419;border:1px solid #1e2a35;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#94a3b8">' +
+      'Quotes: ' + data.quotes_filled + ' contracts had blank Yahoo prices (market closed), so their bid and ask come from Unusual Whales NBBO.</div>';
+  }
+  return quoteBanner + renderTradeGrades(data) + renderLiqIVHV(data) + imBanner + skewBanner + ivRankBanner + unusualOISection +
     '<div class="opts-tabs" id="exp-tabs-'+ticker+'">' + expTabs + '</div>' +
     '<div style="display:flex;gap:8px;margin-bottom:8px">' +
       '<button class="opts-tab" style="background:#0f1419;border:0.5px solid #1e2a35;border-radius:4px" onclick="switchSide(\''+ticker+'\',\'puts\',this)" id="side-puts-'+ticker+'">Sell Puts</button>' +
@@ -2861,6 +2939,9 @@ function formatForClaude(d) {
       const edays = days != null ? ' (in ' + days + ' day' + (days === 1 ? '' : 's') + ')' : '';
       const ewarn = d.earnings_in_window ? ' \u26a0\ufe0f  WITHIN OPTIONS WINDOW \u2014 do not sell puts through earnings' : '';
       L.push('EARNINGS DATE: ' + d.earnings_date + edays + ewarn);
+      if (d.earnings_source === 'uw') L.push('  Source: Unusual Whales (' + (d.earnings_confirmed ? 'confirmed' : 'estimated') + ')');
+      if (d.earnings_implied_move_pct != null) L.push('  Options imply about +/-' + d.earnings_implied_move_pct.toFixed(1) + '% on the report (Unusual Whales)');
+      if (d.earnings_note) L.push('  ' + d.earnings_note);
     }
   }
 
@@ -2929,7 +3010,11 @@ function formatForClaude(d) {
         : 'low — premium selling less attractive';
       L.push('');
       L.push('IV RANK: ' + ivr.toFixed(0) + '/100 (' + ivrLabel + ')');
-      L.push('  (Cross-sectional proxy from current chain IV range — not time-series)');
+      if (_optD.iv_rank_source === 'uw') {
+        L.push('  (1-year rank from Unusual Whales' + (_optD.iv_uw != null && _optD.iv_1y_low != null && _optD.iv_1y_high != null ? '; IV now ' + _optD.iv_uw.toFixed(0) + '%, past-year range ' + _optD.iv_1y_low.toFixed(0) + '% to ' + _optD.iv_1y_high.toFixed(0) + '%' : '') + ')');
+      } else {
+        L.push('  (Rough estimate from the current chain IV range, not a 1-year rank)');
+      }
     }
     // IV/HV ratio
     if (_optD.iv_hv != null) {
@@ -3134,6 +3219,210 @@ def _uw_modules():
     return uw_client, uw_report
 
 
+_OCC_RE = _re.compile(r"^([A-Z.]{1,6})(\d{6})([CP])(\d{8})$")
+
+
+def occ_parts(symbol):
+    """'RTX261120P00170000' -> ('RTX', date(2026,11,20), 'P', 170.0), or None."""
+    m = _OCC_RE.match(str(symbol or "").strip().upper())
+    if not m:
+        return None
+    try:
+        d = _dt.date(2000 + int(m.group(2)[:2]), int(m.group(2)[2:4]), int(m.group(2)[4:]))
+    except ValueError:
+        return None
+    return m.group(1), d, m.group(3), int(m.group(4)) / 1000.0
+
+
+def uw_usable_quote(row):
+    """
+    Pure. One UW option-contract row -> {bid, ask, iv, oi, volume} or None.
+    Used only to fill quotes Yahoo left blank, so it is strict: a real two-sided
+    market (bid > 0, ask >= bid, spread no wider than 60% of the mid).
+    """
+    def f(k):
+        v = (row or {}).get(k)
+        try:
+            return None if v in (None, "") else float(v)
+        except (TypeError, ValueError):
+            return None
+    bid, ask = f("nbbo_bid"), f("nbbo_ask")
+    if bid is None or ask is None or bid <= 0 or ask < bid:
+        return None
+    mid = (bid + ask) / 2.0
+    if mid <= 0 or (ask - bid) / mid > 0.6:
+        return None
+    return {"bid": bid, "ask": ask, "iv": f("implied_volatility") or 0.0,
+            "oi": int(f("open_interest") or 0), "volume": int(f("volume") or 0)}
+
+
+def uw_chain_quotes(client, ticker, expiries):
+    """
+    {option_symbol: quote} for the wanted expiry dates, from UW option contracts.
+    The endpoint returns at most 500 rows, so ask per expiry first. If UW ignores
+    the expiry filter (rows come back for other dates) fall back to one unfiltered
+    call and keep whatever matches. Never raises; {} on any problem.
+    """
+    want = set(expiries)
+    out = {}
+
+    def take(rows):
+        n = 0
+        for r in rows or []:
+            parts = occ_parts(r.get("option_symbol"))
+            if not parts or parts[1] not in want:
+                continue
+            q = uw_usable_quote(r)
+            if q:
+                out[str(r["option_symbol"]).upper()] = q
+                n += 1
+        return n
+
+    try:
+        honored = True
+        for exp in sorted(want):
+            rows = client.option_contracts(ticker, expiry=exp)
+            if rows and not any(occ_parts(r.get("option_symbol")) and
+                                occ_parts(r.get("option_symbol"))[1] == exp for r in rows):
+                honored = False        # filter ignored: stop asking per expiry
+                break
+            take(rows)
+        if not honored or not out:
+            take(client.option_contracts(ticker))
+    except Exception:
+        return out
+    return out
+
+
+def _uw_client_or_none():
+    if _os.environ.get("ENABLE_UW", "0") == "0":
+        return None
+    uw_client, _ = _uw_modules()
+    client = _uw_client_factory() if _uw_client_factory else uw_client.UWClient()
+    return client if client.enabled else None
+
+
+_UW_STATS_CACHE = {}           # ticker -> (unix time, stats or None)
+_UW_STATS_SECONDS = 300
+_UW_STATS_FAIL_SECONDS = 60
+_UW_EARN_CACHE = {}            # ticker -> (unix time, rows or None)
+_UW_EARN_SECONDS = 6 * 3600
+
+
+def _uw_cached(cache, ticker, ok_seconds, fail_seconds, fetch):
+    hit = cache.get(ticker)
+    if hit:
+        age = _time.time() - hit[0]
+        if age < (ok_seconds if hit[1] is not None else fail_seconds):
+            return hit[1]
+    try:
+        val = fetch()
+    except Exception:
+        val = None
+    cache[ticker] = (_time.time(), val)
+    return val
+
+
+def _uw_stats(ticker):
+    """UW volatility stats for one ticker, or None (disabled, failed, bad ticker)."""
+    ticker = (ticker or "").strip().upper()
+    if not _UW_TICKER_RE.match(ticker) or _os.environ.get("ENABLE_UW", "0") == "0":
+        return None
+
+    def go():
+        c = _uw_client_or_none()
+        return c.vol_stats(ticker) if c else None
+    return _uw_cached(_UW_STATS_CACHE, ticker, _UW_STATS_SECONDS, _UW_STATS_FAIL_SECONDS, go)
+
+
+def uw_iv_fields(stats, hv30):
+    """
+    Pure. From UW vol stats return the IV fields that replace the chain proxy, or
+    None when UW has no usable rank. UW numbers arrive as strings, as decimals
+    (0.30 = 30%). IV/HV is UW's ATM IV over OUR 30-day realized vol.
+    """
+    if not isinstance(stats, dict):
+        return None
+
+    def f(k):
+        v = stats.get(k)
+        try:
+            return None if v in (None, "") else float(v)
+        except (TypeError, ValueError):
+            return None
+    rank, iv, lo, hi, rv = f("iv_rank"), f("iv"), f("iv_low"), f("iv_high"), f("rv")
+    if rank is None:
+        return None
+    pct = lambda v: None if v is None else round(v * 100, 1)
+    out = {"iv_rank": round(min(max(rank, 0.0), 100.0), 1), "iv_rank_source": "uw",
+           "iv_uw": pct(iv), "iv_1y_low": pct(lo), "iv_1y_high": pct(hi), "rv_uw": pct(rv)}
+    if iv is not None and hv30 and hv30 > 0:
+        out["iv_hv"] = round(iv * 100 / hv30, 2)
+    return out
+
+
+def merge_uw_earnings(scan, rows, today=None):
+    """
+    Pure (mutates and returns scan). Cross-checks the Yahoo earnings date against
+    Unusual Whales. A CONFIRMED UW date wins; an estimated one is used only when
+    Yahoo has no upcoming date. Disagreements of 3+ days are recorded in
+    scan["earnings_note"]. Also records the move the options imply for the report.
+    """
+    if not scan or scan.get("error") or not rows:
+        return scan
+    uw_client, uw_report = _uw_modules()
+    today = today or _dt.date.today()
+    nxt = uw_client.next_earnings_from_rows(rows, today)
+    if not nxt:
+        return scan
+    uw_date, confirmed = nxt["date"], nxt["confirmed"]
+    y_days = scan.get("earnings_days")
+    y_future = y_days is not None and y_days >= 0
+    y_date = None
+    try:
+        y_date = _dt.date.fromisoformat(str(scan.get("earnings_date"))[:10])
+    except (TypeError, ValueError):
+        y_date = None
+    differ = bool(y_future and y_date and abs((uw_date - y_date).days) >= 3)
+    nice = lambda d: "%s %d" % (d.strftime("%b"), d.day)
+    if confirmed or not y_future:
+        days = (uw_date - today).days
+        scan["earnings_date"] = str(uw_date)
+        scan["earnings_days"] = days
+        scan["earnings_in_window"] = 0 <= days <= 45
+        scan["earnings_source"] = "uw"
+        scan["earnings_confirmed"] = bool(confirmed)
+        if differ:
+            scan["earnings_note"] = "Yahoo showed %s; Unusual Whales shows %s%s." % (
+                nice(y_date), nice(uw_date), " (confirmed)" if confirmed else " (estimated)")
+    elif differ:
+        scan["earnings_note"] = "Unusual Whales estimates %s (not confirmed); Yahoo shows %s." % (
+            nice(uw_date), nice(y_date))
+    summ = uw_report.summarize_earnings_moves(rows, today)
+    n = (summ or {}).get("next") or {}
+    if n.get("date") == uw_date and n.get("implied_pct") is not None:
+        scan["earnings_implied_move_pct"] = round(n["implied_pct"], 1)
+    return scan
+
+
+def apply_uw_earnings(scan):
+    """Fetch UW earnings rows (cached) and merge. Never raises; no-op when UW is off."""
+    try:
+        if not scan or scan.get("error") or _os.environ.get("ENABLE_UW", "0") == "0":
+            return scan
+        ticker = str(scan.get("ticker", "")).upper()
+        if not _UW_TICKER_RE.match(ticker):
+            return scan
+
+        def go():
+            c = _uw_client_or_none()
+            return c.earnings(ticker) if c else None
+        rows = _uw_cached(_UW_EARN_CACHE, ticker, _UW_EARN_SECONDS, _UW_STATS_FAIL_SECONDS, go)
+        return merge_uw_earnings(scan, rows)
+    except Exception:
+        return scan
+
+
 def fetch_uw(ticker, price=None):
     """Plain-language UW lines for one ticker. Never raises."""
     if _os.environ.get("ENABLE_UW", "0") == "0":
@@ -3249,7 +3538,7 @@ class handler(BaseHTTPRequestHandler):
         results = []
         for ticker in tickers:
             try:
-                results.append(scan_ticker(ticker))
+                results.append(apply_uw_earnings(scan_ticker(ticker)))
             except Exception as e:
                 results.append({"ticker": ticker, "error": str(e)})
 

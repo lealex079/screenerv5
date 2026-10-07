@@ -1813,16 +1813,17 @@ function uwSplit(a, b, ca, cb) {
   sp.appendChild(x); sp.appendChild(y);
   return sp;
 }
-function uwIvTile(iv) {
+function uwIvTile(iv, earn) {
   const r = iv.rank;
   const t = uwTile('Option prices vs past year',
-    r >= 70 ? 'High' : r < 30 ? 'Low' : 'Middle', '');
+    r >= 70 ? 'High' : r >= 50 ? 'Above average' : r < 30 ? 'Low' : 'Middle', r >= 50 ? 'green' : '');
   t.appendChild(uwEl('div', 'uw-big', 'IV rank ' + Math.round(r)));
   const m = uwEl('div', 'uw-meter');
   const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, r)) + '%';
   m.appendChild(f);
   t.appendChild(uwViz(m));
-  let cap = r >= 70 ? 'Options are priced higher than usual for this stock.' : r < 30 ? 'Options are priced lower than usual for this stock.' : 'In the middle of its past-year range.';
+  let cap = r >= 70 ? 'Premiums are well above normal for this stock.' : r >= 50 ? 'Premiums are richer than usual for this stock.' : r < 30 ? 'Premiums are thinner than usual for this stock.' : 'In the middle of its past-year range.';
+  if (earn && earn.days >= 0 && earn.days <= 45) cap += ' Earnings on ' + uwMonthDay(earn.date) + ' may be part of this.';
   if (iv.iv != null && iv.rv != null) cap += ' They imply about ' + Math.round(iv.iv * 100) + '% a year of movement; the stock has recently moved at about ' + Math.round(iv.rv * 100) + '% a year.';
   t.appendChild(uwEl('div', 'uw-sub', cap));
   return t;
@@ -1904,7 +1905,7 @@ async function loadUW(ticker, price) {
     const T = j.tiles;
     if (T) {
       const grid = uwEl('div', 'uw-grid');
-      if (T.iv) grid.appendChild(uwIvTile(T.iv));
+      if (T.iv) grid.appendChild(uwIvTile(T.iv, T.earnings));
       if (T.earnings) grid.appendChild(uwEarnTile(T.earnings));
       if (T.flow) grid.appendChild(uwFlowTile(T.flow, T.dark, T.window_days || j.window_days));
       if (T.insiders) grid.appendChild(uwInsiderTile(T.insiders));
@@ -2595,10 +2596,11 @@ function buildOptionsTabs(data, crashScore, ticker) {
   let ivRankBanner = '';
   if (data.iv_rank != null) {
     const ivr = data.iv_rank;
-    const ivrColor = '#94a3b8';
-    const ivrLabel = ivr >= 70 ? 'High: options are priced higher than usual for this stock'
+    const ivrColor = ivr >= 50 ? '#22c55e' : '#94a3b8';
+    const ivrLabel = ivr >= 70 ? 'High: premiums are well above normal for this stock'
+      : ivr >= 50 ? 'Above average: premiums are richer than usual for this stock'
       : ivr >= 30 ? 'Middle of its past-year range'
-      : 'Low: options are priced lower than usual for this stock';
+      : 'Low: premiums are thinner than usual for this stock';
     ivRankBanner = '<div style="background:#0f1419;border:1px solid #1e2a35;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:' + ivrColor + '">' +
       '📊 IV Rank: <strong>' + ivr.toFixed(0) + '/100</strong> — ' + ivrLabel +
       (data.iv_rank_source === 'uw'
@@ -2840,9 +2842,10 @@ function formatForClaude(d) {
     // ── CHANGE 2 in Copy for Claude: IV rank ─────────────────────────────────
     if (_optD.iv_rank != null) {
       const ivr = _optD.iv_rank;
-      const ivrLabel = ivr >= 70 ? 'high: options priced higher than usual for this stock'
+      const ivrLabel = ivr >= 70 ? 'high: premiums well above normal for this stock'
+        : ivr >= 50 ? 'above average: premiums richer than usual for this stock'
         : ivr >= 30 ? 'middle of its past-year range'
-        : 'low: options priced lower than usual for this stock';
+        : 'low: premiums thinner than usual for this stock';
       L.push('');
       L.push('IV RANK: ' + ivr.toFixed(0) + '/100 (' + ivrLabel + ')');
       if (_optD.iv_rank_source === 'uw') {

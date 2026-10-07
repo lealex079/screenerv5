@@ -433,10 +433,15 @@ def render_card_block(uw):
     iv = t.get("iv")
     if iv:
         r = iv["rank"]
-        sub = ("Options are priced higher than usual for this stock." if r >= 70 else
-               "Options are priced lower than usual for this stock." if r < 30 else
+        sub = ("Premiums are well above normal for this stock." if r >= 70 else
+               "Premiums are richer than usual for this stock." if r >= 50 else
+               "Premiums are thinner than usual for this stock." if r < 30 else
                "In the middle of its past-year range.")
-        cells.append(_email_tile("Option prices vs past year", "IV rank %.0f" % r, sub, "#334155", bar=(r, 0)))
+        ee = t.get("earnings")
+        if ee and 0 <= ee["days"] <= 45:
+            sub += " Earnings on %s may be part of this." % _md(_d(ee["date"]))
+        cells.append(_email_tile("Option prices vs past year", "IV rank %.0f" % r, sub,
+                                 "#22c55e" if r >= 50 else "#334155", bar=(r, 0)))
     e = t.get("earnings")
     if e:
         when = "today" if e["days"] == 0 else "tomorrow" if e["days"] == 1 else "in %d days" % e["days"]

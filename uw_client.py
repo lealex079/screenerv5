@@ -35,6 +35,26 @@ def num(v, default=None):
         return default
 
 
+def next_earnings_from_rows(rows, today=None):
+    """{"date": date, "confirmed": bool} for the soonest report on or after today."""
+    if not rows:
+        return None
+    today = today or datetime.date.today()
+    future = []
+    for r in rows[:6]:
+        try:
+            d = datetime.date.fromisoformat(str(r.get("report_date"))[:10])
+        except ValueError:
+            continue
+        if d >= today:
+            future.append((d, r.get("source") != "estimation"))
+    if not future:
+        return None
+    d, confirmed = min(future)
+    return {"date": d, "confirmed": confirmed}
+
+
+
 class UWClient:
     def __init__(self, key=None, opener=None):
         self.key = (key if key is not None else os.environ.get("UW_API_KEY", "")).strip()
@@ -150,22 +170,7 @@ class UWClient:
         return self._rows(j) if j is not None else None
 
     def next_earnings_date(self, ticker, today=None):
-        rows = self.earnings(ticker)
-        if not rows:
-            return None
-        today = today or datetime.date.today()
-        future = []
-        for r in rows[:6]:
-            try:
-                d = datetime.date.fromisoformat(str(r.get("report_date"))[:10])
-            except ValueError:
-                continue
-            if d >= today:
-                future.append((d, r.get("source") != "estimation"))
-        if not future:
-            return None
-        d, confirmed = min(future)
-        return {"date": d, "confirmed": confirmed}
+        return next_earnings_from_rows(self.earnings(ticker), today)
 
     def insider_flow(self, ticker):
         """Insider transactions aggregated per day and direction, newest first."""

@@ -89,6 +89,7 @@ def row_from(scan, weight, cov):
         "dividend_yield_pct": scan.get("dividend_yield"),
         "earnings_days": scan.get("earnings_days"),
         "verdict": verdict, "blockers": blockers, "iv_rank": None, "uw_lines": [],
+        "implied_move_pct": None, "beat_implied": "",
     }
 
 
@@ -106,9 +107,14 @@ def run_uw(rows, days=5):
     since = now - datetime.timedelta(days=days)
     for r in rows:
         try:
-            rep = uw_report.build_ticker_report(client, r["ticker"], since, now=now)
+            rep = uw_report.build_ticker_report(client, r["ticker"], since, now=now, price=r.get("price"))
             r["iv_rank"] = rep.get("iv_rank")
             r["uw_lines"] = rep.get("lines") or []
+            em = rep.get("earnings_moves") or {}
+            nxt = em.get("next") or {}
+            r["implied_move_pct"] = nxt.get("implied_pct")
+            if em.get("history"):
+                r["beat_implied"] = "%d/%d" % (em["beat"], len(em["history"]))
         except Exception as e:
             print(f"  {r['ticker']}: UW failed ({type(e).__name__})")
     print(f"UW: {client.requests_made} requests, usage {client.last_usage or 'none seen'}")
@@ -143,14 +149,15 @@ def write_outputs(etf, etf_row, rows, read, outdir):
     stamp = datetime.date.today().isoformat()
     cols = ["ticker", "weight_pct", "price", "move_20d_pct", "drawdown_pct", "rsi", "trend",
             "crash", "structure", "dividend_yield_pct", "earnings_days", "verdict",
-            "blockers", "iv_rank"]
+            "blockers", "iv_rank", "implied_move_pct", "beat_implied"]
     allrows = ([etf_row] if etf_row else []) + rows
     with open(outdir / f"{etf}_{stamp}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader(); w.writerows(allrows)
 
     head = ["Ticker", "Wt%", "Price", "20d%", "From high%", "RSI", "Trend", "Crash", "Struct",
-            "Yield%", "Earn (d)", "Status", "Blocked by", "IV rank"]
+            "Yield%", "Earn (d)", "Status", "Blocked by", "IV rank", "Implied earn move%",
+            "Moved > implied (last 4)"]
     lines = [f"# {etf} sector scan, {stamp}", ""] + [f"- {s}" for s in read] + ["",
              "| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in allrows:
@@ -159,7 +166,8 @@ def write_outputs(etf, etf_row, rows, read, outdir):
             fmt(r["drawdown_pct"]), fmt(r["rsi"], 0), fmt(r["trend"], 0), fmt(r["crash"], 0),
             fmt(r["structure"], 0), fmt(r["dividend_yield_pct"]),
             "" if r["earnings_days"] is None else str(r["earnings_days"]),
-            r["verdict"], r["blockers"], fmt(r["iv_rank"], 0)]) + " |")
+            r["verdict"], r["blockers"], fmt(r["iv_rank"], 0),
+            fmt(r["implied_move_pct"]), r["beat_implied"]]) + " |")
     uw = [r for r in allrows if r["uw_lines"]]
     if uw:
         lines += ["", "## Unusual Whales (as reported, not scored)", ""]

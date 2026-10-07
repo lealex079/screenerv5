@@ -182,140 +182,6 @@ def fetch_mtf_inline(ticker, price):
     return result
 
 
-def fetch_volume_profile(ticker, tf="1d"):
-    try:
-        df = yf.download(ticker, period="6y", interval="1d",
-                         auto_adjust=True, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if len(df) < 20:
-            return {"error": "Insufficient data"}
-
-        close = df["Close"]
-        high = df["High"]
-        low = df["Low"]
-        volume = df["Volume"]
-
-        price_min = float(low.min())
-        price_max = float(high.max())
-        n_bins = 100
-        bin_edges = np.linspace(price_min, price_max, n_bins + 1)
-        bin_mids = (bin_edges[:-1] + bin_edges[1:]) / 2
-        vol_profile = np.zeros(n_bins)
-
-        for _, row in df.iterrows():
-            lo = float(row["Low"])
-            hi = float(row["High"])
-            vol = float(row["Volume"])
-            if hi == lo or vol == 0:
-                continue
-            in_range = (bin_mids >= lo) & (bin_mids <= hi)
-            n = in_range.sum()
-            if n > 0:
-                vol_profile[in_range] += vol / n
-
-        poc_idx = int(np.argmax(vol_profile))
-        poc = round(float(bin_mids[poc_idx]), 2)
-
-        total_vol = vol_profile.sum()
-        target = total_vol * 0.68
-        lo_idx = hi_idx = poc_idx
-        accumulated = vol_profile[poc_idx]
-        while accumulated < target:
-            can_lo = lo_idx > 0
-            can_hi = hi_idx < n_bins - 1
-            if not can_lo and not can_hi:
-                break
-            vol_below = vol_profile[lo_idx - 1] if can_lo else -1
-            vol_above = vol_profile[hi_idx + 1] if can_hi else -1
-            if vol_below >= vol_above:
-                lo_idx -= 1
-                accumulated += vol_profile[lo_idx]
-            else:
-                hi_idx += 1
-                accumulated += vol_profile[hi_idx]
-        vah = round(float(bin_mids[hi_idx]), 2)
-        val = round(float(bin_mids[lo_idx]), 2)
-
-        chart_bars = []
-
-        max_vol = float(vol_profile.max())
-        vp_bins = [
-            {"price": round(float(bin_mids[i]), 2),
-             "vol": round(float(vol_profile[i] / max_vol), 4)}
-            for i in range(n_bins)
-        ]
-
-        hvn_threshold = float(np.percentile(vol_profile[vol_profile > 0], 70))
-        hvn_nodes = sorted(
-            [{"price": round(float(bin_mids[i]), 2),
-              "vol_pct": round(float(vol_profile[i] / max_vol * 100), 1)}
-             for i in range(n_bins) if vol_profile[i] >= hvn_threshold],
-            key=lambda x: -x["vol_pct"]
-        )[:10]
-
-        lvn_threshold = float(np.percentile(vol_profile[vol_profile > 0], 20))
-        lvn_nodes = sorted(
-            [{"price": round(float(bin_mids[i]), 2),
-              "vol_pct": round(float(vol_profile[i] / max_vol * 100), 1)}
-             for i in range(n_bins) if 0 < vol_profile[i] <= lvn_threshold],
-            key=lambda x: x["vol_pct"]
-        )[:5]
-
-        current = round(float(close.iloc[-1]), 2)
-
-        for node in hvn_nodes:
-            node["role"] = "support" if node["price"] < current else "resistance"
-        for node in lvn_nodes:
-            node["role"] = "support" if node["price"] < current else "resistance"
-
-        return {
-            "poc": poc,
-            "vah": vah,
-            "val": val,
-            "current_price": current,
-            "vp_bins": vp_bins,
-            "hvn_nodes": hvn_nodes,
-            "lvn_nodes": lvn_nodes,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ── Options chain ─────────────────────────────────────────────────────────────
-
-# ── Yahoo-style chart endpoint: range + interval, lazy-loaded per card ────────
-# Range sets only the INITIAL visible window. We fetch the maximum history the
-# interval allows so the user can scroll back through full history and the
-# moving averages stay fully populated all the way back (Yahoo's behavior).
-CHART_RANGE_INTERVALS = {
-    "1D":  ["1m", "2m", "5m"],
-    "5D":  ["1m", "5m", "15m", "30m"],
-    "1M":  ["15m", "30m", "1h", "4h", "1d"],
-    "3M":  ["1h", "4h", "1d"],
-    "6M":  ["1h", "4h", "1d"],
-    "YTD": ["4h", "1d", "1wk"],
-    "1Y":  ["4h", "1d", "1wk", "1mo", "3mo"],
-    "5Y":  ["1d", "1wk", "1mo"],
-    "All": ["1wk", "1mo", "3mo"],
-}
-CHART_RANGE_DEFAULT_IV = {
-    "1D": "1m", "5D": "5m", "1M": "30m", "3M": "1d", "6M": "1d",
-    "YTD": "1d", "1Y": "1d", "5Y": "1wk", "All": "1mo",
-}
-# Max history to pull per interval (capped by Yahoo's intraday-history limits).
-INTERVAL_FETCH_PERIOD = {
-    "1m": "7d", "2m": "60d", "5m": "60d", "15m": "60d", "30m": "60d",
-    "1h": "730d", "4h": "730d",   # 4h is resampled from 1h
-    "1d": "max", "1wk": "max", "1mo": "max", "3mo": "max",
-}
-# Initial visible window per range, in calendar days (None = show all = "All").
-RANGE_LOOKBACK_DAYS = {
-    "1D": 1, "5D": 5, "1M": 31, "3M": 92, "6M": 183,
-    "1Y": 366, "5Y": 1827, "All": None,
-}
-
-
 def fetch_chart(ticker, rng, interval):
     """Yahoo-style chart data. Fetches max history for the chosen interval (so
     MAs are full and the user can scroll back), and returns visible_from so the
@@ -1662,10 +1528,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <title>Screener v5</title>
 <script src="/api/scan?lib=lwc"></script>
 <style>
-  .uw-box { background: #0f1419; border: 0.5px solid #1e2a35; border-radius: 8px; padding: 10px 12px; margin: 12px 0; }
-  .uw-title { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-  .uw-line { font-size: 12px; line-height: 1.5; color: #94a3b8; margin-top: 5px; }
-  .uw-note { font-size: 10px; color: #475569; margin-top: 8px; }
+  .uw-box { background:#0f1419; border:0.5px solid #1e2a35; border-radius:8px; padding:10px 12px; margin:12px 0; }
+  .uw-title { font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px; }
+  .uw-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:8px; }
+  .uw-tile { background:#131a22; border:0.5px solid #1e2a35; border-left:3px solid #1e2a35; border-radius:6px; padding:8px 10px; }
+  .uw-tile.hot-green { border-left-color:#22c55e; } .uw-tile.hot-amber { border-left-color:#f59e0b; } .uw-tile.hot-red { border-left-color:#ef4444; }
+  .uw-h { font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:0.5px; }
+  .uw-big { font-size:20px; font-weight:600; color:#e2e8f0; line-height:1.2; margin-top:2px; }
+  .uw-sub { font-size:11px; color:#94a3b8; margin-top:3px; line-height:1.4; }
+  .uw-meter { position:relative; height:6px; background:#1e2a35; border-radius:3px; margin:8px 0 3px; }
+  .uw-meter > i { position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:#3b82f6; }
+  .uw-split { display:flex; height:8px; border-radius:4px; overflow:hidden; background:#1e2a35; margin:8px 0 4px; }
+  .uw-split > i { display:block; height:100%; }
+  .uw-row2 { display:flex; justify-content:space-between; font-size:11px; }
+  .uw-dots { display:flex; gap:5px; margin-top:6px; align-items:center; }
+  .uw-dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  .uw-badge { display:inline-block; font-size:10px; padding:1px 6px; border-radius:8px; background:#14301f; color:#22c55e; margin-left:6px; vertical-align:middle; }
+  .uw-note { font-size:10px; color:#475569; margin-top:8px; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; background: #0a0e13; color: #e2e8f0; min-height: 100vh; }
   .app { max-width: 860px; margin: 0 auto; padding: 0 16px; }
@@ -1719,17 +1598,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
   .detail-key { color: #64748b; white-space: nowrap; }
   .section-divider { border: none; border-top: 0.5px solid #1e2a35; margin: 14px 0; }
-  .vp-inline-section { margin: 10px 0 14px; }
-  .avwap-section { margin: 10px 0 14px; }
   .confluence-section { margin: 10px 0 14px; }
   .strength-dots { display: flex; gap: 2px; align-items: center; }
   .strength-dot { width: 5px; height: 5px; border-radius: 50%; background: #22c55e; }
   .strength-dot.dim { background: #1e2a35; }
-  .mtf-inline-section { margin: 10px 0 14px; }
-  .mtf-inline-grid { display: flex; flex-direction: column; gap: 4px; }
-  .mtf-inline-row { display: flex; align-items: center; gap: 16px; background: #0f1419; border-radius: 6px; padding: 5px 10px; }
-  .mtf-inline-tf { font-size: 11px; font-weight: 500; color: #64748b; min-width: 28px; }
-  .mtf-inline-pair { display: flex; align-items: center; gap: 5px; flex: 1; }
   .options-section { }
   .options-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
   .options-title { font-size: 11px; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -1787,16 +1659,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chart-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #475569; background: #0f1419; z-index: 3; }
   .vp-overlay { position: absolute; top: 0; right: 0; pointer-events: none; z-index: 2; }
   .legend-vp { color: #475569; }
-  .grades-panel { background:#0f1419; border:1px solid #1e2a35; border-radius:6px; padding:8px 10px; margin-bottom:8px; }
-  .grades-title { font-size:11px; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
-  .grades-note { text-transform:none; letter-spacing:0; color:#475569; font-size:9px; margin-left:6px; }
-  .grade-row { display:flex; align-items:center; gap:8px; padding:3px 0; }
-  .grade-pill { width:20px; height:20px; border-radius:4px; color:#0a0e13; font-weight:700; font-size:11px; display:flex; align-items:center; justify-content:center; flex:0 0 auto; }
-  .grade-name { width:78px; font-size:11px; color:#e2e8f0; flex:0 0 auto; }
-  .grade-bar { flex:1 1 auto; height:6px; background:#1e2a35; border-radius:3px; overflow:hidden; min-width:40px; }
-  .grade-bar-fill { height:100%; border-radius:3px; }
-  .grade-score { width:24px; text-align:right; font-size:11px; color:#94a3b8; flex:0 0 auto; }
-  .grade-reasons { flex:2 1 auto; font-size:9px; color:#475569; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .badge-row { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; align-items:center; }
   .mini-badge { font-size:10px; padding:3px 8px; border:1px solid #334155; border-radius:10px; font-weight:600; }
   .mini-badge-dim { font-size:10px; color:#475569; padding:3px 0; }
@@ -1858,7 +1720,6 @@ async function runScan() {
     if (data.error) { resultsDiv.innerHTML = '<div class="error-msg">' + data.error + '</div>'; return; }
     scanResults = data.results.filter(d => !d.error);
     resultsDiv.innerHTML = data.results.map(renderCard).join('');
-    scanResults.forEach(d => setTimeout(() => loadVP(d.ticker), 100));
     scanResults.forEach((d, i) => setTimeout(() => loadUW(d.ticker, d.price), 400 + i * 700));
     // Init charts after DOM settles
     scanResults.forEach(d => setTimeout(() => initChart(d.ticker), 150));
@@ -1876,6 +1737,104 @@ const uwData = {};   // ticker -> report from /api/scan?uw=
 
 // Unusual Whales panel. Silent when the feature is off or the call fails, so
 // the scan page looks exactly as before. Text goes in via textContent, never HTML.
+function uwEl(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function uwMoney(v) {
+  const a = Math.abs(v || 0);
+  if (a >= 1e9) return '$' + (a / 1e9).toFixed(1) + 'B';
+  if (a >= 1e6) return '$' + (a / 1e6).toFixed(1) + 'M';
+  if (a >= 1e3) return '$' + Math.round(a / 1e3) + 'K';
+  return '$' + Math.round(a);
+}
+function uwMonthDay(iso) {
+  const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const p = String(iso).split('-');
+  return m[parseInt(p[1], 10) - 1] + ' ' + parseInt(p[2], 10);
+}
+function uwTile(title, hot) {
+  const t = uwEl('div', 'uw-tile' + (hot ? ' hot-' + hot : ''));
+  t.appendChild(uwEl('div', 'uw-h', title));
+  return t;
+}
+function uwIvTile(iv) {
+  const r = iv.rank;
+  const hot = (r >= 70) ? 'green' : (r <= 20 ? 'amber' : '');
+  const t = uwTile('Option prices vs past year', hot);
+  t.appendChild(uwEl('div', 'uw-big', 'IV rank ' + Math.round(r)));
+  const m = uwEl('div', 'uw-meter');
+  const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, r)) + '%';
+  m.appendChild(f); t.appendChild(m);
+  t.appendChild(uwEl('div', 'uw-sub', r >= 70 ? 'High. Sellers get paid more than usual.'
+    : r <= 30 ? 'Low. Sellers get paid less than usual.' : 'Middle of its range for the past year.'));
+  if (iv.iv != null && iv.rv != null)
+    t.appendChild(uwEl('div', 'uw-sub', 'Options price in ' + Math.round(iv.iv * 100) + '% swings; the stock has actually moved ' + Math.round(iv.rv * 100) + '%.'));
+  return t;
+}
+function uwEarnTile(e) {
+  const hot = (e.days != null && e.days >= 0 && e.days <= 14) ? 'amber' : '';
+  const t = uwTile('Next earnings', hot);
+  t.appendChild(uwEl('div', 'uw-big', uwMonthDay(e.date)));
+  t.appendChild(uwEl('div', 'uw-sub', (e.days === 0 ? 'today' : e.days === 1 ? 'tomorrow' : 'in ' + e.days + ' days') + (e.confirmed ? ', confirmed' : ', estimated')));
+  if (e.implied_pct != null) {
+    let s = 'Options expect a move of about ' + e.implied_pct.toFixed(1) + '% either way';
+    if (e.lo != null) s += ' ($' + e.lo.toFixed(0) + ' to $' + e.hi.toFixed(0) + ')';
+    t.appendChild(uwEl('div', 'uw-sub', s + '.'));
+  }
+  if (e.history && e.history.length) {
+    const dots = uwEl('div', 'uw-dots');
+    e.history.forEach(h => {
+      const d = uwEl('span', 'uw-dot');
+      const over = Math.abs(h.realized) > h.implied;
+      d.style.background = over ? '#ef4444' : '#22c55e';
+      d.title = (h.realized >= 0 ? '+' : '') + h.realized.toFixed(1) + '% moved vs ' + h.implied.toFixed(1) + '% expected';
+      dots.appendChild(d);
+    });
+    dots.appendChild(uwEl('span', 'uw-sub', ' last ' + e.history.length + ': moved more than expected ' + e.beat + 'x'));
+    t.appendChild(dots);
+  }
+  return t;
+}
+function uwFlowTile(fl, dark, days) {
+  const tot = (fl.call || 0) + (fl.put || 0);
+  const skew = tot > 0 ? Math.max(fl.call, fl.put) / tot : 0;
+  const t = uwTile('Where options money is going', (fl.n > 0 && skew >= 0.75) ? (fl.call >= fl.put ? 'green' : 'red') : '');
+  if (!fl.n) {
+    t.appendChild(uwEl('div', 'uw-sub', 'No large options trades in the past ' + days + ' days.'));
+  } else {
+    t.appendChild(uwEl('div', 'uw-big', uwMoney(fl.total)));
+    const sp = uwEl('div', 'uw-split');
+    const c = uwEl('i'); c.style.width = (fl.call / tot * 100) + '%'; c.style.background = '#22c55e';
+    const p = uwEl('i'); p.style.width = (fl.put / tot * 100) + '%'; p.style.background = '#ef4444';
+    sp.appendChild(c); sp.appendChild(p); t.appendChild(sp);
+    const r = uwEl('div', 'uw-row2');
+    r.appendChild(uwEl('span', 'c-green', 'Calls ' + uwMoney(fl.call)));
+    r.appendChild(uwEl('span', 'c-red', 'Puts ' + uwMoney(fl.put)));
+    t.appendChild(r);
+    t.appendChild(uwEl('div', 'uw-sub', fl.n + ' large trade' + (fl.n === 1 ? '' : 's') + ' in ' + days + ' days' + (fl.ask_pct != null ? ', ' + fl.ask_pct + '% bought at the ask price' : '') + '.'));
+  }
+  if (dark && dark.n) t.appendChild(uwEl('div', 'uw-sub', 'Off-exchange: ' + uwMoney(dark.total) + ' in ' + dark.n + ' big trade' + (dark.n === 1 ? '' : 's') + '.'));
+  return t;
+}
+function uwInsiderTile(ins) {
+  const hot = ins.cluster ? 'green' : (ins.buy_usd > 0 ? 'green' : '');
+  const t = uwTile('Insiders, past ' + ins.days + ' days', hot);
+  if (!ins.buy_n && !ins.sell_n) {
+    t.appendChild(uwEl('div', 'uw-sub', 'No reported insider trades.'));
+    return t;
+  }
+  const big = uwEl('div', 'uw-big');
+  const b = uwEl('span', ins.buy_usd > 0 ? 'c-green' : 'c-dim', 'Buys ' + uwMoney(ins.buy_usd));
+  big.appendChild(b);
+  if (ins.cluster) big.appendChild(uwEl('span', 'uw-badge', ins.max_buyers + '+ insiders bought'));
+  t.appendChild(big);
+  t.appendChild(uwEl('div', 'uw-sub', ins.buy_n + ' purchase' + (ins.buy_n === 1 ? '' : 's') + '. Sells ' + uwMoney(ins.sell_usd) + ' (' + ins.sell_n + ').'));
+  if (ins.plan_pct != null) t.appendChild(uwEl('div', 'uw-sub', ins.plan_pct + '% of the selling was pre-scheduled, so it says little.'));
+  return t;
+}
 async function loadUW(ticker, price) {
   const el = document.getElementById('uw-' + ticker);
   if (!el) return;
@@ -1884,22 +1843,20 @@ async function loadUW(ticker, price) {
     const j = await res.json();
     if (!j || !j.enabled || j.error || !j.lines || !j.lines.length) return;
     uwData[ticker] = j;
-    const box = document.createElement('div');
-    box.className = 'uw-box';
-    const title = document.createElement('div');
-    title.className = 'uw-title';
-    title.textContent = 'Large-trader activity (as reported by Unusual Whales)';
-    box.appendChild(title);
-    j.lines.forEach(t => {
-      const row = document.createElement('div');
-      row.className = 'uw-line';
-      row.textContent = t;
-      box.appendChild(row);
-    });
-    const note = document.createElement('div');
-    note.className = 'uw-note';
-    note.textContent = 'Recorded trades only. They do not say why a trade was made and do not change the scores above.';
-    box.appendChild(note);
+    const box = uwEl('div', 'uw-box');
+    box.appendChild(uwEl('div', 'uw-title', 'Large-trader activity (Unusual Whales)'));
+    const T = j.tiles;
+    if (T) {
+      const grid = uwEl('div', 'uw-grid');
+      if (T.iv) grid.appendChild(uwIvTile(T.iv));
+      if (T.earnings) grid.appendChild(uwEarnTile(T.earnings));
+      if (T.flow) grid.appendChild(uwFlowTile(T.flow, T.dark, T.window_days || j.window_days));
+      if (T.insiders) grid.appendChild(uwInsiderTile(T.insiders));
+      box.appendChild(grid);
+    } else {
+      j.lines.forEach(t => box.appendChild(uwEl('div', 'uw-sub', t)));
+    }
+    box.appendChild(uwEl('div', 'uw-note', 'Recorded trades only. They do not say why a trade was made and do not change the scores above.'));
     el.appendChild(box);
   } catch (e) { /* leave the panel empty */ }
 }
@@ -1993,10 +1950,7 @@ function renderCard(d) {
         '<span class="detail-key">200 MA dist</span><span class="'+(d.ma_distance>=0?'c-green':'c-red')+'">'+(d.ma_distance>=0?'+':'')+d.ma_distance.toFixed(1)+'%</span>' +
       '</div></div>' +
     '</div>' +
-    renderMTFInline(d) +
-    renderAVWAP(d) +
     renderConfluences(d) +
-    renderVPSection(d.ticker) +
     '<div id="uw-'+d.ticker+'"></div>' +
 
     '<hr class="section-divider">' +
@@ -2442,64 +2396,6 @@ function renderEarningsFlag(d) {
     icon + label + extra + '</div>';
 }
 
-function renderMTFInline(d) {
-  const mtf = d.mtf || {};
-  const price = d.price;
-  const tfs = [['4h','4h'],['1d','1D'],['1wk','1W'],['1mo','1M']];
-  function maSpan(ma, dist) {
-    if (!ma) return '<span class="c-dim">N/A</span>';
-    const c = price > ma ? 'c-green' : 'c-red';
-    const sign = dist >= 0 ? '+' : '';
-    const distHtml = dist != null ? ' <span style="font-size:10px;color:#475569">(' + sign + dist.toFixed(2) + ')</span>' : '';
-    return '<span class="' + c + '">$' + ma.toFixed(2) + distHtml + '</span>';
-  }
-  let rows = '';
-  tfs.forEach(function(pair) {
-    const key = pair[0], label = pair[1];
-    const tf = mtf[key] || {};
-    rows += '<div class="mtf-inline-row">' +
-      '<span class="mtf-inline-tf">' + label + '</span>' +
-      '<span class="mtf-inline-pair"><span class="detail-key" style="font-size:10px">50 MA</span>' + maSpan(tf.ma50, tf.ma50_dist) + '</span>' +
-      '<span class="mtf-inline-pair"><span class="detail-key" style="font-size:10px">200 MA</span>' + maSpan(tf.ma200, tf.ma200_dist) + '</span>' +
-    '</div>';
-  });
-  return '<div class="mtf-inline-section"><div class="detail-title" style="margin-bottom:6px">Moving Averages — Multi-Timeframe</div><div class="mtf-inline-grid">' + rows + '</div></div>';
-}
-
-function renderAVWAP(d) {
-  const av = d.avwap || {};
-  const price = d.price;
-  if (!Object.keys(av).length) return '';
-  const anchors = [['52w_high','52wH AVWAP'],['ytd','YTD AVWAP'],['ytd_low','YTD Low AVWAP']];
-  function bandRow(val, label, isAvwap) {
-    if (!val) return '';
-    const above = price > val;
-    const c = above ? 'c-green' : 'c-red';
-    const dist = ((val - price) / price * 100);
-    const distStr = (dist >= 0 ? '+' : '') + dist.toFixed(1) + '%';
-    const fw = isAvwap ? 'font-weight:500' : '';
-    return '<tr><td style="color:#64748b;font-size:10px;' + fw + '">' + label + '</td>' +
-      '<td class="' + c + '" style="' + fw + '">$' + val.toFixed(2) + '</td>' +
-      '<td class="c-muted" style="font-size:10px">' + distStr + '</td>' +
-      '<td class="c-muted" style="font-size:10px">' + (above ? 'above' : 'below') + '</td></tr>';
-  }
-  let rows = '';
-  anchors.forEach(function(pair) {
-    const key = pair[0], label = pair[1];
-    const a = av[key];
-    if (!a) return;
-    rows += bandRow(a.avwap, label, true);
-    rows += bandRow(a.s1_up, label + ' +1σ', false);
-    rows += bandRow(a.s1_dn, label + ' -1σ', false);
-    rows += bandRow(a.s2_up, label + ' +2σ', false);
-    rows += bandRow(a.s2_dn, label + ' -2σ', false);
-  });
-  if (!rows) return '';
-  return '<div class="avwap-section"><div class="detail-title" style="margin-bottom:6px">Anchored VWAP — Institutional Cost Basis</div>' +
-    '<table class="opts-table"><thead><tr><th style="text-align:left">Level</th><th style="text-align:left">Price</th><th style="text-align:left">Distance</th><th style="text-align:left">vs Current</th></tr></thead>' +
-    '<tbody>' + rows + '</tbody></table></div>';
-}
-
 function renderConfluences(d) {
   const conf = d.confluences || [];
   if (!conf.length) return '';
@@ -2534,45 +2430,6 @@ function renderConfluences(d) {
     imHeader +
     '<table class="opts-table"><thead><tr><th style="text-align:left">Zone</th><th style="text-align:left">Distance</th><th style="text-align:left">Role</th><th style="text-align:left">Strength</th><th style="text-align:left">Sources</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table></div>';
-}
-
-function renderVPSection(ticker) {
-  return '<div class="vp-inline-section" id="vp-section-' + ticker + '">' +
-    '<div class="detail-title" style="margin-bottom:6px">Volume Profile (6y)</div>' +
-    '<div id="vp-content-' + ticker + '" style="font-size:12px;color:#475569">Loading...</div>' +
-  '</div>';
-}
-
-async function loadVP(ticker) {
-  const el = document.getElementById('vp-content-' + ticker);
-  if (!el) return;
-  try {
-    const res = await fetch('/api/scan?vp=' + encodeURIComponent(ticker));
-    const vp = await res.json();
-    if (vp.error) { el.innerHTML = '<span class="c-red">' + vp.error + '</span>'; return; }
-    const d = scanResults.find(r => r.ticker === ticker);
-    if (d) d.vp = vp;
-    el.innerHTML = renderVPContent(vp, d ? d.price : 0);
-  } catch(e) {
-    el.innerHTML = '<span class="c-red">Error: ' + e.message + '</span>';
-  }
-}
-
-function renderVPContent(vp, curr) {
-  function distStr(price) {
-    const pct = ((price - curr) / curr * 100);
-    return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
-  }
-  const hvnRows = (vp.hvn_nodes || []).map(n => {
-    const role = n.role === 'support' ? 'c-green' : 'c-red';
-    return '<tr><td class="' + role + '">$' + n.price.toFixed(2) + '</td><td class="c-muted">' + distStr(n.price) + '</td><td class="c-muted">' + n.vol_pct.toFixed(0) + '%</td><td class="' + role + '">' + n.role + '</td></tr>';
-  }).join('');
-  const lvnRows = (vp.lvn_nodes || []).map(n => {
-    return '<tr><td class="c-amber">$' + n.price.toFixed(2) + '</td><td class="c-muted">' + distStr(n.price) + '</td><td class="c-muted">' + n.vol_pct.toFixed(0) + '%</td><td class="c-amber">low-vol</td></tr>';
-  }).join('');
-  const header = '<div style="font-size:11px;margin-bottom:6px"><span style="color:#a78bfa">POC $' + vp.poc + '</span> &middot; <span style="color:#6b8cba">VAH $' + vp.vah + '</span> &middot; <span style="color:#6b8cba">VAL $' + vp.val + '</span></div>';
-  const table = '<table class="opts-table"><thead><tr><th style="text-align:left">Price</th><th style="text-align:left">From Current</th><th style="text-align:left">Vol %</th><th style="text-align:left">Role</th></tr></thead><tbody>' + hvnRows + lvnRows + '</tbody></table>';
-  return header + table;
 }
 
 function renderOptionsSection(d) {
@@ -2624,26 +2481,6 @@ async function loadOptions(ticker, crashScore, btnEl) {
 
 function gradeColor(g){
   return g==='A'?'#22c55e':g==='B'?'#86efac':g==='C'?'#f59e0b':g==='D'?'#fb923c':g==='F'?'#ef4444':'#475569';
-}
-function renderTradeGrades(data){
-  const g = data.grades;
-  if (!g) return '';
-  const order = [['Sell Put',g.sell_put],['Wheel',g.wheel],['Sell Call',g.sell_call]];
-  const rows = order.map(function(p){
-    const name=p[0], v=p[1];
-    if(!v) return '';
-    const col = gradeColor(v.grade);
-    return '<div class="grade-row">'+
-      '<div class="grade-pill" style="background:'+col+'">'+v.grade+'</div>'+
-      '<div class="grade-name">'+name+'</div>'+
-      '<div class="grade-bar"><div class="grade-bar-fill" style="width:'+v.score+'%;background:'+col+'"></div></div>'+
-      '<div class="grade-score">'+v.score+'</div>'+
-      '<div class="grade-reasons">'+(v.reasons||[]).slice(0,3).join(' \u00b7 ')+'</div>'+
-    '</div>';
-  }).join('');
-  return '<div class="grades-panel">'+
-    '<div class="grades-title">Trade Grades <span class="grades-note">starting weights, not yet validated against outcomes</span></div>'+
-    rows+'</div>';
 }
 function renderLiqIVHV(data){
   let out='';
@@ -2789,27 +2626,6 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<tbody>' + topRows + '</tbody>' +
       '</table>' +
       '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of chain OI — unusual concentration (within 27–45 DTE window)</div>' +
-      (function(){
-        const exps = data.all_exp_oi || [];
-        if (!exps.length) return '';
-        let expRows = '';
-        exps.forEach(function(e){
-          const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
-          const mark = e.in_window ? ' <span style="color:#22c55e">•</span>' : '';
-          expRows += '<tr>' +
-            '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)' + mark + '</td>' +
-            '<td style="text-align:right" class="c-green">' + (e.call_oi||0).toLocaleString() + '</td>' +
-            '<td style="text-align:right" class="c-red">' + (e.put_oi||0).toLocaleString() + '</td>' +
-            '<td style="text-align:right;color:#e2e8f0">' + (e.total_oi||0).toLocaleString() + '</td>' +
-            '<td style="text-align:right" class="c-muted">' + r + '</td>' +
-          '</tr>';
-        });
-        return '<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">OI by expiration (entire chain · <span style="color:#22c55e">•</span> = 27–45 DTE tradeable window)</div>' +
-          '<table class="opts-table">' +
-            '<thead><tr><th>Expiration</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th><th style="text-align:right">Total</th><th style="text-align:right">P/C</th></tr></thead>' +
-            '<tbody>' + expRows + '</tbody>' +
-          '</table>';
-      })() +
     '</div>';
   }
   // ─────────────────────────────────────────────────────────────────────────
@@ -2822,7 +2638,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
     quoteBanner = '<div style="background:#0f1419;border:1px solid #1e2a35;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#94a3b8">' +
       'Quotes: ' + data.quotes_filled + ' contracts had blank Yahoo prices (market closed), so their bid and ask come from Unusual Whales NBBO.</div>';
   }
-  return quoteBanner + renderTradeGrades(data) + renderLiqIVHV(data) + imBanner + skewBanner + ivRankBanner + unusualOISection +
+  return quoteBanner + renderLiqIVHV(data) + imBanner + skewBanner + ivRankBanner + unusualOISection +
     '<div class="opts-tabs" id="exp-tabs-'+ticker+'">' + expTabs + '</div>' +
     '<div style="display:flex;gap:8px;margin-bottom:8px">' +
       '<button class="opts-tab" style="background:#0f1419;border:0.5px solid #1e2a35;border-radius:4px" onclick="switchSide(\''+ticker+'\',\'puts\',this)" id="side-puts-'+ticker+'">Sell Puts</button>' +
@@ -2912,23 +2728,6 @@ function formatForClaude(d) {
     L.push('Volume surge: ' + volLabel);
   }
 
-  // MTF MAs
-  const mtf = d.mtf || {};
-  if (Object.keys(mtf).length) {
-    L.push('');
-    L.push('MULTI-TIMEFRAME MOVING AVERAGES (current price $'+d.price.toFixed(2)+')');
-    [['4h','4h'],['1d','1D'],['1wk','1W'],['1mo','1M']].forEach(([key, label]) => {
-      const tf = mtf[key] || {};
-      function fmtMA(ma, dist) {
-        if (!ma) return 'N/A';
-        const dir = d.price > ma ? 'above' : 'below';
-        const sign = dist >= 0 ? '+' : '';
-        return '$'+ma.toFixed(2)+' ('+dir+', '+sign+'$'+dist.toFixed(2)+')';
-      }
-      L.push('  '+label.padEnd(5)+' 50 MA: '+fmtMA(tf.ma50, tf.ma50_dist)+'   200 MA: '+fmtMA(tf.ma200, tf.ma200_dist));
-    });
-  }
-
   // Earnings (always emitted, in or out of the options window)
   L.push('');
   {
@@ -2945,27 +2744,6 @@ function formatForClaude(d) {
       if (d.earnings_implied_move_pct != null) L.push('  Options imply about +/-' + d.earnings_implied_move_pct.toFixed(1) + '% on the report (Unusual Whales)');
       if (d.earnings_note) L.push('  ' + d.earnings_note);
     }
-  }
-
-  // AVWAP
-  const av = d.avwap || {};
-  const avAnchors = [['52w_high','52wH AVWAP'],['ytd','YTD AVWAP'],['ytd_low','YTD Low AVWAP']];
-  if (Object.keys(av).length) {
-    L.push('');
-    L.push('ANCHORED VWAP (institutional cost basis)');
-    avAnchors.forEach(function(pair) {
-      const key = pair[0], label = pair[1];
-      const a = av[key];
-      if (!a) return;
-      function avLine(val, lbl) {
-        if (!val) return;
-        const above = d.price > val;
-        const dist = ((val - d.price)/d.price*100);
-        L.push('  ' + lbl.padEnd(22) + ' $' + val.toFixed(2) + '  (' + (above?'above':'below') + ', ' + (dist>=0?'+':'') + dist.toFixed(1) + '%)');
-      }
-      avLine(a.avwap, label); avLine(a.s1_up, label+' +1σ'); avLine(a.s1_dn, label+' -1σ');
-      avLine(a.s2_up, label+' +2σ'); avLine(a.s2_dn, label+' -2σ');
-    });
   }
 
   // Confluence
@@ -3051,17 +2829,6 @@ function formatForClaude(d) {
       if (lq.median_spread_width != null) bits.push('$' + lq.median_spread_width.toFixed(2) + ' wide');
       if (bits.length) L.push('  ' + bits.join(' | '));
     }
-    // Trade grades
-    if (_optD.grades) {
-      const g = _optD.grades;
-      L.push('');
-      L.push('TRADE GRADES (starting weights — not yet validated against outcomes)');
-      [['Sell Put','sell_put'],['Wheel','wheel'],['Sell Call','sell_call']].forEach(function(p){
-        const v = g[p[1]];
-        if (!v) return;
-        L.push('  ' + (p[0]+':').padEnd(12) + v.grade + ' (' + v.score.toFixed(0) + '/100) — ' + (v.reasons||[]).join(', '));
-      });
-    }
     // ── CHANGE 3 in Copy for Claude: unusual OI ───────────────────────────────
     if (_optD.unusual_oi) {
       const uoi = _optD.unusual_oi;
@@ -3119,29 +2886,6 @@ function formatForClaude(d) {
         const opt = c.optimal ? ' *' : '';
         const theta = c.theta != null ? '$'+c.theta.toFixed(3) : 'N/A';
         L.push('  $'+c.strike.toFixed(0)+opt+'\t$'+c.bid.toFixed(2)+'\t$'+c.ask.toFixed(2)+'\t$'+(c.dailyPrem!=null?c.dailyPrem.toFixed(3):'0.000')+'\t'+c.delta.toFixed(2)+'\t'+theta+'\t'+(c.impliedVolatility*100).toFixed(0)+'%\t'+c.openInterest+'\t$'+c.breakeven.toFixed(2)+'\t'+c.annYield.toFixed(1)+'%');
-      });
-    }
-  }
-
-  // Volume profile
-  const vp = d.vp;
-  if (vp && vp.poc) {
-    L.push('');
-    L.push('VOLUME PROFILE (6-year lookback)');
-    L.push('  POC: $'+vp.poc+'   VAH: $'+vp.vah+'   VAL: $'+vp.val);
-    const curr = vp.current_price || d.price;
-    if (vp.hvn_nodes && vp.hvn_nodes.length) {
-      L.push('  HVN (price tends to slow/reverse here):');
-      vp.hvn_nodes.forEach(n => {
-        const dist = ((n.price - curr)/curr*100);
-        L.push('    $'+n.price.toFixed(2)+'  '+n.role+'  '+n.vol_pct.toFixed(0)+'% of max vol  ('+(dist>=0?'+':'')+dist.toFixed(1)+'% from current)');
-      });
-    }
-    if (vp.lvn_nodes && vp.lvn_nodes.length) {
-      L.push('  LVN (price moves through these quickly):');
-      vp.lvn_nodes.forEach(n => {
-        const dist = ((n.price - curr)/curr*100);
-        L.push('    $'+n.price.toFixed(2)+'  low-vol  '+n.vol_pct.toFixed(0)+'% of max vol  ('+(dist>=0?'+':'')+dist.toFixed(1)+'% from current)');
       });
     }
   }
@@ -3451,6 +3195,7 @@ def fetch_uw(ticker, price=None):
             "next_earnings": ({"date": ne["date"].isoformat(), "confirmed": ne["confirmed"]}
                               if ne.get("date") else None),
             "lines": rep.get("lines") or [],
+            "tiles": rep.get("tiles"),
             "window_days": _UW_WINDOW_DAYS,
             "as_of": now.isoformat(timespec="seconds"),
         }
@@ -3477,11 +3222,10 @@ class handler(BaseHTTPRequestHandler):
 
         tickers_raw = params.get("tickers", [""])[0].strip()
         options_ticker = params.get("options", [""])[0].strip().upper()
-        vp_ticker = params.get("vp", [""])[0].strip().upper()
         chart_ticker = params.get("chart", [""])[0].strip().upper()
         uw_ticker = params.get("uw", [""])[0].strip().upper()
 
-        if not any([tickers_raw, options_ticker, vp_ticker, chart_ticker, uw_ticker]):
+        if not any([tickers_raw, options_ticker, chart_ticker, uw_ticker]):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -3512,15 +3256,6 @@ class handler(BaseHTTPRequestHandler):
                     ctx = None
             try:
                 result = fetch_options(options_ticker, ctx=ctx)
-            except Exception as e:
-                result = {"error": str(e)}
-            self.wfile.write(json.dumps(result).encode())
-            return
-
-        if vp_ticker:
-            tf_param = params.get("tf", ["1d"])[0].strip()
-            try:
-                result = fetch_volume_profile(vp_ticker, tf=tf_param)
             except Exception as e:
                 result = {"error": str(e)}
             self.wfile.write(json.dumps(result).encode())

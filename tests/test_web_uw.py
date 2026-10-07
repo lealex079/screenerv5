@@ -79,3 +79,34 @@ html = urllib.request.urlopen(base + "/").read().decode()
 assert "loadUW" in html and 'id="uw-' in html and "uw-box" in html
 srv.shutdown()
 print("web uw tests: all passed")
+
+# 5. structured tiles for the visual card, and the removed sections stay removed
+os.environ["ENABLE_UW"] = "1"
+scan._UW_CACHE.clear()
+def opener2(req, timeout=0):
+    u = req.full_url
+    if "volatility/stats" in u:
+        return Resp(json.dumps({"data": {"iv_rank": "80", "iv": "0.30", "iv_low": "0.19", "iv_high": "0.39", "rv": "0.22"}}).encode())
+    if "/api/earnings/" in u:
+        return Resp(json.dumps({"data": [{"report_date": "2099-10-20", "source": "company", "expected_move_perc": "0.05", "expected_move": "9.1"}]}).encode())
+    if "ticker-flow" in u:
+        return Resp(json.dumps({"data": [
+            {"date": __import__("datetime").date.today().isoformat(), "buy_sell": "buy", "premium": "50000", "transactions": 2, "uniq_insiders": 2},
+            {"date": __import__("datetime").date.today().isoformat(), "buy_sell": "sell", "premium": "-20000", "transactions": 1, "uniq_insiders": 1, "premium_10b5": "-20000"}]}).encode())
+    if "flow-alerts" in u:
+        return Resp(json.dumps({"data": [{"total_premium": "300000", "type": "call", "total_ask_side_prem": "200000", "total_bid_side_prem": "50000", "expiry": "2026-11-20", "strike": "100"}]}).encode())
+    return Resp(json.dumps({"data": []}).encode())
+scan._uw_client_factory = lambda: UWClient(KEY, opener2)
+r = scan.fetch_uw("RTX", price=100.0)
+T = r["tiles"]
+assert T["iv"]["rank"] == 80 and abs(T["iv"]["rv"] - 0.22) < 1e-9, T["iv"]
+assert T["earnings"]["implied_pct"] == 5.0 and abs(T["earnings"]["lo"] - 95.0) < 1e-6, T["earnings"]
+assert T["flow"]["n"] == 1 and T["flow"]["call"] == 300000 and T["flow"]["ask_pct"] == 67, T["flow"]
+assert T["insiders"]["cluster"] and T["insiders"]["buy_usd"] == 50000 and T["insiders"]["plan_pct"] == 100, T["insiders"]
+assert KEY not in json.dumps(r)
+src = (ROOT / "api" / "scan.py").read_text(encoding="utf-8")
+for gone in ("renderAVWAP", "renderVPSection", "loadVP", "renderTradeGrades", "TRADE GRADES",
+             "ANCHORED VWAP", "VOLUME PROFILE", "fetch_volume_profile"):
+    assert gone not in src, gone
+assert "renderConfluences" in src and "vpBars" in src, "confluences and the chart overlay must stay"
+print("tiles tests: passed")

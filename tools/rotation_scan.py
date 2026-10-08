@@ -254,8 +254,8 @@ def render_markdown(res, uw_rows, uw_agg, stamp):
     for key, label in (("vs_cyclical", "consumer discretionary (XLY)"), ("vs_tech", "technology (XLK)")):
         r = res.get(key)
         if r:
-            L.append("%s gained %+.1f%% on %s over 20 days, measured as one divided by the other. That ratio is %s its %d-day average." % (
-                etf, r["change_20d_pct"], label, "above" if r["above_avg"] else "below", RATIO_MA_DAYS))
+            L.append("%s versus %s over 20 days: %s by %.1f%% (price of one divided by the other). That ratio is %s its %d-day average." % (
+                etf, label, "up" if r["change_20d_pct"] >= 0 else "down", abs(r["change_20d_pct"]), "above" if r["above_avg"] else "below", RATIO_MA_DAYS))
     L += ["", "## All sectors, 20-day ranking", "", "| Rank | ETF | 20d % | 60d % |", "|---|---|---|---|"]
     for r in res["sector_table"]:
         L.append("| %s | %s | %s | %s |" % (r["rank_20d"] or "", r["ticker"] + (" (this one)" if r["ticker"] == etf else ""), f1(r["ret_20d"]), f1(r["ret_60d"])))

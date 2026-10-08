@@ -182,6 +182,13 @@ class UWClient:
         j = self._get("/api/institution/%s/ownership" % ticker)
         return self._rows(j) if j is not None else None
 
+    def etf_in_outflow(self, ticker):
+        """Daily ETF creations and redemptions (money in and out). ETFs only; a
+        stock ticker returns 404. UNVERIFIED path and field names: check with
+        tools/rotation_scan.py --probe-flow."""
+        j = self._get("/api/etfs/%s/in-outflow" % ticker)
+        return self._rows(j) if j is not None else None
+
     def option_contracts(self, ticker, expiry=None):
         """Option contracts with nbbo_bid / nbbo_ask (populated after hours).
         Capped at 500 rows; pass expiry (date) for busy names. UNVERIFIED PARAM: expiry."""

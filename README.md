@@ -73,3 +73,7 @@ Each scanned card can show a "Large-trader activity" panel (IV rank, earnings im
 - **TrendScore**: OLS panel regression, 15 tickers, 27,555 obs, two-way clustered SEs (Petersen 2009)
 - **CrashScore**: Logistic regression on 794 crash events, rally_5d z=2.84, p=0.005
 - **Valuation**: P/E, P/B, P/S, EV/EBIT with sector carve-outs for Financial Services and Real Estate
+
+## Sector rotation check
+
+`python tools/rotation_scan.py XLP --uw --explain` compares a sector ETF with SPY and the other ten sector ETFs, checks its top holdings, and counts five yes/no signals (no weights). It writes `rotation_out/<ETF>_<date>.md`, a `_data.json`, and a `_claude.md` prompt to paste into Claude. `--explain` asks Claude directly (needs `ANTHROPIC_API_KEY`). `--uw` adds options flow and IV rank (needs `UW_API_KEY`). `--probe-flow` saves raw responses from UW market and sector flow paths, which are unverified and not used in the report.

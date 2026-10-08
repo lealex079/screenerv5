@@ -76,4 +76,8 @@ Each scanned card can show a "Large-trader activity" panel (IV rank, earnings im
 
 ## Sector rotation check
 
-`python tools/rotation_scan.py XLP --uw --explain` compares a sector ETF with SPY and the other ten sector ETFs, checks its top holdings, and counts five yes/no signals (no weights). It writes `rotation_out/<ETF>_<date>.md`, a `_data.json`, and a `_claude.md` prompt to paste into Claude. `--explain` asks Claude directly (needs `ANTHROPIC_API_KEY`). `--uw` adds options flow and IV rank (needs `UW_API_KEY`). `--probe-flow` saves raw responses from UW market and sector flow paths, which are unverified and not used in the report.
+`python tools/rotation_scan.py XLP --uw --explain` compares a sector ETF with SPY and the other ten sector ETFs, checks its top holdings, and counts five yes/no signals (no weights). It writes `rotation_out/<ETF>_<date>.md`, a `_data.json`, and a `_claude.md` prompt to paste into Claude. `--explain` asks Claude directly (needs `ANTHROPIC_API_KEY`). `--uw` adds options flow and IV rank (needs `UW_API_KEY`). The report also shows three confirmation checks (volume, whether the gap improved three weeks in a row, VIX rising) and, with `--uw`, fund inflows and outflows for all 11 sector ETFs from Unusual Whales (field names unverified; `--probe-flow` saves the raw responses).
+
+## Sector map
+
+`python tools/sector_map.py` writes one table for all 11 sector ETFs: price over 5, 20 and 60 days, versus SPY, net money in or out (Unusual Whales, needs `UW_API_KEY`), that money as a share of fund size (Yahoo total assets), and a plain label such as "Going in (price agrees)". Output goes to `rotation_out/SECTORS_<date>.md` and `.csv`. No Claude step.

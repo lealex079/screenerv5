@@ -40,6 +40,10 @@ RATIO_MA_DAYS = 50
 BREADTH_MIN_PCT = 60.0                # share of holdings that must beat SPY (signal 5)
 CLEAR_AT, MIXED_AT = 4, 2             # signals needed for "clear" and "mixed or early"
 UW_DAYS = 5
+VOLUME_RECENT, VOLUME_BASE = 20, 60   # recent days versus the 60 days before them
+PERSIST_WEEKS = 3                     # weeks in a row the ETF-versus-SPY gap must improve
+VIX, BONDS = "^VIX", "TLT"
+FLOW_WINDOWS = (5, 20)                # trading sessions for fund flow sums
 
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
 
@@ -50,6 +54,8 @@ The user message is JSON with the numbers. Rules:
 - Then give 3 to 5 short bullets. Each bullet states one finding with its numbers and what it means in plain words.
 - Say which signals agree and which disagree. If the evidence conflicts, say so instead of picking a side.
 - If Unusual Whales data is present, report it as reported (options trades are recorded trades, not a prediction). Mention IV rank only as how rich option prices are for that stock versus its past year, which matters for selling puts.
+- The result has five counted signals and separate confirmation checks (volume, whether the gap improved weeks in a row, market nervousness, fund flows). Report both, and say which confirmations agree or disagree with the verdict.
+- If fund_flows is present, say whether money is going into or out of the fund and how it compares with the other sector funds. If a flow field is missing, say flow data was unavailable instead of guessing.
 - Finish with one line on what would change the answer.
 - No em dashes. No jargon. If you use a term like relative performance, explain it in a few words.
 - Do not give investment advice. Under 220 words."""
@@ -110,8 +116,142 @@ def ratio_stats(closes, a, b, ma_days=RATIO_MA_DAYS):
     return {"above_avg": now > ma, "vs_avg_pct": (now / ma - 1) * 100, "change_20d_pct": chg20}
 
 
+def fetch_volume(ticker, period="1y"):
+    """Daily share volume as a Series. Empty on failure."""
+    import yfinance as yf
+    import pandas as pd
+    df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+    v = df["Volume"] if "Volume" in df else pd.Series(dtype=float)
+    if hasattr(v, "columns"):
+        v = v.iloc[:, 0]
+    return v.dropna()
+
+
+def volume_check(vol, close):
+    """Is the ETF rising on more volume than usual? Both parts must hold."""
+    import pandas as pd
+    if vol is None or close is None:
+        return None
+    df = pd.concat([close.rename("c"), vol.rename("v")], axis=1, join="inner").dropna()
+    if len(df) < VOLUME_RECENT + VOLUME_BASE + 1:
+        return None
+    recent = float(df["v"].iloc[-VOLUME_RECENT:].mean())
+    base = float(df["v"].iloc[-(VOLUME_RECENT + VOLUME_BASE):-VOLUME_RECENT].mean())
+    last = df.iloc[-VOLUME_RECENT:].copy()
+    last["chg"] = df["c"].diff().iloc[-VOLUME_RECENT:]
+    up, dn = last[last["chg"] > 0]["v"], last[last["chg"] < 0]["v"]
+    if up.empty and dn.empty:
+        return None
+    upv = float(up.mean()) if not up.empty else None
+    dnv = float(dn.mean()) if not dn.empty else None
+    both = upv is not None and dnv is not None
+    up_vs_down = (upv / dnv - 1) * 100 if both else None
+    # No down days at all in the window counts as "up days did not lack volume".
+    heavier = (upv > dnv) if both else (dn.empty and upv is not None)
+    return {"recent_vs_base_pct": (recent / base - 1) * 100, "up_day_avg": upv, "down_day_avg": dnv,
+            "up_vs_down_pct": up_vs_down, "met": bool(recent > base and heavier)}
+
+
+def persistence(closes, a, b, weeks=PERSIST_WEEKS):
+    """Did a/b improve each of the last `weeks` weeks (5-session steps)?"""
+    if a not in closes or b not in closes:
+        return None
+    r = (closes[a] / closes[b]).dropna()
+    if len(r) <= weeks * 5:
+        return None
+    pts = [float(r.iloc[-1 - 5 * i]) for i in range(weeks, -1, -1)]      # oldest to newest
+    ch = [(pts[i + 1] / pts[i] - 1) * 100 for i in range(weeks)]
+    rising = 0
+    for c in reversed(ch):
+        if c > 0:
+            rising += 1
+        else:
+            break
+    return {"weekly_change_pct": ch, "rising_weeks": rising, "weeks": weeks, "met": rising >= weeks}
+
+
+def fear_check(closes):
+    """Is the market getting more nervous? VIX above its 50-day average and up over 20 days."""
+    if VIX not in closes:
+        return None
+    v = closes[VIX].dropna()
+    if len(v) <= 50:
+        return None
+    now, ma = float(v.iloc[-1]), float(v.iloc[-50:].mean())
+    ch = (now / float(v.iloc[-21]) - 1) * 100
+    out = {"vix": now, "vix_50d_avg": ma, "vix_change_20d_pct": ch, "met": now > ma and ch > 0}
+    if BONDS in closes:
+        out["bonds_20d_pct"] = ret(closes[BONDS], 20)
+    return out
+
+
+def parse_etf_flow(rows):
+    """Net creations (money in) over the last 5 and 20 sessions from UW rows. Field names
+    are UNVERIFIED, so several likely names are tried and the field list is kept.
+    Returns None when there are no rows."""
+    if not rows:
+        return None
+    try:
+        from uw_client import num
+    except Exception:
+        num = lambda v, d=None: (float(v) if v not in (None, "") else d)
+    rows = sorted([r for r in rows if isinstance(r, dict)], key=lambda r: str(r.get("date", "")), reverse=True)
+    rows = [r for r in rows if not r.get("is_holiday")]
+    fields = sorted(rows[0].keys()) if rows else []
+    def pick(names):
+        for n in names:
+            if any(r.get(n) not in (None, "") for r in rows[:1]):
+                return n
+        return None
+    dcol = pick(("change_prem", "change_premium", "premium_change", "net_premium"))
+    scol = pick(("change", "shares_change", "net_change"))
+    out = {"n_rows": len(rows), "latest_date": str(rows[0].get("date")) if rows else None, "fields": fields,
+           "dollar_field": dcol, "share_field": scol, "dollars": None, "shares": None}
+    if dcol:
+        out["dollars"] = {w: sum(num(r.get(dcol), 0) for r in rows[:w]) for w in FLOW_WINDOWS}
+    if scol:
+        out["shares"] = {w: sum(num(r.get(scol), 0) for r in rows[:w]) for w in FLOW_WINDOWS}
+    return out
+
+
+def run_etf_flows(etfs):
+    """{etf: parsed flow or None}. UW only; prints a short status and never the key."""
+    try:
+        import uw_client
+    except Exception as e:
+        print("UW module failed to import (%s); skipping fund flows." % type(e).__name__)
+        return {}
+    client = uw_client.UWClient()
+    if not client.enabled:
+        return {}
+    out = {}
+    for t in etfs:
+        try:
+            out[t] = parse_etf_flow(client.etf_in_outflow(t))
+        except Exception as e:
+            print("  %s: fund flow failed (%s)" % (t, type(e).__name__))
+            out[t] = None
+    got = sum(1 for v in out.values() if v)
+    print("Fund flows: data for %d of %d ETFs" % (got, len(etfs)))
+    if got and not any((v or {}).get("dollars") or (v or {}).get("shares") for v in out.values()):
+        first = next(v for v in out.values() if v)
+        print("  UW returned rows but no recognized flow field. Fields: %s" % ", ".join(first["fields"]))
+    return out
+
+
+def flow_value(parsed, window):
+    """(amount, unit) for one ETF and window, preferring dollars."""
+    if not parsed:
+        return None, None
+    if parsed.get("dollars"):
+        return parsed["dollars"].get(window), "dollars"
+    if parsed.get("shares"):
+        return parsed["shares"].get(window), "shares"
+    return None, None
+
+
 # ---------------------------------------------------------------- analysis
-def compute_rotation(closes, etf, holdings):
+def compute_rotation(closes, etf, holdings, volume=None):
     """All numbers behind the report. Pure: takes a closes DataFrame."""
     out = {"etf": etf, "market": MARKET, "windows": list(WINDOWS)}
     if etf not in closes or MARKET not in closes:
@@ -169,6 +309,26 @@ def compute_rotation(closes, etf, holdings):
                 None if br is None else br["beat_market_20d_pct"] >= BREADTH_MIN_PCT,
                 None if br is None else "%.0f%% of %d holdings" % (br["beat_market_20d_pct"], br["n"])))
     out["signals"] = [{"signal": s, "met": m, "detail": d} for s, m, d in sig]
+
+    # Confirmation checks. Reported next to the five signals, not counted in the verdict.
+    conf = []
+    vc = volume_check(volume, closes[etf]) if volume is not None else None
+    out["volume"] = vc
+    conf.append(("Rising on more trading volume than usual", None if vc is None else vc["met"],
+                 None if vc is None else ("last 20 days %+.0f%% vs the 60 days before" % vc["recent_vs_base_pct"]) + (("; up days averaged %+.0f%% vs down days" % vc["up_vs_down_pct"]) if vc["up_vs_down_pct"] is not None else "; no down days in the window")))
+    pr = persistence(closes, etf, MARKET)
+    out["persistence"] = pr
+    conf.append(("Gap versus the market improved %d weeks in a row" % PERSIST_WEEKS, None if pr is None else pr["met"],
+                 None if pr is None else "weekly changes: " + ", ".join("%+.1f%%" % c for c in pr["weekly_change_pct"])))
+    fc = fear_check(closes)
+    out["fear"] = fc
+    fd = None
+    if fc:
+        fd = "VIX %.1f vs its 50-day average %.1f, %+.0f%% over 20 days" % (fc["vix"], fc["vix_50d_avg"], fc["vix_change_20d_pct"])
+        if fc.get("bonds_20d_pct") is not None:
+            fd += "; long-term bond fund (TLT) %+.1f%%" % fc["bonds_20d_pct"]
+    conf.append(("Market getting more nervous (VIX rising)", None if fc is None else fc["met"], fd))
+    out["confirmations"] = [{"check": c, "met": m, "detail": d} for c, m, d in conf]
     known = [m for _, m, _ in sig if m is not None]
     out["signals_met"], out["signals_known"] = sum(1 for m in known if m), len(known)
     n = out["signals_met"]
@@ -176,6 +336,19 @@ def compute_rotation(closes, etf, holdings):
     if out["signals_known"] < len(sig):
         out["verdict"] += " (only %d of %d signals had data)" % (out["signals_known"], len(sig))
     return out
+
+
+def add_flow_confirmation(res, flows):
+    """Fund inflow check from UW ETF flow: net money into the ETF over 20 sessions."""
+    etf = res["etf"]
+    amt, unit = flow_value((flows or {}).get(etf), 20)
+    if amt is None:
+        res["confirmations"].append({"check": "Net money flowing into the fund (20 sessions)", "met": None,
+                                     "detail": "no fund flow data" + (" (needs --uw)" if not flows else "")})
+        return
+    res["confirmations"].append({"check": "Net money flowing into the fund (20 sessions)", "met": amt > 0,
+                                 "detail": "%s %s over 20 sessions (Unusual Whales)" % (
+                                     money(amt) if unit == "dollars" else "{:,.0f}".format(abs(amt)) + " shares", "in" if amt > 0 else "out")})
 
 
 def aggregate_uw(rows):
@@ -234,7 +407,7 @@ def money(v):
     return ("$%.1fB" % (a / 1e9)) if a >= 1e9 else ("$%.1fM" % (a / 1e6)) if a >= 1e6 else ("$%dK" % round(a / 1e3)) if a >= 1e3 else "$%d" % round(a)
 
 
-def render_markdown(res, uw_rows, uw_agg, stamp):
+def render_markdown(res, uw_rows, uw_agg, stamp, flows=None):
     etf = res["etf"]
     L = ["# %s rotation check, %s" % (etf, stamp), ""]
     if res.get("error"):
@@ -243,6 +416,14 @@ def render_markdown(res, uw_rows, uw_agg, stamp):
           "| Signal | Met | Detail |", "|---|---|---|"]
     for s in res["signals"]:
         L.append("| %s | %s | %s |" % (s["signal"], "n/a" if s["met"] is None else "yes" if s["met"] else "no", s["detail"] or ""))
+    conf = res.get("confirmations") or []
+    if conf:
+        known = [c for c in conf if c["met"] is not None]
+        L += ["", "## Confirmation checks (shown next to the five signals, not counted in the verdict)", "",
+              "%d of %d confirmed." % (sum(1 for c in known if c["met"]), len(known)), "",
+              "| Check | Confirmed | Detail |", "|---|---|---|"]
+        for c in conf:
+            L.append("| %s | %s | %s |" % (c["check"], "n/a" if c["met"] is None else "yes" if c["met"] else "no", c["detail"] or ""))
     L += ["", "## Performance (percent)", "", "| | 5 days | 20 days | 60 days |", "|---|---|---|---|",
           "| %s | %s | %s | %s |" % ((etf,) + tuple(f1(res["etf_return"][n]) for n in WINDOWS)),
           "| %s | %s | %s | %s |" % ((MARKET,) + tuple(f1(res["market_return"][n]) for n in WINDOWS)),
@@ -254,8 +435,8 @@ def render_markdown(res, uw_rows, uw_agg, stamp):
     for key, label in (("vs_cyclical", "consumer discretionary (XLY)"), ("vs_tech", "technology (XLK)")):
         r = res.get(key)
         if r:
-            L.append("%s gained %+.1f%% on %s over 20 days, measured as one divided by the other. That ratio is %s its %d-day average." % (
-                etf, r["change_20d_pct"], label, "above" if r["above_avg"] else "below", RATIO_MA_DAYS))
+            L.append("%s versus %s over 20 days: %s by %.1f%% (price of one divided by the other). That ratio is %s its %d-day average." % (
+                etf, label, "up" if r["change_20d_pct"] >= 0 else "down", abs(r["change_20d_pct"]), "above" if r["above_avg"] else "below", RATIO_MA_DAYS))
     L += ["", "## All sectors, 20-day ranking", "", "| Rank | ETF | 20d % | 60d % |", "|---|---|---|---|"]
     for r in res["sector_table"]:
         L.append("| %s | %s | %s | %s |" % (r["rank_20d"] or "", r["ticker"] + (" (this one)" if r["ticker"] == etf else ""), f1(r["ret_20d"]), f1(r["ret_60d"])))
@@ -267,6 +448,19 @@ def render_markdown(res, uw_rows, uw_agg, stamp):
         for h in res["holdings"]:
             L.append("| %s | %s | %s | %s | %s |" % (h["ticker"], f1(h["ret_20d"]), f1(h["ret_60d"]),
                                                     "yes" if h["above_50d_avg"] else "no", "yes" if h["beat_market_20d"] else "no"))
+    if flows:
+        got = [(t, v) for t, v in flows.items() if flow_value(v, 20)[0] is not None]
+        if got:
+            unit = flow_value(got[0][1], 20)[1]
+            ranked = sorted(got, key=lambda tv: -flow_value(tv[1], 20)[0])
+            L += ["", "## Fund flows (Unusual Whales: net money into or out of each sector fund)", "",
+                  "| Rank | ETF | Last 5 sessions | Last 20 sessions |", "|---|---|---|---|"]
+            fmt = (lambda v: ("+" if v >= 0 else "-") + money(v)) if unit == "dollars" else (lambda v: "{:+,.0f}".format(v))
+            for i, (t, v) in enumerate(ranked, 1):
+                L.append("| %d | %s | %s | %s |" % (i, t + (" (this one)" if t == etf else ""),
+                                                   fmt(flow_value(v, 5)[0]), fmt(flow_value(v, 20)[0])))
+            L.append("")
+            L.append("Unit: %s. Positive means more shares were created than redeemed." % unit)
     if uw_rows:
         L += ["", "## Unusual Whales (as reported, not scored)", ""]
         if uw_agg:
@@ -340,7 +534,7 @@ def probe_flow(etf, outdir):
 
 
 # ---------------------------------------------------------------- main
-def main(argv=None, closes_fn=None, holdings_fn=None, uw_fn=None, explain_fn=None):
+def main(argv=None, closes_fn=None, holdings_fn=None, uw_fn=None, explain_fn=None, volume_fn=None, flow_fn=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("etf")
     ap.add_argument("--top", type=int, default=10)
@@ -367,23 +561,31 @@ def main(argv=None, closes_fn=None, holdings_fn=None, uw_fn=None, explain_fn=Non
             return 1
     print("%s: comparing with %s, %d sector ETFs and %d holdings\n" % (etf, MARKET, len(SECTOR_ETFS), len(holdings)))
 
-    closes = (closes_fn or fetch_closes)(sorted(set(SECTOR_ETFS + [MARKET, etf] + holdings)))
-    res = compute_rotation(closes, etf, holdings)
+    closes = (closes_fn or fetch_closes)(sorted(set(SECTOR_ETFS + [MARKET, VIX, BONDS, etf] + holdings)))
+    try:
+        volume = (volume_fn or fetch_volume)(etf)
+    except Exception as e:
+        print("Volume data unavailable (%s)." % type(e).__name__)
+        volume = None
+    res = compute_rotation(closes, etf, holdings, volume=volume)
     if res.get("error"):
         print(res["error"])
         return 1
 
-    uw_rows, uw_agg = [], None
+    uw_rows, uw_agg, flows = [], None, {}
     if a.uw:
         uw_rows = (uw_fn or run_uw)([etf] + holdings)
         uw_agg = aggregate_uw([r for r in uw_rows if r["ticker"] != etf])
+        flows = (flow_fn or run_etf_flows)(sorted(set(SECTOR_ETFS + [etf])))
+    add_flow_confirmation(res, flows)
 
     stamp = datetime.date.today().isoformat()
     outdir.mkdir(exist_ok=True)
-    md = render_markdown(res, uw_rows, uw_agg, stamp)
+    md = render_markdown(res, uw_rows, uw_agg, stamp, flows)
     (outdir / ("%s_%s.md" % (etf, stamp))).write_text(md, encoding="utf-8")
     payload = {"question": "Is money rotating into %s right now?" % etf, "date": stamp, "result": res,
-               "unusual_whales": {"per_name": uw_rows, "summary": uw_agg} if uw_rows else None}
+               "unusual_whales": {"per_name": uw_rows, "summary": uw_agg} if uw_rows else None,
+               "fund_flows": ({t: {k: v for k, v in (f or {}).items() if k != "fields"} for t, f in flows.items()} or None)}
     (outdir / ("%s_%s_data.json" % (etf, stamp))).write_text(json.dumps(payload, indent=1, default=str), encoding="utf-8")
     (outdir / ("%s_%s_claude.md" % (etf, stamp))).write_text(
         "Paste everything below into Claude.\n\n" + EXPLAIN_SYSTEM + "\n\nDATA:\n" + json.dumps(payload, default=str), encoding="utf-8")

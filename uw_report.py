@@ -412,7 +412,7 @@ def _email_tile(title, big, sub, color="#334155", bar=None):
             % (color, _h.escape(title), _h.escape(big), bar_html, _h.escape(sub)))
 
 
-def render_card_block(uw):
+def render_card_block(uw, earnings=None):
     """Compact visual block for a pinned card (tiles in a 2-column table).
     Falls back to the plain lines if no structured data. Empty when nothing."""
     import html as _html
@@ -438,14 +438,24 @@ def render_card_block(uw):
                "Premiums are thinner than usual for this stock." if r < 30 else
                "In the middle of its past-year range.")
         ee = t.get("earnings")
-        if ee and 0 <= ee["days"] <= 45:
+        # Earnings raise premiums, so they can explain rich ones but never thin
+        # ones (IIPR, 2026-10-19: "thinner than usual... earnings may be part").
+        if ee and 0 <= ee["days"] <= 45 and r >= 30:
             sub += " Earnings on %s may be part of this." % _md(_d(ee["date"]))
         cells.append(_email_tile("Option prices vs past year", "IV rank %.0f" % r, sub,
                                  "#22c55e" if r >= 50 else "#334155", bar=(r, 0)))
     e = t.get("earnings")
+    if e and earnings:
+        # The card must show the same date the gate used. `earnings` is the
+        # merged scan date: {"date": iso, "days": int, "confirmed": bool, "note": str}.
+        e = dict(e)
+        e.update({"date": earnings["date"], "days": earnings["days"],
+                  "confirmed": earnings["confirmed"]})
     if e:
         when = "today" if e["days"] == 0 else "tomorrow" if e["days"] == 1 else "in %d days" % e["days"]
         sub = "%s, %s." % (when, "confirmed" if e["confirmed"] else "estimated")
+        if earnings and earnings.get("note"):
+            sub += " " + earnings["note"]
         if e.get("implied_pct") is not None:
             sub += " Options expect about %.1f%% either way." % e["implied_pct"]
         cells.append(_email_tile("Next earnings", _md(_d(e["date"])), sub,

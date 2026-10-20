@@ -191,13 +191,31 @@ def build_triage_payload(bundle: dict) -> dict:
     }
 
 
+MIN_BLURB_CHARS = 40
+
+
 def generate_blurb(bundle: dict, client, model: str, effort: str = "medium") -> str:
     payload = build_triage_payload(bundle)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=600,
-        output_config={"effort": effort},
-        system=TRIAGE_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
-    )
-    return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    def _call(max_tokens):
+        resp = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            output_config={"effort": effort},
+            system=TRIAGE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
+        )
+        text = "".join(b.text for b in resp.content
+                       if getattr(b, "type", "") == "text").strip()
+        return text, getattr(resp, "stop_reason", "?")
+
+    # An empty reply used to be returned as-is and rendered as "[no blurb]"
+    # (JPM and JNJ, 2026-10-19). Reasoning can use up max_tokens and leave no
+    # text, so retry once with more room, then fail loudly so the caller
+    # degrades the card and alerts instead of shipping a placeholder.
+    text, stop = _call(600)
+    if len(text) < MIN_BLURB_CHARS:
+        text, stop = _call(1800)
+        if len(text) < MIN_BLURB_CHARS:
+            raise RuntimeError(f"EmptyNote: model returned {len(text)} chars "
+                               f"(stop_reason={stop})")
+    return text

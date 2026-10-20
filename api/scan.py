@@ -573,6 +573,41 @@ def compute_liquidity(all_puts, all_calls, spot, total_chain_oi, avg_volume, tod
 MIN_OPTION_BID = 0.10
 MIN_OPTION_OI = 5
 
+# A contract is only "optimal" if its delta is actually near the 0.20 target.
+# Without this, when only deep out-of-the-money strikes survive the quote
+# filter, the one closest to 0.20 (e.g. MU $310 on an $879 stock, delta 0.0)
+# was still marked optimal and quoted as the trade.
+OPTIMAL_DELTA = 0.20
+OPTIMAL_DELTA_TOL = 0.08
+
+# Stricter floors when the equity session is closed. Yahoo blanks most quotes
+# then, and what Unusual Whales fills in can be a stale last-session mark on
+# far strikes only (2026-10-19: every watchlist put came back 17-65% below spot).
+CLOSED_MIN_OI = 100
+CLOSED_MAX_OTM_FRAC = 0.20     # puts further than this below spot are dropped
+CLOSED_MIN_ANN_YIELD = 2.0     # % annualized; a real ~20 delta put pays more
+
+
+def market_session_open(now=None):
+    """True during the regular US equity session, Mon-Fri 9:30-16:00 Eastern."""
+    import datetime as _d
+    try:
+        from zoneinfo import ZoneInfo
+        now = now or _d.datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return True
+    if now.weekday() >= 5:
+        return False
+    return _d.time(9, 30) <= now.time() <= _d.time(16, 0)
+
+
+def pick_optimal(contracts):
+    """The contract nearest the target delta, or None if none is close enough."""
+    if not contracts:
+        return None
+    best = min(contracts, key=lambda x: abs(x["delta"] - OPTIMAL_DELTA))
+    return best if abs(best["delta"] - OPTIMAL_DELTA) <= OPTIMAL_DELTA_TOL else None
+
 
 def fetch_options(ticker, ctx=None):
     """Fetch full options chain for all expirations in 27-45 DTE window."""
@@ -612,6 +647,7 @@ def fetch_options(ticker, ctx=None):
     # needed. Off with UW_FILL_QUOTES=0 or ENABLE_UW=0; Yahoo is used whenever it
     # has a real quote.
     _fill = {"quotes": None, "filled": 0}
+    _closed = not market_session_open()
 
     def uw_quote_for(sym):
         if _os.environ.get("ENABLE_UW", "0") == "0" or _os.environ.get("UW_FILL_QUOTES", "1") == "0":
@@ -660,6 +696,11 @@ def fetch_options(ticker, ctx=None):
 
             if bid < MIN_OPTION_BID or oi < MIN_OPTION_OI or iv <= 0:
                 return None
+            if _closed:
+                if oi < CLOSED_MIN_OI:
+                    return None
+                if is_put and spot > 0 and strike < spot * (1 - CLOSED_MAX_OTM_FRAC):
+                    return None
 
             delta = bs_delta(spot, strike, dte_days, iv, is_put=is_put)
             if delta is None:
@@ -673,6 +714,8 @@ def fetch_options(ticker, ctx=None):
             # distinct from theta, which is the *modeled* instantaneous decay rate.
             daily_prem = (bid / dte_days) if dte_days > 0 else 0
             be = (strike - bid) if is_put else (strike + bid)
+            if _closed and is_put and ann_yield < CLOSED_MIN_ANN_YIELD:
+                return None
 
             return {
                 "contractSymbol": sym,
@@ -718,11 +761,11 @@ def fetch_options(ticker, ctx=None):
                     c["dte"] = dte
                     exp_calls.append(c)
 
-            if exp_puts:
-                best = min(exp_puts, key=lambda x: abs(x["delta"] - 0.20))
+            best = pick_optimal(exp_puts)
+            if best:
                 best["optimal"] = True
-            if exp_calls:
-                best = min(exp_calls, key=lambda x: abs(x["delta"] - 0.20))
+            best = pick_optimal(exp_calls)
+            if best:
                 best["optimal"] = True
 
             all_puts.extend(exp_puts)
@@ -1027,6 +1070,7 @@ def fetch_options(ticker, ctx=None):
         "skew": skew,
         "quotes_filled": _fill["filled"],
         "quote_source": "uw_nbbo" if _fill["filled"] else "yahoo",
+        "quotes_closed_market": _closed,
         "iv_rank": iv_rank,
         "iv_rank_source": iv_rank_source,
         "iv_uw": uw_iv.get("iv_uw"),
@@ -1202,6 +1246,12 @@ def scan_ticker(ticker):
     try:
         yt = yf.Ticker(ticker)
         info = yt.info or {}
+        # Yahoo intermittently throttles .info and the sector comes back empty,
+        # which printed no sector for JNJ on 2026-10-19. One short retry.
+        if not info.get("sector"):
+            _time_mod = __import__("time")
+            _time_mod.sleep(1.0)
+            info = yf.Ticker(ticker).info or info
         inc_q = yt.quarterly_income_stmt
         bal_q = yt.quarterly_balance_sheet
         cf_q = yt.quarterly_cashflow
@@ -3268,8 +3318,20 @@ def merge_uw_earnings(scan, rows, today=None):
             scan["earnings_note"] = "Yahoo showed %s; Unusual Whales shows %s%s." % (
                 nice(y_date), nice(uw_date), " (confirmed)" if confirmed else " (estimated)")
     elif differ:
-        scan["earnings_note"] = "Unusual Whales estimates %s (not confirmed); Yahoo shows %s." % (
-            nice(uw_date), nice(y_date))
+        # Two unconfirmed dates that disagree. The gate must not quietly use the
+        # later one: 2026-10-19 CRDO and AVAV were gated on Yahoo's date while
+        # the Unusual Whales tile showed a date a week later. Use the earlier
+        # (conservative for a put seller) and say so.
+        early = min(uw_date, y_date)
+        days = (early - today).days
+        scan["earnings_date"] = str(early)
+        scan["earnings_days"] = days
+        scan["earnings_in_window"] = 0 <= days <= 45
+        scan["earnings_source"] = "earlier_of_both"
+        scan["earnings_confirmed"] = False
+        scan["earnings_note"] = ("Earnings dates disagree: Yahoo shows %s, "
+                                 "Unusual Whales estimates %s. Using the earlier "
+                                 "date, %s." % (nice(y_date), nice(uw_date), nice(early)))
     summ = uw_report.summarize_earnings_moves(rows, today)
     n = (summ or {}).get("next") or {}
     if n.get("date") == uw_date and n.get("implied_pct") is not None:

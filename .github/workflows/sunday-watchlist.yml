@@ -73,6 +73,8 @@ jobs:
           SMTP_USER:         ${{ secrets.SMTP_USER }}
           EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:          ${{ secrets.EMAIL_TO }}
+          # Private maintainer alerts (missing notes). Falls back to EMAIL_FROM.
+          ALERT_TO:          ${{ secrets.ALERT_TO || secrets.EMAIL_FROM }}
           # Unusual Whales lines on pinned cards. Off until ENABLE_UW is set to 1.
           UW_API_KEY:        ${{ secrets.UW_API_KEY }}
           ENABLE_UW:         ${{ vars.ENABLE_UW || '0' }}

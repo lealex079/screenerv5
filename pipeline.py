@@ -373,7 +373,8 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
                           benchmarks: list[dict] | None = None,
                           income: list[dict] | None = None,
                           quotes_live: bool = True,
-                          n_pregate: int = 0) -> tuple[str, str]:
+                          n_pregate: int = 0,
+                          quotes_stale: bool = False) -> tuple[str, str]:
     """
     The triage watchlist email. Two tracks, in this order:
 
@@ -465,7 +466,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
         scan = b.get("scan") or {}
         blurb_html = "<br>".join(
             _clean_prose(b.get("blurb") or "").split("\n")
-        ) or "[no blurb]"
+        ) or "Written note unavailable this run. The scores and contract details above are still accurate."
         # Sector comes from yt.info, which intermittently 401s under Yahoo
         # throttling — scan.py then defaults it to "Unknown". Printing that adds
         # nothing, so show the label only when it's real.
@@ -529,7 +530,7 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
             </tr>"""
         legend_items = [
             ("RICH", "#22c55e", "Premium standout — implied vol well above realized (IV/HV high). Nothing capped it."),
-            ("SOLID", "#94a3b8", "Clean setup, nothing capped — it just ranked below today's top five."),
+            ("SOLID", "#94a3b8", "Clean setup, nothing capped — it just ranked below the names with write-ups."),
             ("THIN", "#f59e0b", "Chain is shallow (low open interest or volume). A real fill may be hard to get."),
             ("WEAK", "#f59e0b", "The screener's own Sell Put grade came back D or F."),
             ("NO QUOTE", "#64748b", "No quotable ~20-delta put — the chain didn't produce a usable strike."),
@@ -644,6 +645,15 @@ def build_watchlist_email(tier1: list[dict], tier2: list[dict], blocked: list[di
     else:
         intro_line = (f"The {n} name{'s' if n != 1 else ''} most worth researching "
                       f"today, ranked. Each cleared all four put-selling gates.")
+
+    if PINNED_MISSING:
+        intro_line += (" Coverage is unavailable this run for "
+                       + ", ".join(PINNED_MISSING)
+                       + " because the data fetch failed.")
+    if quotes_stale:
+        intro_line += (" Option quotes are from the last market session because "
+                       "the market was closed when this ran. Strikes and credits "
+                       "may move at the open.")
 
     discovery_header = ""
     if pinned and tier1:
@@ -787,6 +797,46 @@ def send_email(subject: str, html: str,
     except Exception as e:
         log.error(f"Email send failed: {e}")
         raise
+
+
+ALERT_TO = os.environ.get("ALERT_TO", "") or EMAIL_FROM
+PINNED_MISSING: list[str] = []   # pinned names whose scan failed this run
+
+
+def send_alert(subject: str, body: str) -> None:
+    """Private note to the maintainer only. Never goes to EMAIL_TO. Best effort:
+    an alert that cannot send must not take the real email down with it."""
+    to = [e.strip() for e in ALERT_TO.split(",") if e.strip()]
+    if not (SMTP_PASS and to):
+        log.warning(f"ALERT (not sent, no SMTP/ALERT_TO): {subject} | {body}")
+        return
+    try:
+        import smtplib
+        from email.message import EmailMessage
+        m = EmailMessage()
+        m["Subject"], m["From"], m["To"] = subject, EMAIL_FROM, ", ".join(to)
+        m.set_content(body)
+        if SMTP_PORT in (465, 2465):
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
+                srv.login(SMTP_USER, SMTP_PASS); srv.send_message(m)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
+                srv.starttls(); srv.login(SMTP_USER, SMTP_PASS); srv.send_message(m)
+        log.info(f"Alert sent to {to}: {subject}")
+    except Exception as e:
+        log.warning(f"Alert could not be sent: {e}")
+
+
+def missing_notes(tier1: list[dict], pinned_bundles: list[dict]) -> list[str]:
+    """Names that should have a written note and do not, after retries. A single
+    failure is not systemic (the all-failed abort handles that) but it is still
+    something the maintainer should hear about before the group notices."""
+    import coverage as cov
+    out = [f"{b['ticker']} (triage)" for b in tier1 if b.get("_note_failed")]
+    out += [f"{b['ticker']} (coverage)" for b in pinned_bundles
+            if b.get("_note_failed")
+            or (cov.needs_prose(b) and not (b.get("blurb") or "").strip())]
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1037,6 +1087,27 @@ def main():
     for t in pinned_wanted:
         if not any(d.get("ticker") == t for d in pinned):
             log.warning(f"Pinned {t}: scan failed, will be omitted from coverage")
+    # A pinned name that fails its scan used to vanish from the email with only a
+    # log warning (INTU on the 2026-10-16 run). Retry once, and if it still
+    # fails, say so in the email and tell the maintainer.
+    for t in pinned_wanted:
+        if not any(d.get("ticker") == t for d in pinned):
+            try:
+                time.sleep(2)
+                r = scan_ticker(t)
+                if r and not r.get("error"):
+                    r["ticker"] = t
+                    pinned.append(r)
+                    results.append(r)
+                    log.info(f"Pinned {t}: scan succeeded on retry")
+            except Exception as e:
+                log.warning(f"Pinned {t}: retry failed: {e}")
+    PINNED_MISSING[:] = [t for t in pinned_wanted
+                         if not any(d.get("ticker") == t for d in pinned)]
+    if PINNED_MISSING:
+        send_alert("Screener: watchlist name failed to scan",
+                   "No data this run for: " + ", ".join(PINNED_MISSING)
+                   + ". The email says coverage is unavailable for them.")
     discovery = [d for d in results if d.get("ticker") not in pinned_wanted]
 
     # Step 3 — cheap scan-only pre-gate (avoid options fetches on dead names)
@@ -1304,6 +1375,15 @@ def main():
             f"All {len(failed_t1)} triage blurbs failed. First error: "
             f"{failed_t1[0]['_note_error'][:400]}. No email was sent.")
 
+    _gaps = missing_notes(tier1, pinned_bundles)
+    if _gaps:
+        log.error(f"Written notes missing after retry: {', '.join(_gaps)}")
+        send_alert("Screener: written notes missing",
+                   "These names went out without a written note after one retry: "
+                   + ", ".join(_gaps) + ".\n\nThe cards show a plain 'note "
+                   "unavailable' box instead. Check the run log for EmptyNote or "
+                   "API errors.")
+
     # Step 6b — charts. Rendered for the names that carry a quoted trade, since
     # the point of the picture is showing the strike under the support band.
     chart_images = {}
@@ -1351,13 +1431,19 @@ def main():
     if not quotes_live:
         log.warning("No quotable puts on any name: market closed or Yahoo returned "
                     "empty chains. Email will say so instead of 'nothing cleared'.")
+    # quotes_live only means a chain existed. UW fills blank Yahoo quotes, so a
+    # closed-market run can have chains made of last-session marks.
+    quotes_stale = bool(quotes_live and any(
+        (b.get("options") or {}).get("quotes_closed_market")
+        for b in list(pinned_bundles) + list(bundles)))
     subject, html = build_watchlist_email(tier1, tier2, blocked, run_date,
                                           pinned=pinned_bundles, mode=mode,
                                           premium=premium_names,
                                           benchmarks=benchmarks,
                                           income=income_names,
                                           quotes_live=quotes_live,
-                                          n_pregate=len(pre))
+                                          n_pregate=len(pre),
+                                          quotes_stale=quotes_stale)
     send_email(subject, html, images=chart_images)
 
     # Snapshot only after the email is away. If the send throws, the state

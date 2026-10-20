@@ -61,8 +61,10 @@ assert s["earnings_days"] == 13 and s["earnings_in_window"] is True
 s = scan.merge_uw_earnings(mk(60, 20), rows(60))                    # Yahoo says soon, UW confirmed later
 assert s["earnings_days"] == 60 and s["earnings_in_window"] is False
 
-s = scan.merge_uw_earnings(mk(13, 40), rows(13, confirmed=False))   # UW estimate vs Yahoo date: keep Yahoo
-assert s["earnings_days"] == 40 and s.get("earnings_source") is None and "estimates" in s["earnings_note"], s
+s = scan.merge_uw_earnings(mk(13, 40), rows(13, confirmed=False))   # two unconfirmed dates disagree: use the EARLIER
+assert s["earnings_days"] == 13 and s.get("earnings_source") == "earlier_of_both" and "disagree" in s["earnings_note"], s
+s = scan.merge_uw_earnings(mk(40, 13), rows(40, confirmed=False))   # Yahoo earlier than the UW estimate: keep Yahoo's
+assert s["earnings_days"] == 13 and s.get("earnings_source") == "earlier_of_both", s
 
 s = scan.merge_uw_earnings(mk(30, -5), rows(30, confirmed=False))   # Yahoo only has a past date
 assert s["earnings_days"] == 30 and s["earnings_confirmed"] is False

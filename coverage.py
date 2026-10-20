@@ -282,8 +282,21 @@ def gate_status(scan: dict, options: dict) -> dict:
     else:
         verdict = "SETUP LIVE"
 
-    return {"verdict": verdict, "gates": gates, "blocking": blocking,
-            "all_clear": not blocking}
+    out = {"verdict": verdict, "gates": gates, "blocking": blocking,
+           "all_clear": not blocking}
+    # SETUP LIVE means the gates are clear. It does not mean there is a valid
+    # contract to sell. On 2026-10-19 MU was SETUP LIVE with a $310 put on an
+    # $879 stock (delta 0.0). With no quote that passes the delta tolerance and
+    # the closed-market floors, say the strike is pending instead of quoting junk.
+    if verdict == "SETUP LIVE":
+        try:
+            import strikes
+            put, _how = strikes.select_put({"options": options or {}, "scan": scan})
+        except Exception:
+            put = None
+        if not put:
+            out["strike_pending"] = True
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -596,6 +609,14 @@ stop_price IS null, say plainly that this strike has no structural stop \
 because it came from a delta target rather than a level, matching \
 strike_basis above. Do not invent a stop level when none is given.
 
+If gate_status.strike_pending is true there is no valid put to quote. Say \
+the strike is pending the next market-hours run and give no strike, credit \
+or yield. If delta.put_roll_suspect is present, do not describe the change as a \
+roll; say the option quote moved sharply and should be re-checked.
+
+Every price change you state must come from the payload (the delta fields or \
+the weekly candle). Never take a price move from a search result.
+
 If implied_move is present, you may use its pct and the low/high range as one \
 clause of context for how far the market is pricing this name to move by that \
 expiry, when it adds something the candle and the level have not already said. \
@@ -738,6 +759,9 @@ contract.
 """
 
 
+MIN_NOTE_CHARS = 40
+
+
 def generate_coverage_blurb(bundle: dict, client, model: str,
                             effort: str = "medium") -> str:
     """Coverage note for a pinned name. Same payload shape as triage, plus the
@@ -801,11 +825,26 @@ def generate_coverage_blurb(bundle: dict, client, model: str,
             "blocked_domains": SEARCH_BLOCKED_DOMAINS,
         }]
 
+    def _prose(r):
+        # With tools enabled the response also carries server_tool_use and
+        # web_search_tool_result blocks. Take only the prose.
+        return "".join(b.text for b in r.content
+                       if getattr(b, "type", "") == "text").strip()
+
     resp = client.messages.create(**kwargs)
-    # With tools enabled the response also carries server_tool_use and
-    # web_search_tool_result blocks. Take only the prose.
-    return "".join(b.text for b in resp.content
-                   if getattr(b, "type", "") == "text").strip()
+    text = _prose(resp)
+    # An empty reply is a failure, not a note. On 2026-10-19 TSM changed
+    # verdict and went out with no note at all, because "" was treated as
+    # success. Reasoning can use up max_tokens and leave no text, so retry once
+    # with more room before giving up.
+    if len(text) < MIN_NOTE_CHARS:
+        kwargs["max_tokens"] = min(kwargs["max_tokens"] * 2, 4000)
+        resp = client.messages.create(**kwargs)
+        text = _prose(resp)
+        if len(text) < MIN_NOTE_CHARS:
+            raise RuntimeError(f"EmptyNote: model returned {len(text)} chars "
+                               f"(stop_reason={getattr(resp, 'stop_reason', '?')})")
+    return text
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -906,12 +945,19 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
         # the exception said. On 2026-09-16 the raw text included the account's
         # Anthropic billing message, sent verbatim to Sean and Frank three times.
         note_failed_html = ""
-        if b.get("_note_failed") and not blurb_html:
+        if not blurb_html and (b.get("_note_failed") or needs_prose(b)):
             note_failed_html = (
                 '<div style="font-size:11px;color:#64748b;background:#0f1419;'
                 'border-radius:5px;padding:6px 9px;margin-bottom:10px">'
                 'Written note unavailable this run. The status above and the '
                 'blocking gate below are still accurate.</div>')
+        pending_html = ""
+        if gs.get("strike_pending"):
+            pending_html = (
+                '<div style="font-size:11px;color:#f59e0b;background:#0f1419;'
+                'border-radius:5px;padding:6px 9px;margin-bottom:10px">'
+                'Gates are clear, but no valid put quote was available. The '
+                'strike and credit will be set on the next market-hours run.</div>')
         price = scan.get("price") or 0
         ts, cs, ss = (scan.get("trend_score"), scan.get("crash_score"),
                       scan.get("structure_score"))
@@ -951,6 +997,10 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
                 f'(needs {g["threshold"]})'
                 f'{". " + g["needs"] if g.get("needs") else ""}</div>'
                 for g in blockers)
+            _en = (b.get("scan") or {}).get("earnings_note")
+            if _en and any(g["gate"] == "earnings" for g in blockers):
+                items += (f'<div style="font-size:11px;color:#64748b;margin-top:3px">'
+                          f'{_en}</div>')
             blockers_html = (f'<div style="background:#0f1419;border-radius:6px;'
                              f'padding:8px 10px;margin-top:10px">'
                              f'<div style="font-size:10px;color:#475569;'
@@ -965,7 +1015,16 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
         if b.get("uw"):
             try:
                 import uw_report as _uwr
-                uw_html, uw_chip = _uwr.render_card_block(b["uw"]), _uwr.iv_rank_chip(b["uw"])
+                _sc = b.get("scan") or {}
+                _ed = None
+                if _sc.get("earnings_date") and _sc.get("earnings_days") is not None \
+                        and _sc.get("earnings_source") in ("uw", "earlier_of_both"):
+                    _ed = {"date": str(_sc["earnings_date"])[:10],
+                           "days": _sc["earnings_days"],
+                           "confirmed": bool(_sc.get("earnings_confirmed")),
+                           "note": _sc.get("earnings_note") or ""}
+                uw_html = _uwr.render_card_block(b["uw"], earnings=_ed)
+                uw_chip = _uwr.iv_rank_chip(b["uw"])
             except Exception:
                 uw_html = uw_chip = ""
 
@@ -990,6 +1049,7 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
           </div>
           {(__import__("charts").chart_img_tag(b["_chart_cid"]) if b.get("_chart_cid") else "")}
           {note_html}
+          {pending_html}
           {note_failed_html}
           {delta_html}
           {f'<div style="font-size:13px;line-height:1.6;color:#cbd5e1">{blurb_html}</div>' if blurb_html else ''}
@@ -1198,6 +1258,20 @@ def compute_delta(prev: dict, bundle: dict) -> dict:
             d["material"] = True
     elif c0 and c1:
         d["put_contract_rolled"] = (f"{s0} -> {s1}" if s0 != s1 else f"{e0} -> {e1}")
+    # A strike that jumps far more than the stock did is a bad quote, not a roll.
+    # 2026-10-19: MU 805 -> 310 and ACN 207.5 -> 190 on moves of 1.6% and 1.8%.
+    try:
+        px0 = prev.get("price")
+        px1 = (bundle.get("scan") or {}).get("price")
+        if s0 and s1 and px0 and px1:
+            strike_move = abs(s1 - s0) / s0 * 100
+            spot_move = abs(px1 - px0) / px0 * 100
+            if strike_move > 5.0 and spot_move < 3.0:
+                d["put_roll_suspect"] = (
+                    f"strike moved {strike_move:.0f}% while the stock moved "
+                    f"{spot_move:.1f}%")
+    except Exception:
+        pass
 
     return d
 

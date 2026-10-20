@@ -301,8 +301,9 @@ def render_premium_section(names: list[dict], benchmarks: list[dict]) -> str:
       <div style="font-size:11px;color:#64748b;margin-bottom:12px;line-height:1.5">
         A wider screen: smaller and more volatile names, ranked on annualized
         yield rather than overall setup quality. The crash, structure, earnings
-        and liquidity floors all still apply, the same falling-knife protection
-        as the core screen. What is different here is the ranking: this list
+        and liquidity floors all still apply, the same protections as the core
+        screen (the crash gate blocks overextended rallies, the structure floor
+        blocks downtrends). What is different here is the ranking: this list
         sorts purely on yield, since structure_score has no directional signal
         and is used only as a floor, never to prefer one passing name over
         another. Expect assignment here to be routine rather than rare, since

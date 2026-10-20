@@ -1190,9 +1190,11 @@ def main():
             if wc.get("error"):
                 log.warning(f"  {d['ticker']}: candle unavailable — {wc['error']}")
             gs = cov.gate_status(d, opts)
-            log.info(f"  {d['ticker']:<6} {gs['verdict']:<11} "
-                     f"{'blocked by ' + ', '.join(g['gate'] for g in gs['blocking'])
-                        if gs['blocking'] else 'all gates clear'}")
+            # Built outside the f-string: a newline inside {...} is a syntax
+            # error before Python 3.12, which broke local runs on older Pythons.
+            _blk = ("blocked by " + ", ".join(g["gate"] for g in gs["blocking"])
+                    if gs["blocking"] else "all gates clear")
+            log.info(f"  {d['ticker']:<6} {gs['verdict']:<11} {_blk}")
             pinned_bundles.append({
                 "ticker": d["ticker"], "scan": d, "options": opts,
                 "weekly_candle": wc, "gate_status": gs,

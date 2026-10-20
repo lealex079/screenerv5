@@ -1017,11 +1017,14 @@ def render_pinned_section(pinned: list[dict], score_color) -> str:
                 import uw_report as _uwr
                 _sc = b.get("scan") or {}
                 _ed = None
-                if _sc.get("earnings_date") and _sc.get("earnings_days") is not None \
-                        and _sc.get("earnings_source") in ("uw", "earlier_of_both"):
+                if _sc.get("earnings_date") and _sc.get("earnings_days") is not None:
+                    # Always the date the gate used, so the card and the
+                    # blocking box can never show different day counts (a local
+                    # run after 5 PM Pacific showed "31d" in one and "30 days"
+                    # in the other because the tile counted from the UTC date).
                     _ed = {"date": str(_sc["earnings_date"])[:10],
                            "days": _sc["earnings_days"],
-                           "confirmed": bool(_sc.get("earnings_confirmed")),
+                           "confirmed": _sc.get("earnings_confirmed"),
                            "note": _sc.get("earnings_note") or ""}
                 uw_html = _uwr.render_card_block(b["uw"], earnings=_ed)
                 uw_chip = _uwr.iv_rank_chip(b["uw"])

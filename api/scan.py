@@ -648,6 +648,12 @@ def fetch_options(ticker, ctx=None):
     # has a real quote.
     _fill = {"quotes": None, "filled": 0}
     _closed = not market_session_open()
+    _drops = {}      # why contracts were rejected, so a closed-market run that
+                     # ends with no quotes can be diagnosed from the log
+
+    def _drop(reason):
+        _drops[reason] = _drops.get(reason, 0) + 1
+        return None
 
     def uw_quote_for(sym):
         if _os.environ.get("ENABLE_UW", "0") == "0" or _os.environ.get("UW_FILL_QUOTES", "1") == "0":
@@ -694,13 +700,17 @@ def fetch_options(ticker, ctx=None):
                         vol = _q["volume"]
                     _fill["filled"] += 1
 
-            if bid < MIN_OPTION_BID or oi < MIN_OPTION_OI or iv <= 0:
-                return None
+            if bid < MIN_OPTION_BID:
+                return _drop("bid_below_min")
+            if oi < MIN_OPTION_OI:
+                return _drop("oi_below_min")
+            if iv <= 0:
+                return _drop("no_iv")
             if _closed:
                 if oi < CLOSED_MIN_OI:
-                    return None
+                    return _drop("closed_low_oi")
                 if is_put and spot > 0 and strike < spot * (1 - CLOSED_MAX_OTM_FRAC):
-                    return None
+                    return _drop("closed_too_far_otm")
 
             delta = bs_delta(spot, strike, dte_days, iv, is_put=is_put)
             if delta is None:
@@ -715,7 +725,7 @@ def fetch_options(ticker, ctx=None):
             daily_prem = (bid / dte_days) if dte_days > 0 else 0
             be = (strike - bid) if is_put else (strike + bid)
             if _closed and is_put and ann_yield < CLOSED_MIN_ANN_YIELD:
-                return None
+                return _drop("closed_low_yield")
 
             return {
                 "contractSymbol": sym,
@@ -1071,6 +1081,7 @@ def fetch_options(ticker, ctx=None):
         "quotes_filled": _fill["filled"],
         "quote_source": "uw_nbbo" if _fill["filled"] else "yahoo",
         "quotes_closed_market": _closed,
+        "dropped_contracts": dict(_drops),
         "iv_rank": iv_rank,
         "iv_rank_source": iv_rank_source,
         "iv_uw": uw_iv.get("iv_uw"),

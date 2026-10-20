@@ -449,8 +449,9 @@ def render_card_block(uw, earnings=None):
         # The card must show the same date the gate used. `earnings` is the
         # merged scan date: {"date": iso, "days": int, "confirmed": bool, "note": str}.
         e = dict(e)
-        e.update({"date": earnings["date"], "days": earnings["days"],
-                  "confirmed": earnings["confirmed"]})
+        e.update({"date": earnings["date"], "days": earnings["days"]})
+        if earnings.get("confirmed") is not None:
+            e["confirmed"] = bool(earnings["confirmed"])
     if e:
         when = "today" if e["days"] == 0 else "tomorrow" if e["days"] == 1 else "in %d days" % e["days"]
         sub = "%s, %s." % (when, "confirmed" if e["confirmed"] else "estimated")

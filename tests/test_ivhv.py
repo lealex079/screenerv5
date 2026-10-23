@@ -166,4 +166,22 @@ import json
 json.dumps(ivhv.build(true_iv, df, report_dates=[report_date], days_to_earnings=10, expected_move_pct=5.0))
 json.dumps(ivhv.build(None, None))
 
+# ---- 9. UW context signals ---------------------------------------------------
+CTX = {"iv30": "0.30", "rv": "0.22", "skew": {"label": "put_rich"}, "term_structure": {"inverted": True},
+       "market": {"vix_curve_inverted": False, "vix_futures_regime": "contango"},
+       "expiry": {"earnings_in_expiry": False}, "iv_percentile": "88.4"}
+sg = ivhv.signals(CTX, {"rank": "0.93"})
+assert sg == {"vrp_pct": 93, "skew": "put_rich", "term_inverted": True, "market_stress": False,
+              "earnings_in_expiry": False, "iv_percentile": 88}, sg
+assert ivhv.signals(None, None)["vrp_pct"] is None and ivhv.signals("junk", [])["skew"] is None
+assert ivhv.signals({}, {"rank": None})["vrp_pct"] is None and ivhv.signals({}, {"rank": 7})["vrp_pct"] is None
+assert ivhv.signals({"market": {"vix_curve_inverted": True}})["market_stress"] is True
+hh = ivhv.build(0.30, None, uw_rv=0.20); hh["signals"] = sg
+cap = ivhv.describe(hh)["caption"]
+assert "richer than 93% of days" in cap and "short-term event" in cap, cap
+hh["signals"] = dict(sg, market_stress=True)
+assert "Market-wide volatility is stressed" in ivhv.describe(hh)["caption"]
+hh["band"] = "event"; hh["signals"] = dict(sg, term_inverted=False)
+assert "richer than" not in ivhv.describe(hh)["caption"], "no premium-rank claim on an earnings-distorted read"
+
 print("ivhv tests: all passed")

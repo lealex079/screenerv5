@@ -320,6 +320,9 @@ def summarize_insiders(rows, today=None):
     return o
 
 
+HORIZON_FALLBACK_DAYS = 30      # UW says earnings fall inside the expiry but gave no usable date
+
+
 def _drop_partial_bar(ohlc, now):
     """During the US session today's daily bar is unfinished. Leave it out so a
     half-day range does not pull realized volatility down."""
@@ -336,29 +339,36 @@ def _drop_partial_bar(ohlc, now):
     return ohlc
 
 
-def ivhv_result(ticker, stats, erows, moves, now, ohlc_fn=None):
+def ivhv_result(ticker, stats, erows, moves, now, ohlc_fn=None, ctx=None, vrp=None):
     """IV versus realized volatility for the card (see ivhv.py). Never raises and
     always returns a dict; ratio is None when it cannot be computed."""
     try:
         s = stats or {}
-        iv = num(s.get("iv"))
+        c = ctx if isinstance(ctx, dict) else {}
+        # Prefer UW's context pair: iv30 and rv come from one place, one date, one definition.
+        iv = num(c.get("iv30")) or num(s.get("iv"))
         if iv is None or iv <= 0:
             return ivhv.build(None)          # nothing to compare: skip the price download
         today = market_date(now)
         report_dates = [d for d in (_d(r.get("report_date")) for r in (erows or [])) if d and d < today]
         nxt = (moves or {}).get("next") or {}
         days = (nxt["date"] - today).days if nxt.get("date") else None
-        uw_rv = num(s.get("rv"))
+        uw_rv = num(c.get("rv")) or num(s.get("rv"))
         ohlc = None
         if not (uw_rv and uw_rv > 0):        # Unusual Whales is the default; prices only as a fallback
             try:
                 ohlc = (ohlc_fn or ivhv.fetch_ohlc)(ticker)
             except Exception:
                 ohlc = None
+        sig = ivhv.signals(c, vrp)
+        if days is None and (sig.get("earnings_in_expiry") or (c.get("expiry") or {}).get("earnings_in_expiry")):
+            ed = _d(c.get("earnings_date"))
+            days = (ed - today).days if ed and ed >= today else HORIZON_FALLBACK_DAYS
         recent = any(0 <= (today - d).days <= ivhv.HORIZON_CAL for d in report_dates)
         res = ivhv.build(iv, _drop_partial_bar(ohlc, now),
                          report_dates=report_dates, days_to_earnings=days,
                          expected_move_pct=nxt.get("implied_pct"), uw_rv=uw_rv, recent_report=recent)
+        res["signals"] = sig
         res.update(ivhv.describe(res, earn_date=_md(nxt["date"], today) if nxt.get("date") else None))
         return res
     except Exception:
@@ -411,6 +421,16 @@ def build_ticker_report(client, ticker, since, now=None, price=None, ohlc_fn=Non
         stats = client.vol_stats(ticker)
         out["iv_rank"] = iv_rank_value(stats)
         out["lines"].append(iv_line(stats))
+        ctx = vrp = None
+        for name, key in (("vol_context", "ctx"), ("variance_risk_premium", "vrp")):
+            try:      # extra context is optional: a failure here never costs the rest of the report
+                v = getattr(client, name)(ticker)
+            except Exception:
+                v = None
+            if key == "ctx":
+                ctx = v
+            else:
+                vrp = v
 
         alerts, trunc = client.flow_alerts(ticker, since, min_premium=FLOW_MIN_PREMIUM)
         flow_s = summarize_flow(alerts)
@@ -437,7 +457,7 @@ def build_ticker_report(client, ticker, since, now=None, price=None, ohlc_fn=Non
         em = earnings_move_line(out["earnings_moves"], price=price, today=now.date())
         if em:
             out["lines"].insert(1, em)
-        out["ivhv"] = ivhv_result(ticker, stats, erows, out["earnings_moves"], now, ohlc_fn)
+        out["ivhv"] = ivhv_result(ticker, stats, erows, out["earnings_moves"], now, ohlc_fn, ctx=ctx, vrp=vrp)
         out["tiles"] = build_tiles(stats, flow_s, dark_s, summarize_insiders(ins_rows, now.date()),
                                    out["earnings_moves"], price=price, today=now.date(),
                                    ivhv_res=out["ivhv"])

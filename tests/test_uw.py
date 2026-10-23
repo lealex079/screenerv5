@@ -195,6 +195,31 @@ assert len(uw_report._drop_partial_bar(live, after_close)) == len(live)
 assert len(uw_report._drop_partial_bar(live, weekend)) == len(live)
 assert len(uw_report._drop_partial_bar(BARS, in_session)) == len(BARS), "last bar is not today's: keep it"
 assert uw_report._drop_partial_bar(None, in_session) is None
+# 10. UW context + variance-risk-premium endpoints: parsed, fail-soft, and drive the card
+CTXR = {"data": {"iv30": "0.30", "rv": "0.20", "rv_days": 21, "iv_rv_ratio": "1.5", "earnings_date": None,
+                 "skew": {"label": "flat"}, "term_structure": {"inverted": False},
+                 "market": {"vix_curve_inverted": False, "vix_futures_regime": "contango"},
+                 "expiry": {"earnings_in_expiry": False}}}
+VRPR = {"data": {"risk_premium": "0.10", "rank": "0.81"}}
+routes = [("volatility/stats", {"data": {"iv_rank": "50", "iv": "0.99", "rv": "0.99"}}),
+          ("volatility/context", CTXR), ("variance-risk-premium", VRPR),
+          ("flow-alerts", {"data": []}), ("darkpool", {"data": []}), ("ticker-flow", {"data": []}), ("/api/earnings/", {"data": []})]
+cl = UWClient("k", opener_for(routes, []))
+assert cl.vol_context("X")["iv30"] == "0.30" and cl.variance_risk_premium("X")["rank"] == "0.81"
+assert UWClient._obj({"iv30": "1"}) == {"iv30": "1"} and UWClient._obj({"data": [{"a": 1}]}) == {"a": 1} and UWClient._obj(None) is None
+rep = uw_report.build_ticker_report(cl, "X", since, now=NOW, price=100.0, ohlc_fn=lambda t: None)
+h = rep["tiles"]["ivhv"]
+assert h["iv"] == 30.0 and h["rv_fcst"] == 20.0 and h["ratio"] == 1.5, "context pair beats the stats pair"
+assert h["signals"]["vrp_pct"] == 81 and "richer than 81% of days" in h["caption"], h
+# context says earnings are inside the expiry but gives no date: never a clean rich/thin call
+ctx_e = {"data": dict(CTXR["data"], expiry={"earnings_in_expiry": True})}
+cl2 = UWClient("k", opener_for([r for r in routes if r[0] != "volatility/context"] + [("volatility/context", ctx_e)], []))
+he = uw_report.build_ticker_report(cl2, "X", since, now=NOW, price=100.0, ohlc_fn=lambda t: None)["tiles"]["ivhv"]
+assert he["band"] == "event" and he["earnings_status"] == "unadjusted", he
+# both new endpoints failing leaves the tile on the old stats pair
+cl3 = UWClient("k", opener_for(routes[:1] + routes[3:], []))
+h3 = uw_report.build_ticker_report(cl3, "X", since, now=NOW, price=100.0, ohlc_fn=lambda t: None)["tiles"]["ivhv"]
+assert h3["ratio"] == 1.0 and h3["signals"]["vrp_pct"] is None, h3
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

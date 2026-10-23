@@ -20,7 +20,11 @@ How it is calculated, and why
    would overstate the event and push the ex-earnings figure too low). That
    uncertainty is the reason it never drives a Rich or Thin label.
 
-2. Realized side: the Yang-Zhang estimator over 21, 63 and 252 trading days.
+2. Realized side. DEFAULT: Unusual Whales' own realized vol (`rv`), so both sides of
+   the ratio come from one vendor. It is one window (undocumented, assumed about
+   30 days) and includes any earnings move inside it, so if a report fell in the
+   last 30 days the tile is labelled "Earnings" instead of rich/thin.
+   FALLBACK, only when UW has no `rv`: the Yang-Zhang estimator over 21, 63 and 252 trading days.
    Single stocks gap overnight, and plain close-to-close volatility ignores the
    intraday range; Yang-Zhang uses the overnight gap, the open-to-close move and
    the high/low range together. Earnings reaction days are dropped from the
@@ -212,13 +216,17 @@ def _pos(ratio):
 
 
 def build(iv, ohlc=None, report_dates=None, days_to_earnings=None,
-          expected_move_pct=None, uw_rv=None):
+          expected_move_pct=None, uw_rv=None, recent_report=False):
     """
     iv: at-the-money IV, decimal (None if unknown).
     ohlc: daily Open/High/Low/Close frame (about 2 years), or None.
     report_dates: past earnings report dates (reaction days are dropped from realized vol).
     days_to_earnings / expected_move_pct: next report, for stripping it out of IV.
-    uw_rv: Unusual Whales' own realized vol (decimal), used only when we have no price history.
+    uw_rv: Unusual Whales' own realized vol (decimal). This is the default realized side.
+    ohlc is only the fallback when UW has no figure, and is the only path that strips
+    earnings reaction days and blends windows.
+    recent_report: a report fell inside UW's realized window, so that figure includes the
+    earnings move and the ratio would read too low; the band becomes "event" instead of thin/fair.
 
     Returns a JSON-safe dict; ratio is None when it can't be computed. Never raises.
     """
@@ -233,18 +241,19 @@ def build(iv, ohlc=None, report_dates=None, days_to_earnings=None,
         out["earnings_status"] = status
 
         fc = None
-        comp = daily_components(ohlc) if ohlc is not None else None
-        if comp is not None and len(comp) >= MIN_BARS:
-            comp, dropped = drop_event_days(comp, report_dates or [])
-            out["event_days_dropped"] = dropped
-            rv = rv_windows(comp)
-            out["rv"] = {str(n): None if v is None else round(v * 100, 1) for n, v in rv.items()}
-            fc = forecast_rv(rv)
-            if fc is not None:
-                out["source"] = "ohlc"
-        if fc is None and uw_rv is not None and uw_rv > 0:
+        if uw_rv is not None and uw_rv > 0:
             fc = uw_rv
             out["source"] = "uw_rv"
+        else:
+            comp = daily_components(ohlc) if ohlc is not None else None
+            if comp is not None and len(comp) >= MIN_BARS:
+                comp, dropped = drop_event_days(comp, report_dates or [])
+                out["event_days_dropped"] = dropped
+                rv = rv_windows(comp)
+                out["rv"] = {str(n): None if v is None else round(v * 100, 1) for n, v in rv.items()}
+                fc = forecast_rv(rv)
+                if fc is not None:
+                    out["source"] = "ohlc"
         if fc is None or fc <= 0:
             return finish(out)
 
@@ -255,6 +264,9 @@ def build(iv, ohlc=None, report_dates=None, days_to_earnings=None,
             out["iv_ex"] = round(iv_ex * 100, 1)
             out["ratio_ex"] = round(iv_ex / fc, 2)
         out["band"] = _band(out["ratio"], status)
+        if recent_report and out["source"] == "uw_rv" and out["band"] != "event":
+            out["band"] = "event"
+            out["recent_report"] = True
     except Exception:
         out.update({"ratio": None, "spread": None, "band": "na"})
     return finish(out)
@@ -291,6 +303,8 @@ def describe(h, earn_date=None):
         lead = "Premiums are thin: the stock has been moving about as much as the options imply."
     elif band == "fair":
         lead = "Premiums are about in line with what this stock does."
+    elif h.get("recent_report"):
+        lead = "A recent earnings move is inside the realized figure, so this is not a clean read on premium."
     else:
         lead = "Earnings inflate this reading, so it is not a clean read on premium."
 
@@ -303,7 +317,7 @@ def describe(h, earn_date=None):
         parts.append("Realized, calculated from daily prices: %.1f%% over the last month, %.1f%% over three months."
                      % (rv["21"], rv["63"]))
     if h.get("source") == "uw_rv":
-        parts.append("Realized volatility is Unusual Whales' figure; no price history was available.")
+        parts.append("Realized volatility is Unusual Whales' figure.")
     Ev = when[0].upper() + when[1:]
     if status == "adjusted":
         parts.append("%s is inside the window. With the options-implied earnings move removed it reads about "

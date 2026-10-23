@@ -348,13 +348,17 @@ def ivhv_result(ticker, stats, erows, moves, now, ohlc_fn=None):
         report_dates = [d for d in (_d(r.get("report_date")) for r in (erows or [])) if d and d < today]
         nxt = (moves or {}).get("next") or {}
         days = (nxt["date"] - today).days if nxt.get("date") else None
-        try:
-            ohlc = (ohlc_fn or ivhv.fetch_ohlc)(ticker)
-        except Exception:
-            ohlc = None
+        uw_rv = num(s.get("rv"))
+        ohlc = None
+        if not (uw_rv and uw_rv > 0):        # Unusual Whales is the default; prices only as a fallback
+            try:
+                ohlc = (ohlc_fn or ivhv.fetch_ohlc)(ticker)
+            except Exception:
+                ohlc = None
+        recent = any(0 <= (today - d).days <= ivhv.HORIZON_CAL for d in report_dates)
         res = ivhv.build(iv, _drop_partial_bar(ohlc, now),
                          report_dates=report_dates, days_to_earnings=days,
-                         expected_move_pct=nxt.get("implied_pct"), uw_rv=num(s.get("rv")))
+                         expected_move_pct=nxt.get("implied_pct"), uw_rv=uw_rv, recent_report=recent)
         res.update(ivhv.describe(res, earn_date=_md(nxt["date"], today) if nxt.get("date") else None))
         return res
     except Exception:

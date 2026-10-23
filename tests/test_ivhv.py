@@ -121,6 +121,13 @@ assert gd["event_days_dropped"] == 2, gd
 g_no = ivhv.build(true_iv, gap_df)
 assert g_no["event_days_dropped"] == 0 and g_no["rv_fcst"] > gd["rv_fcst"], (g_no["rv_fcst"], gd["rv_fcst"])
 
+# Unusual Whales realized vol is the default even when prices are supplied
+both = ivhv.build(0.30, df, uw_rv=0.20)
+assert both["source"] == "uw_rv" and both["ratio"] == 1.5 and both["event_days_dropped"] == 0, both
+rec = ivhv.build(0.30, None, uw_rv=0.40, recent_report=True)
+assert rec["band"] == "event" and rec["recent_report"] and "recent earnings move" in rec["caption"], rec
+assert ivhv.build(0.30, None, uw_rv=0.20, recent_report=True)["band"] == "event"
+
 # no price history: fall back to UW's own realized vol, and say so
 fb = ivhv.build(0.30, None, uw_rv=0.20)
 assert fb["source"] == "uw_rv" and fb["ratio"] == 1.5 and "Unusual Whales" in fb["caption"], fb

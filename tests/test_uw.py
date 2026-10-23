@@ -128,18 +128,28 @@ NOW = datetime.datetime(2026, 10, 22, 22, 0, tzinfo=UTC)                  # afte
 TODAY = uw_report.market_date(NOW)
 STATS = {"iv_rank": "50", "iv": "0.30", "rv": "0.22"}
 
-res = uw_report.ivhv_result("X", STATS, [], None, NOW, lambda t: BARS)
-assert res["source"] == "ohlc" and res["band"] == "rich" and 1.5 < res["ratio"] < 2.5, res
-assert res["big"].startswith("IV/HV ") and "—" not in res["caption"] and res["pos"] is not None, res
+STATS_NORV = {"iv_rank": "50", "iv": "0.30"}
+calls = []
+res = uw_report.ivhv_result("X", STATS, [], None, NOW, lambda t: calls.append(t) or BARS)
+assert calls == [], "Unusual Whales realized vol is the default: no price download when it is present"
+assert res["source"] == "uw_rv" and res["band"] == "rich" and res["ratio"] == round(0.30 / 0.22, 2), res
+assert res["big"].startswith("IV/HV ") and "\u2014" not in res["caption"] and res["pos"] is not None, res
+ox = uw_report.ivhv_result("X", STATS_NORV, [], None, NOW, lambda t: BARS)       # no UW rv: fall back to prices
+assert ox["source"] == "ohlc" and ox["band"] == "rich" and 1.5 < ox["ratio"] < 2.5, ox
 
 calls = []
 nores = uw_report.ivhv_result("X", {"iv_rank": "50"}, [], None, NOW, lambda t: calls.append(t) or BARS)
 assert nores["ratio"] is None and calls == [], "no IV: must not download prices for nothing"
-def _boom(t): raise RuntimeError("yahoo down")
-fb = uw_report.ivhv_result("X", STATS, [], None, NOW, _boom)             # price fetch fails: fall back to UW's realized vol
-assert fb["source"] == "uw_rv" and abs(fb["ratio"] - round(0.30 / 0.22, 2)) < 1e-9, fb
-assert uw_report.ivhv_result("X", STATS, [], None, NOW, lambda t: None)["source"] == "uw_rv"
+assert uw_report.ivhv_result("X", STATS_NORV, [], None, NOW, lambda t: (_ for _ in ()).throw(RuntimeError("down")))["ratio"] is None
+assert uw_report.ivhv_result("X", STATS_NORV, [], None, NOW, lambda t: None)["ratio"] is None
 assert uw_report.ivhv_result("X", None, None, None, NOW, lambda t: BARS)["ratio"] is None
+
+# a report inside UW's realized window makes that figure too high: never call it fair or thin
+rec = [{"report_date": (TODAY - datetime.timedelta(days=12)).isoformat(), "post_earnings_move_1d": "0.09"}]
+rr = uw_report.ivhv_result("X", {"iv": "0.30", "rv": "0.45"}, rec, None, NOW, lambda t: BARS)
+assert rr["band"] == "event" and rr["recent_report"] and "recent earnings move" in rr["caption"], rr
+assert uw_report.ivhv_result("X", {"iv": "0.30", "rv": "0.22"}, [dict(rec[0], report_date=(TODAY - datetime.timedelta(days=60)).isoformat())],
+                             None, NOW, lambda t: BARS)["band"] == "rich"
 
 nxt = (TODAY + datetime.timedelta(days=10)).isoformat()
 past = (TODAY - datetime.timedelta(days=80)).isoformat()
@@ -148,8 +158,9 @@ er = [{"report_date": nxt, "source": "company", "expected_move_perc": "0.05", "e
 mv = uw_report.summarize_earnings_moves(er, today=TODAY)
 ev = uw_report.ivhv_result("X", STATS, er, mv, NOW, lambda t: BARS)
 assert ev["earnings_status"] == "adjusted" and ev["band"] == "event" and ev["label"] == "Earnings", ev
-assert ev["event_days_dropped"] >= 1, "the past report's reaction days must come out of realized vol"
 assert ev["ratio_ex"] is not None and ev["ratio_ex"] < ev["ratio"], ev
+evo = uw_report.ivhv_result("X", STATS_NORV, er, mv, NOW, lambda t: BARS)
+assert evo["source"] == "ohlc" and evo["event_days_dropped"] >= 1, "price fallback removes past reaction days"
 
 tiles = uw_report.build_tiles(STATS, None, None, None, mv, price=100.0, today=TODAY, ivhv_res=ev)
 assert tiles["ivhv"] is ev and tiles["iv"]["rank"] == 50, "iv rank data stays available for the chip and the copy text"
@@ -160,7 +171,7 @@ assert "IV rank" not in html and "past year" not in html and "—" not in html, 
 assert "Earnings on Nov 30" in html, "must use the gate's earnings date, same as the Next earnings tile"
 rich_tiles = uw_report.build_tiles(STATS, None, None, None, None, ivhv_res=res)
 rich_html = uw_report.render_card_block({"tiles": rich_tiles, "lines": []})
-assert "#22c55e" in rich_html and "Premiums are rich" in rich_html and "calculated from daily prices" in rich_html
+assert "#22c55e" in rich_html and "Premiums are rich" in rich_html
 # old persisted state (no ivhv key) must not crash the card or resurrect the old tile
 old = uw_report.render_card_block({"tiles": {"iv": {"rank": 80, "iv": .3, "lo": .2, "hi": .4, "rv": .2}, "earnings": None,
                                               "flow": None, "dark": None, "insiders": None}, "lines": ["x"]})

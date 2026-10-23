@@ -11,9 +11,12 @@ recorded: UW's implied volatility compared with realized volatility that we
 calculate from Yahoo daily prices (see ivhv.py). The tile says so in its text.
 """
 import datetime
+import logging
 import os
 
 import ivhv
+
+log = logging.getLogger("uw_report")
 from uw_client import num, next_earnings_from_rows
 
 FLOW_MIN_PREMIUM = float(os.environ.get("UW_FLOW_MIN_PREMIUM", "10000"))
@@ -371,7 +374,8 @@ def ivhv_result(ticker, stats, erows, moves, now, ohlc_fn=None, ctx=None, vrp=No
         res["signals"] = sig
         res.update(ivhv.describe(res, earn_date=_md(nxt["date"], today) if nxt.get("date") else None))
         return res
-    except Exception:
+    except Exception as e:
+        log.warning("ivhv_result(%s) failed: %s: %s", ticker, type(e).__name__, e)   # was silent; n/a hid real bugs
         return ivhv.build(None)
 
 

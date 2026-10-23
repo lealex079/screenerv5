@@ -462,6 +462,8 @@ def build_ticker_report(client, ticker, since, now=None, price=None, ohlc_fn=Non
         if em:
             out["lines"].insert(1, em)
         out["ivhv"] = ivhv_result(ticker, stats, erows, out["earnings_moves"], now, ohlc_fn, ctx=ctx, vrp=vrp)
+        if out["ivhv"].get("ratio") is not None:      # the copied/exported text carries the same IV/HV read as the tile
+            out["lines"].insert(1, "IV vs actual movement: %s. %s" % (out["ivhv"]["big"], out["ivhv"]["caption"]))
         out["tiles"] = build_tiles(stats, flow_s, dark_s, summarize_insiders(ins_rows, now.date()),
                                    out["earnings_moves"], price=price, today=now.date(),
                                    ivhv_res=out["ivhv"])

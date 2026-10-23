@@ -235,6 +235,9 @@ assert UWClient("k", opener_for(routes, [])).error_summary() is None
 for raw in ('abc123', ' "abc123" ', "'abc123'", "Bearer abc123", '"Bearer abc123"\n'):
     assert UWClient(raw).key == "abc123", raw
 assert UWClient("").enabled is False
+# 14. the exported lines carry the IV/HV read, right after the IV rank line
+assert rep["lines"][1].startswith("IV vs actual movement: IV/HV "), rep["lines"][:3]
+assert rd["lines"][1].startswith("Options flow") or "IV vs actual" not in " ".join(rd["lines"]), "no IV/HV line when it is n/a"
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

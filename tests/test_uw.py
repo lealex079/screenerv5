@@ -84,7 +84,7 @@ assert "0 buys" in il and "2 sells totaling $1.0M" in il and "50%" in il, il
 
 # 6. build_ticker_report never raises, even when everything fails
 r = uw_report.build_ticker_report(UWClient("k", opener_for([], [])), "MU", since)
-assert r["iv_rank"] is None and all("unavailable" in l for l in r["lines"]), r
+assert r["iv_rank"] is None and all("unavailable" in l or l.startswith("Unusual Whales failed") for l in r["lines"]), r
 
 # 7. no em dashes or direction words in any reader-facing line
 for l in [line, il] + r["lines"]:
@@ -225,6 +225,12 @@ flat = UWClient("k", opener_for([("volatility/stats", {"iv": "0.216", "rv": "0.1
 assert flat.vol_stats("X")["iv"] == "0.216"
 rf = uw_report.build_ticker_report(flat, "X", since, now=NOW, price=100.0, ohlc_fn=lambda t: None)["tiles"]["ivhv"]
 assert rf["ratio"] == 1.25 and rf["source"] == "uw_rv", rf
+# 12. when every call fails the report says why (401 = key rejected) instead of a bare "unavailable"
+dead = UWClient("SECRET-XYZ", opener_for([], []))          # every route 404s in the fake opener
+rd = uw_report.build_ticker_report(dead, "X", since, now=NOW, price=100.0, ohlc_fn=lambda t: None)
+assert "Unusual Whales failed on" in rd["lines"][-1] and "404" in rd["lines"][-1], rd["lines"][-1]
+assert rd["tiles"]["ivhv"]["ratio"] is None and "SECRET-XYZ" not in " ".join(rd["lines"])
+assert UWClient("k", opener_for(routes, [])).error_summary() is None
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

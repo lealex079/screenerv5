@@ -57,6 +57,7 @@ def next_earnings_from_rows(rows, today=None):
 
 class UWClient:
     def __init__(self, key=None, opener=None):
+        self.errors = {}        # request path -> HTTP status or exception name, for diagnostics (never the key or URL query)
         self.key = (key if key is not None else os.environ.get("UW_API_KEY", "")).strip()
         self.requests_made = 0
         self.last_usage = {}
@@ -67,6 +68,24 @@ class UWClient:
         return bool(self.key)
 
     # -- transport ----------------------------------------------------------
+    def error_summary(self):
+        """One plain sentence on why requests failed, or None if none did."""
+        if not self.errors:
+            return None
+        codes = sorted({str(v) for v in self.errors.values()})
+        hint = []
+        if "401" in codes:
+            hint.append("401 means Unusual Whales rejected the API key (wrong, expired or revoked)")
+        if "403" in codes:
+            hint.append("403 means the key's plan does not include that data")
+        if "429" in codes:
+            hint.append("429 means the rate limit was hit")
+        if "404" in codes:
+            hint.append("404 means that endpoint or ticker was not found")
+        if not hint:
+            hint.append("the request did not complete (network or timeout)")
+        return "Unusual Whales failed on %d request(s) (%s): %s." % (len(self.errors), ", ".join(codes), "; ".join(hint))
+
     def _get(self, path, params=None):
         if not self.enabled:
             return None
@@ -88,12 +107,14 @@ class UWClient:
                 if e.code in RETRY_STATUS and attempt < 2:
                     time.sleep(2 * (attempt + 1))
                     continue
+                self.errors[path] = e.code
                 log.warning("UW %s -> HTTP %s", path, e.code)   # never log the URL query or key
                 return None
             except Exception as e:
                 if attempt < 2:
                     time.sleep(2 * (attempt + 1))
                     continue
+                self.errors[path] = type(e).__name__
                 log.warning("UW %s -> %s", path, type(e).__name__)
                 return None
         return None

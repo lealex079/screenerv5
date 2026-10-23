@@ -466,6 +466,10 @@ def build_ticker_report(client, ticker, since, now=None, price=None, ohlc_fn=Non
                                    out["earnings_moves"], price=price, today=now.date(),
                                    ivhv_res=out["ivhv"])
         out["tiles"]["window_days"] = (now.date() - since.date()).days
+        why = getattr(client, "error_summary", lambda: None)()
+        if why:
+            out["lines"].append(why)
+            out["tiles"]["uw_errors"] = why
     except Exception:
         out["lines"].append("Unusual Whales data unavailable this run.")
     return out

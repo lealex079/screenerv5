@@ -8,6 +8,8 @@ sys.path.insert(0, str(ROOT))
 spec = importlib.util.spec_from_file_location("scan", ROOT / "api" / "scan.py")
 scan = importlib.util.module_from_spec(spec); spec.loader.exec_module(scan)
 from uw_client import UWClient
+import ivhv
+ivhv.fetch_ohlc = lambda t: None          # tests never touch Yahoo
 
 KEY = "SECRET-KEY-123"
 # Dates are relative to today. Hard-coded ones silently rot: the fixture's "next

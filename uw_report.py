@@ -5,10 +5,15 @@ This module REPORTS what Unusual Whales recorded. It computes no score, no
 signal and no size suggestion. The only arithmetic is counting and summing
 their rows. Lines never say bullish or bearish: ask-side put buying can be a
 hedge, so direction is left to the reader. No em dashes (reader-facing text).
+
+One exception: the "Option prices vs actual movement" tile. It is derived, not
+recorded: UW's implied volatility compared with realized volatility that we
+calculate from Yahoo daily prices (see ivhv.py). The tile says so in its text.
 """
 import datetime
 import os
 
+import ivhv
 from uw_client import num, next_earnings_from_rows
 
 FLOW_MIN_PREMIUM = float(os.environ.get("UW_FLOW_MIN_PREMIUM", "10000"))
@@ -315,11 +320,52 @@ def summarize_insiders(rows, today=None):
     return o
 
 
-def build_tiles(stats, flow, dark, insiders, moves, price=None, today=None):
+def _drop_partial_bar(ohlc, now):
+    """During the US session today's daily bar is unfinished. Leave it out so a
+    half-day range does not pull realized volatility down."""
+    try:
+        if ohlc is None or len(ohlc) < 2:
+            return ohlc
+        from zoneinfo import ZoneInfo
+        et = now.astimezone(ZoneInfo("America/New_York"))
+        in_session = et.weekday() < 5 and datetime.time(9, 30) <= et.time() < datetime.time(16, 15)
+        if in_session and ohlc.index[-1].date() == et.date():
+            return ohlc.iloc[:-1]
+    except Exception:
+        pass
+    return ohlc
+
+
+def ivhv_result(ticker, stats, erows, moves, now, ohlc_fn=None):
+    """IV versus realized volatility for the card (see ivhv.py). Never raises and
+    always returns a dict; ratio is None when it cannot be computed."""
+    try:
+        s = stats or {}
+        iv = num(s.get("iv"))
+        if iv is None or iv <= 0:
+            return ivhv.build(None)          # nothing to compare: skip the price download
+        today = market_date(now)
+        report_dates = [d for d in (_d(r.get("report_date")) for r in (erows or [])) if d and d < today]
+        nxt = (moves or {}).get("next") or {}
+        days = (nxt["date"] - today).days if nxt.get("date") else None
+        try:
+            ohlc = (ohlc_fn or ivhv.fetch_ohlc)(ticker)
+        except Exception:
+            ohlc = None
+        res = ivhv.build(iv, _drop_partial_bar(ohlc, now),
+                         report_dates=report_dates, days_to_earnings=days,
+                         expected_move_pct=nxt.get("implied_pct"), uw_rv=num(s.get("rv")))
+        res.update(ivhv.describe(res, earn_date=_md(nxt["date"], today) if nxt.get("date") else None))
+        return res
+    except Exception:
+        return ivhv.build(None)
+
+
+def build_tiles(stats, flow, dark, insiders, moves, price=None, today=None, ivhv_res=None):
     """Plain structured numbers for the visual card. Every field is UW's, counted
-    or summed; nothing here is a score. Missing pieces are None."""
+    or summed, except "ivhv", which is derived (see ivhv.py). Missing pieces are None."""
     today = today or datetime.date.today()
-    t = {"iv": None, "earnings": None, "flow": None, "dark": None, "insiders": insiders}
+    t = {"iv": None, "ivhv": ivhv_res, "earnings": None, "flow": None, "dark": None, "insiders": insiders}
     r = iv_rank_value(stats)
     if r is not None:
         g = lambda k: num((stats or {}).get(k))
@@ -346,11 +392,12 @@ def build_tiles(stats, flow, dark, insiders, moves, price=None, today=None):
     return t
 
 
-def build_ticker_report(client, ticker, since, now=None, price=None):
+def build_ticker_report(client, ticker, since, now=None, price=None, ohlc_fn=None):
     """
     Fetch and summarize everything for one ticker. `since` is a UTC datetime
     (normally the previous report's send time). Returns
     {"iv_rank": float|None, "next_earnings": {...}|None, "lines": [str, ...]}.
+    ohlc_fn(ticker) supplies daily prices for the IV/HV tile (default: Yahoo).
     Never raises.
     """
     now = now or datetime.datetime.now(datetime.timezone.utc)
@@ -386,8 +433,10 @@ def build_ticker_report(client, ticker, since, now=None, price=None):
         em = earnings_move_line(out["earnings_moves"], price=price, today=now.date())
         if em:
             out["lines"].insert(1, em)
+        out["ivhv"] = ivhv_result(ticker, stats, erows, out["earnings_moves"], now, ohlc_fn)
         out["tiles"] = build_tiles(stats, flow_s, dark_s, summarize_insiders(ins_rows, now.date()),
-                                   out["earnings_moves"], price=price, today=now.date())
+                                   out["earnings_moves"], price=price, today=now.date(),
+                                   ivhv_res=out["ivhv"])
         out["tiles"]["window_days"] = (now.date() - since.date()).days
     except Exception:
         out["lines"].append("Unusual Whales data unavailable this run.")
@@ -430,20 +479,15 @@ def render_card_block(uw, earnings=None):
         return ('<div style="background:#0f1419;border-radius:6px;padding:8px 10px;margin-top:10px">%s%s%s</div>'
                 % (head, items, foot))
     cells = []
-    iv = t.get("iv")
-    if iv:
-        r = iv["rank"]
-        sub = ("Premiums are well above normal for this stock." if r >= 70 else
-               "Premiums are richer than usual for this stock." if r >= 50 else
-               "Premiums are thinner than usual for this stock." if r < 30 else
-               "In the middle of its past-year range.")
-        ee = t.get("earnings")
-        # Earnings raise premiums, so they can explain rich ones but never thin
-        # ones (IIPR, 2026-10-19: "thinner than usual... earnings may be part").
-        if ee and 0 <= ee["days"] <= 45 and r >= 30:
-            sub += " Earnings on %s may be part of this." % _md(_d(ee["date"]))
-        cells.append(_email_tile("Option prices vs past year", "IV rank %.0f" % r, sub,
-                                 "#22c55e" if r >= 50 else "#334155", bar=(r, 0)))
+    h = t.get("ivhv")
+    if h:
+        # Show the same earnings date the gate used (the Next earnings tile below
+        # does too), falling back to UW's own date.
+        _ed = (earnings or {}).get("date") or ((t.get("earnings") or {}).get("date"))
+        txt = ivhv.describe(h, earn_date=_md(_d(_ed)) if _ed else None)
+        cells.append(_email_tile("Option prices vs actual movement", txt["big"], txt["caption"],
+                                 {"rich": "#22c55e", "thin": "#f59e0b"}.get(h.get("band"), "#334155"),
+                                 bar=(h["pos"], 0) if h.get("pos") is not None else None))
     e = t.get("earnings")
     if e and earnings:
         # The card must show the same date the gate used. `earnings` is the

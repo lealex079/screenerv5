@@ -1879,19 +1879,19 @@ function uwSplit(a, b, ca, cb) {
   sp.appendChild(x); sp.appendChild(y);
   return sp;
 }
-function uwIvTile(iv, earn) {
-  const r = iv.rank;
-  const t = uwTile('Option prices vs past year',
-    r >= 70 ? 'High' : r >= 50 ? 'Above average' : r < 30 ? 'Low' : 'Middle', r >= 50 ? 'green' : '');
-  t.appendChild(uwEl('div', 'uw-big', 'IV rank ' + Math.round(r)));
-  const m = uwEl('div', 'uw-meter');
-  const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, r)) + '%';
-  m.appendChild(f);
-  t.appendChild(uwViz(m));
-  let cap = r >= 70 ? 'Premiums are well above normal for this stock.' : r >= 50 ? 'Premiums are richer than usual for this stock.' : r < 30 ? 'Premiums are thinner than usual for this stock.' : 'In the middle of its past-year range.';
-  if (earn && earn.days >= 0 && earn.days <= 45) cap += ' Earnings on ' + uwMonthDay(earn.date) + ' may be part of this.';
-  if (iv.iv != null && iv.rv != null) cap += ' They imply about ' + Math.round(iv.iv * 100) + '% a year of movement; the stock has recently moved at about ' + Math.round(iv.rv * 100) + '% a year.';
-  t.appendChild(uwEl('div', 'uw-sub', cap));
+// IV versus realized volatility. The server (ivhv.py) decides the number, the
+// label and the wording, so the web card and the email card can never disagree.
+function uwIvHvTile(h) {
+  const t = uwTile('Option prices vs actual movement', h.label,
+    h.band === 'rich' ? 'green' : h.band === 'thin' ? 'amber' : '');
+  t.appendChild(uwEl('div', 'uw-big', h.big));
+  if (h.pos != null) {
+    const m = uwEl('div', 'uw-meter');
+    const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, h.pos)) + '%';
+    m.appendChild(f);
+    t.appendChild(uwViz(m));
+  }
+  t.appendChild(uwEl('div', 'uw-sub', h.caption));
   return t;
 }
 function uwEarnTile(e) {
@@ -1971,7 +1971,7 @@ async function loadUW(ticker, price) {
     const T = j.tiles;
     if (T) {
       const grid = uwEl('div', 'uw-grid');
-      if (T.iv) grid.appendChild(uwIvTile(T.iv, T.earnings));
+      if (T.ivhv) grid.appendChild(uwIvHvTile(T.ivhv));
       if (T.earnings) grid.appendChild(uwEarnTile(T.earnings));
       if (T.flow) grid.appendChild(uwFlowTile(T.flow, T.dark, T.window_days || j.window_days));
       if (T.insiders) grid.appendChild(uwInsiderTile(T.insiders));

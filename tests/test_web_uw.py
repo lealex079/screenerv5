@@ -1,5 +1,5 @@
 """Offline tests for the Vercel app's /api/scan?uw= route. Run: python3 tests/test_web_uw.py"""
-import importlib.util, io, json, os, sys, threading, urllib.error, urllib.request
+import datetime as _dtm, importlib.util, io, json, os, sys, threading, urllib.error, urllib.request
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -10,6 +10,10 @@ scan = importlib.util.module_from_spec(spec); spec.loader.exec_module(scan)
 from uw_client import UWClient
 
 KEY = "SECRET-KEY-123"
+# Dates are relative to today. Hard-coded ones silently rot: the fixture's "next
+# earnings" of 2026-10-20 became a past date and the test started failing on its own.
+NEXT_EARN = (_dtm.date.today() + _dtm.timedelta(days=10)).isoformat()
+PAST_EARN = (_dtm.date.today() - _dtm.timedelta(days=93)).isoformat()
 
 class Resp(io.BytesIO):
     headers = {}
@@ -24,8 +28,8 @@ def opener(req, timeout=0):
         return Resp(json.dumps({"data": {"iv_rank": "61", "iv": "0.30", "iv_low": "0.19", "iv_high": "0.39"}}).encode())
     if "/api/earnings/" in u:
         return Resp(json.dumps({"data": [
-            {"report_date": "2026-10-20", "source": "company", "expected_move_perc": "0.05", "expected_move": "9.1"},
-            {"report_date": "2026-07-22", "expected_move_perc": "0.04", "post_earnings_move_1d": "0.07", "long_straddle_1d": "0.2"}]}).encode())
+            {"report_date": NEXT_EARN, "source": "company", "expected_move_perc": "0.05", "expected_move": "9.1"},
+            {"report_date": PAST_EARN, "expected_move_perc": "0.04", "post_earnings_move_1d": "0.07", "long_straddle_1d": "0.2"}]}).encode())
     if "flow-alerts" in u or "darkpool" in u or "ticker-flow" in u:
         return Resp(json.dumps({"data": []}).encode())
     raise urllib.error.HTTPError(u, 404, "nf", {}, io.BytesIO(b"{}"))
@@ -45,7 +49,7 @@ r = scan.fetch_uw("RTX", price=183.29)
 assert r["enabled"] and r["iv_rank"] == 61.0, r
 assert any("IV rank" in l for l in r["lines"]), r["lines"]
 assert any("5.0% either way" in l and "$174.13 to $192.45" in l for l in r["lines"]), r["lines"]
-assert r["next_earnings"] == {"date": "2026-10-20", "confirmed": True}, r["next_earnings"]
+assert r["next_earnings"] == {"date": NEXT_EARN, "confirmed": True}, r["next_earnings"]
 n = len(calls)
 assert scan.fetch_uw("RTX", price=183.29) == r and len(calls) == n, "second call must hit the cache"
 assert KEY not in json.dumps(r)

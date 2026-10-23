@@ -58,7 +58,12 @@ def next_earnings_from_rows(rows, today=None):
 class UWClient:
     def __init__(self, key=None, opener=None):
         self.errors = {}        # request path -> HTTP status or exception name, for diagnostics (never the key or URL query)
-        self.key = (key if key is not None else os.environ.get("UW_API_KEY", "")).strip()
+        raw = (key if key is not None else os.environ.get("UW_API_KEY", "")).strip()
+        # Forgiving about the usual paste mistakes: surrounding quotes, a leading "Bearer ".
+        raw = raw.strip("\"'").strip()
+        if raw.lower().startswith("bearer "):
+            raw = raw[7:].strip()
+        self.key = raw
         self.requests_made = 0
         self.last_usage = {}
         self._opener = opener or urllib.request.urlopen

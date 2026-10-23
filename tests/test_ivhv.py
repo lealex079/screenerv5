@@ -184,4 +184,10 @@ assert "Market-wide volatility is stressed" in ivhv.describe(hh)["caption"]
 hh["band"] = "event"; hh["signals"] = dict(sg, term_inverted=False)
 assert "richer than" not in ivhv.describe(hh)["caption"], "no premium-rank claim on an earnings-distorted read"
 
+# ---- 10. a recent report only matters if its reaction was big ----------------
+assert ivhv.report_inflates_rv(-0.9, 0.154) is False, "JPM-sized move on a 15% vol stock"
+assert ivhv.report_inflates_rv(8.0, 0.30) is True
+assert ivhv.report_inflates_rv(None, 0.20) is True and ivhv.report_inflates_rv(3.0, None) is True
+assert ivhv.report_inflates_rv(3.0, 0.20) is True and ivhv.report_inflates_rv(1.0, 0.20) is False
+
 print("ivhv tests: all passed")

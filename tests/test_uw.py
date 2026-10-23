@@ -235,6 +235,13 @@ assert UWClient("k", opener_for(routes, [])).error_summary() is None
 for raw in ('abc123', ' "abc123" ', "'abc123'", "Bearer abc123", '"Bearer abc123"\n'):
     assert UWClient(raw).key == "abc123", raw
 assert UWClient("").enabled is False
+# 13b. a recent report with a SMALL reaction (JPM: -0.9%) leaves the read clean
+small = [{"report_date": (TODAY - datetime.timedelta(days=9)).isoformat(), "expected_move_perc": "0.027", "post_earnings_move_1d": "-0.009"}]
+sm = uw_report.ivhv_result("X", {"iv": "0.22", "rv": "0.154"}, small, uw_report.summarize_earnings_moves(small, today=TODAY), NOW, lambda t: None)
+assert sm["band"] == "rich" and not sm.get("recent_report") and sm["label"] == "Rich", sm
+big = [dict(small[0], post_earnings_move_1d="-0.07")]
+bg = uw_report.ivhv_result("X", {"iv": "0.22", "rv": "0.154"}, big, uw_report.summarize_earnings_moves(big, today=TODAY), NOW, lambda t: None)
+assert bg["band"] == "event" and bg["recent_report"], bg
 # 14. the exported lines carry the IV/HV read, right after the IV rank line
 assert rep["lines"][1].startswith("IV vs actual movement: IV/HV "), rep["lines"][:3]
 assert rd["lines"][1].startswith("Options flow") or "IV vs actual" not in " ".join(rd["lines"]), "no IV/HV line when it is n/a"

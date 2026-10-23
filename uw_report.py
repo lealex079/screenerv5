@@ -367,7 +367,11 @@ def ivhv_result(ticker, stats, erows, moves, now, ohlc_fn=None, ctx=None, vrp=No
         if days is None and (sig.get("earnings_in_expiry") or (c.get("expiry") or {}).get("earnings_in_expiry")):
             ed = _d(c.get("earnings_date"))
             days = (ed - today).days if ed and ed >= today else HORIZON_FALLBACK_DAYS
-        recent = any(0 <= (today - d).days <= ivhv.HORIZON_CAL for d in report_dates)
+        # A report inside UW's ~30-day realized window only spoils the read if its reaction was big.
+        moved = {h["date"]: h["realized_pct"] for h in ((moves or {}).get("history") or [])}
+        recent = any(0 <= (today - d).days <= ivhv.HORIZON_CAL
+                     and ivhv.report_inflates_rv(moved.get(d), uw_rv)
+                     for d in report_dates)
         res = ivhv.build(iv, _drop_partial_bar(ohlc, now),
                          report_dates=report_dates, days_to_earnings=days,
                          expected_move_pct=nxt.get("implied_pct"), uw_rv=uw_rv, recent_report=recent)

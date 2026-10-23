@@ -171,6 +171,22 @@ def forecast_rv(rv, weights=FORECAST_WEIGHTS):
 
 
 # -- implied volatility, earnings removed -------------------------------------
+CONTAMINATION_SHARE = 0.25     # a report day that is >= 25% of the realized window's variance distorts it
+
+
+def report_inflates_rv(move_pct, rv, window_td=HORIZON_TD):
+    """True when one earnings-reaction day (its % move) makes up a big share of the
+    realized-vol window's total variance, so the window overstates normal movement.
+    Unknown move or rv: True (stay cautious). A small reaction (JPM's -0.9%) is not enough to matter."""
+    try:
+        if move_pct is None or rv is None or not (rv > 0):
+            return True
+        window_var = rv * rv * window_td / TRADING_DAYS
+        return (move_pct / 100.0) ** 2 / window_var >= CONTAMINATION_SHARE
+    except Exception:
+        return True
+
+
 def ex_earnings_iv(iv, days_to_earnings, expected_move_pct):
     """Remove the earnings move from IV when a report is inside the IV window.
 

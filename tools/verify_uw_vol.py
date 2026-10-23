@@ -25,7 +25,7 @@ for t in (sys.argv[1:] or ["MU"]):
         print("sample row:", json.dumps(rows[0]))
         print("sample row:", json.dumps(rows[len(rows) // 2]))
         print("date vs unshifted_rv_date (forward window if the second is ~21 trading days LATER):",
-              [(r.get("date", "")[:10], r.get("unshifted_rv_date", "")[:10]) for r in rows[:2] + rows[-2:]])
+              [((r.get("date") or "")[:10], (r.get("unshifted_rv_date") or "")[:10]) for r in rows[:2] + rows[-2:]])
     for name, fn in (("context", c.vol_context), ("variance-risk-premium", c.variance_risk_premium)):
         print("-", name, json.dumps(fn(t), indent=1)[:1500])
     for path in ("volatility/character", "volatility/anomaly"):

@@ -349,6 +349,12 @@ def fetch_options_for_top(top: list[dict]) -> None:
             log.info(f"  Fetching options: {ticker}")
             ctx = {k: d.get(k) for k in CTX_KEYS}
             d["options"] = fetch_options(ticker, ctx=ctx)
+            _o = d["options"] or {}
+            if not _o.get("error"):
+                log.info(f"    {ticker}: {len(_o.get('puts') or [])} puts kept, "
+                         f"{sum(1 for p in (_o.get('puts') or []) if p.get('optimal'))} optimal, "
+                         f"quotes {'closed-market' if _o.get('quotes_closed_market') else 'live'}, "
+                         f"dropped {_o.get('dropped_contracts') or {}}")
         except Exception as e:
             log.warning(f"  Options failed for {ticker}: {e}")
             d["options"] = {"error": str(e)}
@@ -1145,7 +1151,7 @@ def main():
         _n_ed = 0
         for _d in pre + pinned:
             _scan_mod.apply_uw_earnings(_d)
-            if _d.get("earnings_source") == "uw":
+            if _d.get("earnings_source") in ("uw", "earlier_of_both"):
                 _n_ed += 1
             if _d.get("earnings_note"):
                 log.info(f"  {_d['ticker']}: {_d['earnings_note']}")

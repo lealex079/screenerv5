@@ -2,7 +2,8 @@
 With a probe directory (uw_probe_out) it also replays the real saved responses."""
 import datetime, io, json, os, sys, urllib.error
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import uw_client, uw_report
+import uw_client, uw_report, ivhv
+ivhv.fetch_ohlc = lambda t: None          # tests never touch Yahoo
 from uw_client import UWClient
 
 UTC = datetime.timezone.utc
@@ -113,6 +114,87 @@ assert "\u2014" not in _ln
 assert uw_report.summarize_earnings_moves([], today=datetime.date(2026, 10, 7)) is None
 assert uw_report.earnings_move_line(None) == ""
 assert uw_client.next_earnings_from_rows(_er, datetime.date(2026, 10, 7))["date"] == datetime.date(2026, 10, 21)
+
+# 9. the IV/HV tile replaces the IV rank tile on the card. Prices are injected: no network.
+import numpy as np, pandas as pd
+def _bars(n=320, vol=0.20, seed=3, end="2026-10-22"):
+    rng = np.random.RandomState(seed); days = pd.bdate_range(end=end, periods=n); px = 100.0; rows = []
+    for _ in range(n):
+        o = px * np.exp(rng.normal(0, vol / np.sqrt(252) * 0.4)); c = o * np.exp(rng.normal(0, vol / np.sqrt(252) * 0.9))
+        rows.append((o, max(o, c) * 1.003, min(o, c) * 0.997, c)); px = c
+    return pd.DataFrame(rows, index=days, columns=["Open", "High", "Low", "Close"])
+BARS = _bars()
+NOW = datetime.datetime(2026, 10, 22, 22, 0, tzinfo=UTC)                  # after the close, Thursday
+TODAY = uw_report.market_date(NOW)
+STATS = {"iv_rank": "50", "iv": "0.30", "rv": "0.22"}
+
+STATS_NORV = {"iv_rank": "50", "iv": "0.30"}
+calls = []
+res = uw_report.ivhv_result("X", STATS, [], None, NOW, lambda t: calls.append(t) or BARS)
+assert calls == [], "Unusual Whales realized vol is the default: no price download when it is present"
+assert res["source"] == "uw_rv" and res["band"] == "rich" and res["ratio"] == round(0.30 / 0.22, 2), res
+assert res["big"].startswith("IV/HV ") and "\u2014" not in res["caption"] and res["pos"] is not None, res
+ox = uw_report.ivhv_result("X", STATS_NORV, [], None, NOW, lambda t: BARS)       # no UW rv: fall back to prices
+assert ox["source"] == "ohlc" and ox["band"] == "rich" and 1.5 < ox["ratio"] < 2.5, ox
+
+calls = []
+nores = uw_report.ivhv_result("X", {"iv_rank": "50"}, [], None, NOW, lambda t: calls.append(t) or BARS)
+assert nores["ratio"] is None and calls == [], "no IV: must not download prices for nothing"
+assert uw_report.ivhv_result("X", STATS_NORV, [], None, NOW, lambda t: (_ for _ in ()).throw(RuntimeError("down")))["ratio"] is None
+assert uw_report.ivhv_result("X", STATS_NORV, [], None, NOW, lambda t: None)["ratio"] is None
+assert uw_report.ivhv_result("X", None, None, None, NOW, lambda t: BARS)["ratio"] is None
+
+# a report inside UW's realized window makes that figure too high: never call it fair or thin
+rec = [{"report_date": (TODAY - datetime.timedelta(days=12)).isoformat(), "post_earnings_move_1d": "0.09"}]
+rr = uw_report.ivhv_result("X", {"iv": "0.30", "rv": "0.45"}, rec, None, NOW, lambda t: BARS)
+assert rr["band"] == "event" and rr["recent_report"] and "recent earnings move" in rr["caption"], rr
+assert uw_report.ivhv_result("X", {"iv": "0.30", "rv": "0.22"}, [dict(rec[0], report_date=(TODAY - datetime.timedelta(days=60)).isoformat())],
+                             None, NOW, lambda t: BARS)["band"] == "rich"
+
+nxt = (TODAY + datetime.timedelta(days=10)).isoformat()
+past = (TODAY - datetime.timedelta(days=80)).isoformat()
+er = [{"report_date": nxt, "source": "company", "expected_move_perc": "0.05", "expected_move": "9.0"},
+      {"report_date": past, "expected_move_perc": "0.04", "post_earnings_move_1d": "0.07", "long_straddle_1d": "0.2"}]
+mv = uw_report.summarize_earnings_moves(er, today=TODAY)
+ev = uw_report.ivhv_result("X", STATS, er, mv, NOW, lambda t: BARS)
+assert ev["earnings_status"] == "adjusted" and ev["band"] == "event" and ev["label"] == "Earnings", ev
+assert ev["ratio_ex"] is not None and ev["ratio_ex"] < ev["ratio"], ev
+evo = uw_report.ivhv_result("X", STATS_NORV, er, mv, NOW, lambda t: BARS)
+assert evo["source"] == "ohlc" and evo["event_days_dropped"] >= 1, "price fallback removes past reaction days"
+
+tiles = uw_report.build_tiles(STATS, None, None, None, mv, price=100.0, today=TODAY, ivhv_res=ev)
+assert tiles["ivhv"] is ev and tiles["iv"]["rank"] == 50, "iv rank data stays available for the chip and the copy text"
+html = uw_report.render_card_block({"tiles": tiles, "lines": []},
+                                   earnings={"date": "2026-11-30", "days": 38, "confirmed": True, "note": ""})
+assert "Option prices vs actual movement" in html and "IV/HV %.2fx" % ev["ratio"] in html, html
+assert "IV rank" not in html and "past year" not in html and "—" not in html, html
+assert "Earnings on Nov 30" in html, "must use the gate's earnings date, same as the Next earnings tile"
+rich_tiles = uw_report.build_tiles(STATS, None, None, None, None, ivhv_res=res)
+rich_html = uw_report.render_card_block({"tiles": rich_tiles, "lines": []})
+assert "#22c55e" in rich_html and "Premiums are rich" in rich_html
+# old persisted state (no ivhv key) must not crash the card or resurrect the old tile
+old = uw_report.render_card_block({"tiles": {"iv": {"rank": 80, "iv": .3, "lo": .2, "hi": .4, "rv": .2}, "earnings": None,
+                                              "flow": None, "dark": None, "insiders": None}, "lines": ["x"]})
+assert "IV rank" not in old and "past year" not in old
+
+# end to end through build_ticker_report with injected prices
+routes = [("volatility/stats", {"data": STATS}), ("/api/earnings/", {"data": er}),
+          ("flow-alerts", {"data": []}), ("darkpool", {"data": []}), ("ticker-flow", {"data": []})]
+rep = uw_report.build_ticker_report(UWClient("k", opener_for(routes, [])), "X", since, now=NOW, price=100.0,
+                                    ohlc_fn=lambda t: BARS)
+assert rep["tiles"]["ivhv"]["earnings_status"] == "adjusted" and rep["ivhv"] is rep["tiles"]["ivhv"], rep["tiles"]["ivhv"]
+assert rep["tiles"]["iv"]["rank"] == 50
+
+# today's unfinished bar is left out during the US session, kept otherwise
+live = _bars(end="2026-10-23")
+in_session = datetime.datetime(2026, 10, 23, 17, 0, tzinfo=UTC)         # 1 PM Eastern, Friday
+after_close = datetime.datetime(2026, 10, 23, 21, 30, tzinfo=UTC)       # 5:30 PM Eastern
+weekend = datetime.datetime(2026, 10, 24, 17, 0, tzinfo=UTC)
+assert len(uw_report._drop_partial_bar(live, in_session)) == len(live) - 1
+assert len(uw_report._drop_partial_bar(live, after_close)) == len(live)
+assert len(uw_report._drop_partial_bar(live, weekend)) == len(live)
+assert len(uw_report._drop_partial_bar(BARS, in_session)) == len(BARS), "last bar is not today's: keep it"
+assert uw_report._drop_partial_bar(None, in_session) is None
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

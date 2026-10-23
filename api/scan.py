@@ -648,6 +648,12 @@ def fetch_options(ticker, ctx=None):
     # has a real quote.
     _fill = {"quotes": None, "filled": 0}
     _closed = not market_session_open()
+    _drops = {}      # why contracts were rejected, so a closed-market run that
+                     # ends with no quotes can be diagnosed from the log
+
+    def _drop(reason):
+        _drops[reason] = _drops.get(reason, 0) + 1
+        return None
 
     def uw_quote_for(sym):
         if _os.environ.get("ENABLE_UW", "0") == "0" or _os.environ.get("UW_FILL_QUOTES", "1") == "0":
@@ -694,13 +700,17 @@ def fetch_options(ticker, ctx=None):
                         vol = _q["volume"]
                     _fill["filled"] += 1
 
-            if bid < MIN_OPTION_BID or oi < MIN_OPTION_OI or iv <= 0:
-                return None
+            if bid < MIN_OPTION_BID:
+                return _drop("bid_below_min")
+            if oi < MIN_OPTION_OI:
+                return _drop("oi_below_min")
+            if iv <= 0:
+                return _drop("no_iv")
             if _closed:
                 if oi < CLOSED_MIN_OI:
-                    return None
+                    return _drop("closed_low_oi")
                 if is_put and spot > 0 and strike < spot * (1 - CLOSED_MAX_OTM_FRAC):
-                    return None
+                    return _drop("closed_too_far_otm")
 
             delta = bs_delta(spot, strike, dte_days, iv, is_put=is_put)
             if delta is None:
@@ -715,7 +725,7 @@ def fetch_options(ticker, ctx=None):
             daily_prem = (bid / dte_days) if dte_days > 0 else 0
             be = (strike - bid) if is_put else (strike + bid)
             if _closed and is_put and ann_yield < CLOSED_MIN_ANN_YIELD:
-                return None
+                return _drop("closed_low_yield")
 
             return {
                 "contractSymbol": sym,
@@ -1071,6 +1081,7 @@ def fetch_options(ticker, ctx=None):
         "quotes_filled": _fill["filled"],
         "quote_source": "uw_nbbo" if _fill["filled"] else "yahoo",
         "quotes_closed_market": _closed,
+        "dropped_contracts": dict(_drops),
         "iv_rank": iv_rank,
         "iv_rank_source": iv_rank_source,
         "iv_uw": uw_iv.get("iv_uw"),
@@ -1868,19 +1879,19 @@ function uwSplit(a, b, ca, cb) {
   sp.appendChild(x); sp.appendChild(y);
   return sp;
 }
-function uwIvTile(iv, earn) {
-  const r = iv.rank;
-  const t = uwTile('Option prices vs past year',
-    r >= 70 ? 'High' : r >= 50 ? 'Above average' : r < 30 ? 'Low' : 'Middle', r >= 50 ? 'green' : '');
-  t.appendChild(uwEl('div', 'uw-big', 'IV rank ' + Math.round(r)));
-  const m = uwEl('div', 'uw-meter');
-  const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, r)) + '%';
-  m.appendChild(f);
-  t.appendChild(uwViz(m));
-  let cap = r >= 70 ? 'Premiums are well above normal for this stock.' : r >= 50 ? 'Premiums are richer than usual for this stock.' : r < 30 ? 'Premiums are thinner than usual for this stock.' : 'In the middle of its past-year range.';
-  if (earn && earn.days >= 0 && earn.days <= 45) cap += ' Earnings on ' + uwMonthDay(earn.date) + ' may be part of this.';
-  if (iv.iv != null && iv.rv != null) cap += ' They imply about ' + Math.round(iv.iv * 100) + '% a year of movement; the stock has recently moved at about ' + Math.round(iv.rv * 100) + '% a year.';
-  t.appendChild(uwEl('div', 'uw-sub', cap));
+// IV versus realized volatility. The server (ivhv.py) decides the number, the
+// label and the wording, so the web card and the email card can never disagree.
+function uwIvHvTile(h) {
+  const t = uwTile('Option prices vs actual movement', h.label,
+    h.band === 'rich' ? 'green' : h.band === 'thin' ? 'amber' : '');
+  t.appendChild(uwEl('div', 'uw-big', h.big));
+  if (h.pos != null) {
+    const m = uwEl('div', 'uw-meter');
+    const f = uwEl('i'); f.style.width = Math.max(2, Math.min(100, h.pos)) + '%';
+    m.appendChild(f);
+    t.appendChild(uwViz(m));
+  }
+  t.appendChild(uwEl('div', 'uw-sub', h.caption));
   return t;
 }
 function uwEarnTile(e) {
@@ -1960,7 +1971,7 @@ async function loadUW(ticker, price) {
     const T = j.tiles;
     if (T) {
       const grid = uwEl('div', 'uw-grid');
-      if (T.iv) grid.appendChild(uwIvTile(T.iv, T.earnings));
+      if (T.ivhv) grid.appendChild(uwIvHvTile(T.ivhv));
       if (T.earnings) grid.appendChild(uwEarnTile(T.earnings));
       if (T.flow) grid.appendChild(uwFlowTile(T.flow, T.dark, T.window_days || j.window_days));
       if (T.insiders) grid.appendChild(uwInsiderTile(T.insiders));

@@ -278,6 +278,54 @@ def finish(out):
     return out
 
 
+# -- context from Unusual Whales (no history needed on our side) ---------------
+def _f(v):
+    try:
+        x = float(v)
+        return x if x == x else None
+    except (TypeError, ValueError):
+        return None
+
+
+def signals(ctx=None, vrp=None):
+    """
+    Plain flags from UW's volatility-context and variance-risk-premium responses.
+    Everything is UW's own number, passed through; missing pieces stay None.
+      vrp_pct: where this stock's premium (IV minus realized) sits among its own past-year
+               readings, 0-100 (UW's `rank` x 100). 90 means richer than 90% of them.
+      skew: "put_rich" / "flat" / "call_rich" (25-delta, UW's label)
+      term_inverted: near-term IV above 90-day IV (stress is concentrated up front)
+      market_stress: VIX above VIX3M or VIX futures backwardated (market-wide, not this stock)
+    """
+    ctx = ctx if isinstance(ctx, dict) else {}
+    vrp = vrp if isinstance(vrp, dict) else {}
+    out = {"vrp_pct": None, "skew": None, "term_inverted": None, "market_stress": None,
+           "earnings_in_expiry": None, "iv_percentile": None}
+    try:
+        r = _f(vrp.get("rank"))
+        if r is not None and 0 <= r <= 1:
+            out["vrp_pct"] = round(r * 100)
+        sk = ctx.get("skew") if isinstance(ctx.get("skew"), dict) else {}
+        if sk.get("label") in ("put_rich", "flat", "call_rich"):
+            out["skew"] = sk["label"]
+        ts = ctx.get("term_structure") if isinstance(ctx.get("term_structure"), dict) else {}
+        if isinstance(ts.get("inverted"), bool):
+            out["term_inverted"] = ts["inverted"]
+        mk = ctx.get("market") if isinstance(ctx.get("market"), dict) else {}
+        flags = [mk.get("vix_curve_inverted") is True, mk.get("vix_futures_regime") == "backwardation"]
+        if any(isinstance(mk.get(k), (bool, str)) for k in ("vix_curve_inverted", "vix_futures_regime")):
+            out["market_stress"] = any(flags)
+        ex = ctx.get("expiry") if isinstance(ctx.get("expiry"), dict) else {}
+        if isinstance(ex.get("earnings_in_expiry"), bool):
+            out["earnings_in_expiry"] = ex["earnings_in_expiry"]
+        p = _f(ctx.get("iv_percentile"))
+        if p is not None:
+            out["iv_percentile"] = round(p)
+    except Exception:
+        pass
+    return out
+
+
 # -- plain-language text ------------------------------------------------------
 _LABEL = {"rich": "Rich", "fair": "Fair", "thin": "Thin", "event": "Earnings", "na": "n/a"}
 
@@ -326,6 +374,13 @@ def describe(h, earn_date=None):
         parts.append("%s is inside the window and no expected move was available to remove it." % Ev)
     elif status == "swamped":
         parts.append("%s accounts for nearly all of the implied movement, so the rest can't be separated." % Ev)
+    sg = h.get("signals") or {}
+    if sg.get("market_stress"):
+        parts.append("Market-wide volatility is stressed (VIX curve inverted), so high premium may not be specific to this stock.")
+    elif sg.get("term_inverted"):
+        parts.append("Near-term IV is above longer-dated IV, which points to a short-term event.")
+    if sg.get("vrp_pct") is not None and band in ("rich", "fair", "thin"):
+        parts.append("Against this stock's own past year, the premium is richer than %d%% of days." % sg["vrp_pct"])
     return {"label": label, "big": big, "caption": " ".join(parts)}
 
 

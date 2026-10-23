@@ -164,6 +164,27 @@ class UWClient:
         d = j.get("data") if isinstance(j, dict) else None
         return d if isinstance(d, dict) else None
 
+    @staticmethod
+    def _obj(j):
+        """A single-object response, whether or not UW wraps it in {"data": ...}."""
+        if not isinstance(j, dict):
+            return None
+        d = j.get("data")
+        if isinstance(d, dict):
+            return d
+        if isinstance(d, list):
+            return d[0] if d and isinstance(d[0], dict) else None
+        return j
+
+    def vol_context(self, ticker):
+        """One-call volatility context: iv30, rv, iv_rv_ratio, iv_percentile, earnings timing,
+        25-delta skew, 30d/90d term structure, VIX regime. Dict or None."""
+        return self._obj(self._get("/api/stock/%s/volatility/context" % ticker))
+
+    def variance_risk_premium(self, ticker, days=21):
+        """Implied minus realized, with `rank` (0 to 1) against this ticker's own past year. Dict or None."""
+        return self._obj(self._get("/api/stock/%s/volatility/variance-risk-premium" % ticker, {"days": days}))
+
     def earnings(self, ticker):
         """Earnings rows, newest first. Row 0 is usually the next (estimated) date."""
         j = self._get("/api/earnings/%s" % ticker)

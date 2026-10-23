@@ -220,6 +220,11 @@ assert he["band"] == "event" and he["earnings_status"] == "unadjusted", he
 cl3 = UWClient("k", opener_for(routes[:1] + routes[3:], []))
 h3 = uw_report.build_ticker_report(cl3, "X", since, now=NOW, price=100.0, ohlc_fn=lambda t: None)["tiles"]["ivhv"]
 assert h3["ratio"] == 1.0 and h3["signals"]["vrp_pct"] is None, h3
+# 11. stats returned WITHOUT the {"data": ...} wrapper (the docs are ambiguous) must still parse
+flat = UWClient("k", opener_for([("volatility/stats", {"iv": "0.216", "rv": "0.173", "iv_rank": "69"})], []))
+assert flat.vol_stats("X")["iv"] == "0.216"
+rf = uw_report.build_ticker_report(flat, "X", since, now=NOW, price=100.0, ohlc_fn=lambda t: None)["tiles"]["ivhv"]
+assert rf["ratio"] == 1.25 and rf["source"] == "uw_rv", rf
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

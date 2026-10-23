@@ -160,9 +160,7 @@ class UWClient:
 
     def vol_stats(self, ticker):
         """{iv, iv_low, iv_high, iv_rank (0-100, 1 year), rv, ...} or None."""
-        j = self._get("/api/stock/%s/volatility/stats" % ticker)
-        d = j.get("data") if isinstance(j, dict) else None
-        return d if isinstance(d, dict) else None
+        return self._obj(self._get("/api/stock/%s/volatility/stats" % ticker))
 
     @staticmethod
     def _obj(j):

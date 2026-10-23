@@ -231,6 +231,10 @@ rd = uw_report.build_ticker_report(dead, "X", since, now=NOW, price=100.0, ohlc_
 assert "Unusual Whales failed on" in rd["lines"][-1] and "404" in rd["lines"][-1], rd["lines"][-1]
 assert rd["tiles"]["ivhv"]["ratio"] is None and "SECRET-XYZ" not in " ".join(rd["lines"])
 assert UWClient("k", opener_for(routes, [])).error_summary() is None
+# 13. pasted keys: quotes and a "Bearer " prefix are tolerated
+for raw in ('abc123', ' "abc123" ', "'abc123'", "Bearer abc123", '"Bearer abc123"\n'):
+    assert UWClient(raw).key == "abc123", raw
+assert UWClient("").enabled is False
 print("unit tests: all passed")
 
 # 8. replay the real probe responses

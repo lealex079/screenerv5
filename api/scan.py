@@ -1648,6 +1648,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .uw-dots { display:flex; gap:6px; align-items:center; }
   .uw-dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
   .uw-note { font-size:10px; color:#475569; margin-top:8px; }
+  .surf-row { margin:10px 0 4px; }
+  .surf-box { background:#0f1419; border:0.5px solid #1e2a35; border-radius:8px; padding:10px 12px; margin:8px 0 12px; }
+  .surf-plot { width:100%; height:420px; }
+  .surf-tools { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+  .surf-read { font-size:12px; color:#94a3b8; line-height:1.5; margin:6px 0; }
+  .surf-table { width:100%; border-collapse:collapse; font-size:11px; margin-top:8px; }
+  .surf-table th { text-align:right; color:#64748b; font-weight:500; padding:3px 6px; border-bottom:0.5px solid #1e2a35; }
+  .surf-table td { text-align:right; color:#cbd5e1; padding:3px 6px; }
+  .surf-table th:first-child, .surf-table td:first-child { text-align:left; }
+  @media (max-width:600px) { .surf-plot { height:340px; } }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif; background: #0a0e13; color: #e2e8f0; min-height: 100vh; }
   .app { max-width: 860px; margin: 0 auto; padding: 0 16px; }
@@ -1958,12 +1968,137 @@ function uwInsiderTile(ins) {
   t.appendChild(uwEl('div', 'uw-sub', cap));
   return t;
 }
+// IV-SURFACE-BEGIN
+const surfDone = {};   // ticker -> true once drawn
+let plotlyPromise = null;
+function surfEsc(s) { return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+function ensurePlotly() {
+  if (window.Plotly) return Promise.resolve();
+  if (!plotlyPromise) plotlyPromise = new Promise(function(resolve, reject) {
+    const s = document.createElement('script');
+    s.src = '/api/scan?lib=plotly';
+    s.onload = resolve;
+    s.onerror = function() { plotlyPromise = null; reject(new Error('the 3D chart library did not load')); };
+    document.head.appendChild(s);
+  });
+  return plotlyPromise;
+}
+function addSurfaceButton(ticker, price) {
+  const el = document.getElementById('surf-' + ticker);
+  if (!el || el.getAttribute('data-ready')) return;
+  el.setAttribute('data-ready', '1');
+  const row = document.createElement('div'); row.className = 'surf-row';
+  const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.textContent = 'IV surface (3D)';
+  btn.onclick = function() { toggleSurface(ticker, price, btn); };
+  row.appendChild(btn);
+  const body = document.createElement('div'); body.id = 'surfbody-' + ticker; body.style.display = 'none';
+  el.appendChild(row); el.appendChild(body);
+}
+async function toggleSurface(ticker, price, btn) {
+  const body = document.getElementById('surfbody-' + ticker);
+  if (body.getAttribute('data-open') === '1') {
+    body.style.display = 'none'; body.setAttribute('data-open', '0'); btn.textContent = 'IV surface (3D)'; return;
+  }
+  body.style.display = 'block'; body.setAttribute('data-open', '1'); btn.textContent = 'Hide IV surface';
+  if (surfDone[ticker]) { try { Plotly.Plots.resize(body.querySelector('.surf-plot')); } catch (e) {} return; }
+  body.innerHTML = '<div class="c-dim" style="font-size:12px;padding:8px 0">Building the surface from about ten Unusual Whales requests...</div>';
+  try {
+    const res = await fetch('/api/scan?surface=' + encodeURIComponent(ticker) + '&price=' + encodeURIComponent(price));
+    const j = await res.json();
+    if (!j || j.enabled === false) { body.innerHTML = '<div class="options-warn-amber">Unusual Whales is not enabled for this site.</div>'; return; }
+    if (j.error || !j.iv) { body.innerHTML = '<div class="options-warn">' + surfEsc(j.error || 'No surface data came back.') + '</div>'; return; }
+    await ensurePlotly();
+    drawSurface(body, j);
+    surfDone[ticker] = true;
+  } catch (e) {
+    body.innerHTML = '<div class="options-warn">Could not draw the surface: ' + surfEsc(e.message) + '</div>';
+  }
+}
+function surfReading(j) {
+  const out = [];
+  const t = j.term.filter(function(r) { return r.atm_iv != null; });
+  if (t.length >= 2) {
+    const a = t[0], b = t[t.length - 1];
+    const f = function(v) { return v.toFixed(1) + '%'; };
+    if (a.atm_iv > b.atm_iv * 1.03) out.push('Near-term options cost more than long-dated ones (' + f(a.atm_iv) + ' at ' + a.dte + ' days vs ' + f(b.atm_iv) + ' at ' + b.dte + '). The market is pricing something soon, such as earnings or an event, or is stressed.');
+    else if (a.atm_iv < b.atm_iv * 0.97) out.push('Normal shape: longer-dated options cost a bit more (' + f(a.atm_iv) + ' at ' + a.dte + ' days, ' + f(b.atm_iv) + ' at ' + b.dte + ').');
+    else out.push('Flat across time (' + f(a.atm_iv) + ' at ' + a.dte + ' days, ' + f(b.atm_iv) + ' at ' + b.dte + ').');
+  }
+  const sk = j.term.filter(function(r) { return r.skew25 != null; });
+  if (sk.length) {
+    const near = sk.reduce(function(m, r) { return Math.abs(r.dte - 30) < Math.abs(m.dte - 30) ? r : m; });
+    if (near.skew25 > 0.5) out.push('Downside puts are priced ' + near.skew25.toFixed(1) + ' vol points above matching upside calls at ' + near.dte + ' days. Selling puts pays that extra, because buyers are paying up for protection.');
+    else if (near.skew25 < -0.5) out.push('Upside calls are priced above matching puts at ' + near.dte + ' days (' + Math.abs(near.skew25).toFixed(1) + ' vol points), which is unusual for a stock or index.');
+    else out.push('Puts and calls are priced about the same at ' + near.dte + ' days (little skew).');
+  }
+  return out;
+}
+function drawSurface(body, j) {
+  body.innerHTML = '';
+  const box = document.createElement('div'); box.className = 'surf-box';
+  const title = document.createElement('div'); title.className = 'uw-title'; title.textContent = 'Implied volatility surface (Unusual Whales)';
+  box.appendChild(title);
+  const cap = document.createElement('div'); cap.className = 'uw-sub';
+  cap.textContent = 'How much movement options price in, by strike and time to expiry. Left side is puts (below the stock price), right side is calls. Drag to rotate, scroll to zoom, hover for values.';
+  box.appendChild(cap);
+  const plot = document.createElement('div'); plot.className = 'surf-plot'; box.appendChild(plot);
+  const xs = j.moneyness.map(function(m) { return Math.round(m * 1000) / 10; });
+  const text = j.iv.map(function(row, i) {
+    return row.map(function(v, k) {
+      return v == null ? '' : 'Strike about $' + (j.spot * j.moneyness[k]).toFixed(2) + ' (' + xs[k] + '% of price)<br>' + j.dte[i] + ' days, expires ' + j.expiry[i] + '<br>Implied vol ' + v.toFixed(1) + '%';
+    });
+  });
+  const surface = {
+    type: 'surface', x: xs, y: j.dte, z: j.iv, text: text, hoverinfo: 'text', connectgaps: false, colorscale: 'Viridis',
+    colorbar: { title: { text: 'IV %' }, len: 0.6, thickness: 12, tickfont: { color: '#94a3b8' }, titlefont: { color: '#94a3b8' } },
+    contours: { z: { show: true, usecolormap: true, highlightcolor: '#ffffff', project: { z: false } } },
+    lighting: { ambient: 0.85, diffuse: 0.5 }
+  };
+  const atm = j.term.filter(function(r) { return r.atm_iv != null; });
+  const traces = [surface];
+  if (atm.length) traces.push({
+    type: 'scatter3d', mode: 'lines+markers', name: 'At the money', showlegend: false,
+    x: atm.map(function() { return 100; }), y: atm.map(function(r) { return r.dte; }), z: atm.map(function(r) { return r.atm_iv; }),
+    line: { color: '#f8fafc', width: 5 }, marker: { size: 3, color: '#f8fafc' }, hoverinfo: 'text',
+    text: atm.map(function(r) { return 'At the money, ' + r.dte + ' days: ' + r.atm_iv.toFixed(1) + '%'; })
+  });
+  const ax = function(t) { return { title: { text: t }, color: '#94a3b8', gridcolor: '#1e2a35', backgroundcolor: '#0f1419', showbackground: true, zerolinecolor: '#1e2a35' }; };
+  const eye0 = { x: 1.6, y: -1.7, z: 0.9 };
+  const layout = {
+    paper_bgcolor: '#0f1419', plot_bgcolor: '#0f1419', font: { color: '#94a3b8', size: 11 }, margin: { l: 0, r: 0, t: 0, b: 0 },
+    scene: { xaxis: ax('Strike (% of stock price)'), yaxis: ax('Days to expiry'), zaxis: ax('Implied vol (%)'),
+             camera: { eye: eye0 }, aspectmode: 'manual', aspectratio: { x: 1.5, y: 1.2, z: 0.7 } }
+  };
+  Plotly.newPlot(plot, traces, layout, { responsive: true, displaylogo: false });
+  const tools = document.createElement('div'); tools.className = 'surf-tools';
+  [['Reset view', eye0], ['Smile view (strike)', { x: 0.01, y: -2.4, z: 0.25 }], ['Term view (time)', { x: 2.4, y: 0.01, z: 0.25 }], ['Top view', { x: 0.01, y: -0.01, z: 2.6 }]].forEach(function(b) {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.textContent = b[0];
+    btn.onclick = function() { Plotly.relayout(plot, { 'scene.camera': { eye: b[1] } }); };
+    tools.appendChild(btn);
+  });
+  box.appendChild(tools);
+  surfReading(j).forEach(function(line) { const d = document.createElement('div'); d.className = 'surf-read'; d.textContent = line; box.appendChild(d); });
+  let rows = '';
+  j.term.forEach(function(r) {
+    rows += '<tr><td>' + surfEsc(r.date) + '</td><td>' + r.dte + '</td><td>' + (r.atm_iv == null ? 'n/a' : r.atm_iv.toFixed(1) + '%') + '</td><td>' + (r.skew25 == null ? 'n/a' : (r.skew25 > 0 ? '+' : '') + r.skew25.toFixed(1)) + '</td></tr>';
+  });
+  const tbl = document.createElement('table'); tbl.className = 'surf-table';
+  tbl.innerHTML = '<tr><th>Expiry</th><th>Days</th><th>At-the-money IV</th><th>Put minus call IV (25 delta)</th></tr>' + rows;
+  box.appendChild(tbl);
+  const note = document.createElement('div'); note.className = 'uw-note';
+  note.textContent = 'Out-of-the-money options only, from the last trading day, as of ' + j.as_of + '. Stock price used: $' + j.spot.toFixed(2) + (j.skipped_expiries ? '. ' + j.skipped_expiries + ' expiry(ies) skipped for thin data.' : '.') + ' A picture of what options cost; it does not change the scores above.';
+  box.appendChild(note);
+  body.appendChild(box);
+}
+// IV-SURFACE-END
+
 async function loadUW(ticker, price) {
   const el = document.getElementById('uw-' + ticker);
   if (!el) return;
   try {
     const res = await fetch('/api/scan?uw=' + encodeURIComponent(ticker) + '&price=' + encodeURIComponent(price));
     const j = await res.json();
+    if (j && j.enabled && !j.error) addSurfaceButton(ticker, price);
     if (!j || !j.enabled || j.error || !j.lines || !j.lines.length) return;
     uwData[ticker] = j;
     const box = uwEl('div', 'uw-box');
@@ -2077,6 +2212,7 @@ function renderCard(d) {
     renderMTFInline(d) +
     renderConfluences(d) +
     '<div id="uw-'+d.ticker+'"></div>' +
+    '<div id="surf-'+d.ticker+'"></div>' +
 
     '<hr class="section-divider">' +
     renderOptionsSection(d) +
@@ -3405,6 +3541,36 @@ def fetch_uw(ticker, price=None):
     return out
 
 
+_SURF_CACHE = {}               # ticker -> (unix time, result)
+_SURF_SECONDS = 900
+_SURF_FAIL_SECONDS = 60
+
+
+def fetch_surface(ticker, price=None):
+    """3D implied-vol surface for one ticker from Unusual Whales (server-side; the key never reaches the browser)."""
+    ticker = (ticker or "").strip().upper()
+    if not _UW_TICKER_RE.match(ticker):
+        return {"error": "bad ticker"}
+    if _os.environ.get("ENABLE_UW", "0") == "0":
+        return {"enabled": False}
+    hit = _SURF_CACHE.get(ticker)
+    if hit and _time.time() - hit[0] < (_SURF_SECONDS if hit[1].get("iv") else _SURF_FAIL_SECONDS):
+        return hit[1]
+    try:
+        uw_client, _ = _uw_modules()
+        import iv_surface
+        client = _uw_client_factory() if _uw_client_factory else uw_client.UWClient()
+        if not client.enabled:
+            return {"enabled": False}
+        out = iv_surface.build_surface(client, ticker, spot=price)
+        out["enabled"] = True
+    except Exception as e:
+        # Class name only: never put exception text (could echo URLs) in a response.
+        out = {"enabled": True, "error": "Could not build the surface (%s)." % type(e).__name__}
+    _SURF_CACHE[ticker] = (_time.time(), out)
+    return out
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -3419,12 +3585,35 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(base64.b64decode(LWC_B64))
             return
 
+        # 3D chart library (plotly gl3d), gzip-compressed, same-origin, loaded only when a surface is opened.
+        if params.get("lib", [""])[0] == "plotly":
+            import gzip as _gz
+            _here = _os.path.dirname(_os.path.abspath(__file__))
+            for _p in (_here, _os.path.dirname(_here)):
+                if _p not in _sys.path:
+                    _sys.path.append(_p)
+            from vendor_plotly import PLOTLY_GZ_B64
+            raw = base64.b64decode(PLOTLY_GZ_B64)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            if "gzip" in (self.headers.get("Accept-Encoding") or ""):
+                self.send_header("Content-Encoding", "gzip")
+                body = raw
+            else:
+                body = _gz.decompress(raw)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         tickers_raw = params.get("tickers", [""])[0].strip()
         options_ticker = params.get("options", [""])[0].strip().upper()
         chart_ticker = params.get("chart", [""])[0].strip().upper()
         uw_ticker = params.get("uw", [""])[0].strip().upper()
+        surface_ticker = params.get("surface", [""])[0].strip().upper()
 
-        if not any([tickers_raw, options_ticker, chart_ticker, uw_ticker]):
+        if not any([tickers_raw, options_ticker, chart_ticker, uw_ticker, surface_ticker]):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -3435,6 +3624,15 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+
+        if surface_ticker:
+            _spx = None
+            try:
+                _spx = float(params.get("price", [""])[0])
+            except (TypeError, ValueError):
+                _spx = None
+            self.wfile.write(json.dumps(fetch_surface(surface_ticker, price=_spx)).encode())
+            return
 
         if uw_ticker:
             _px = None

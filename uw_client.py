@@ -234,6 +234,17 @@ class UWClient:
         j = self._get("/api/etfs/%s/in-outflow" % ticker)
         return self._rows(j) if j is not None else None
 
+    def expiry_breakdown(self, ticker):
+        """Every listed expiry for the last trading day: [{expires, chains, open_interest, volume}]. None on failure."""
+        j = self._get("/api/stock/%s/expiry-breakdown" % ticker)
+        return self._rows(j) if j is not None else None
+
+    def greeks_by_strike(self, ticker, expiry):
+        """Per-strike call/put implied vol and delta for one expiry (a date). Rows, or None on failure.
+        Docs: GET /api/stock/{ticker}/greeks?expiry=. Values arrive as strings; use num()."""
+        j = self._get("/api/stock/%s/greeks" % ticker, {"expiry": expiry.isoformat()})
+        return self._rows(j) if j is not None else None
+
     def option_contracts(self, ticker, expiry=None):
         """Option contracts with nbbo_bid / nbbo_ask (populated after hours).
         Capped at 500 rows; pass expiry (date) for busy names. UNVERIFIED PARAM: expiry."""

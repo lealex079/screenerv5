@@ -24,7 +24,8 @@ MIN_DTE = 3
 MAX_DTE = 300
 MONEYNESS_LO, MONEYNESS_HI, GRID_POINTS = 0.75, 1.25, 41
 IV_MIN, IV_MAX = 0.02, 4.0           # decimal vol; anything outside is a bad print
-MIN_ABS_DELTA = 0.02                 # skip the extreme tails, where IV is mostly noise
+MIN_ABS_DELTA = 0.05                 # hide strikes with under ~5% odds of finishing in the money: quotes sit at the minimum tick there and the IV is mostly noise
+STEP_RATIO = 1.08                    # ATM IV rising 8%+ from one expiry to the next is treated as an event step
 SPIKE_RATIO = 1.6                    # a point this far above/below its neighbours' average is dropped
 WORKERS = 4
 
@@ -157,6 +158,70 @@ def infer_spot(rows):
     return _interp_at([p[0] for p in pairs], [p[1] for p in pairs], 0.5)
 
 
+def _pct(v):
+    return "%.1f%%" % v
+
+
+def _day(iso):
+    d = _date(iso)
+    return "%s %d" % (d.strftime("%b"), d.day) if d else str(iso)
+
+
+def reading_lines(term, earnings=None):
+    """Plain-English reading of the term structure and skew, event-aware.
+    term: [{dte, date, atm_iv (%), skew25 (vol pts)}]; earnings: {date, dte, confirmed} or None."""
+    out = []
+    t = [r for r in term if r.get("atm_iv") is not None]
+    e_iso = earnings["date"] if earnings else None
+    if len(t) >= 2:
+        steps = [(a, b) for a, b in zip(t, t[1:]) if b["atm_iv"] >= a["atm_iv"] * STEP_RATIO]
+        for a, b in steps[:3]:
+            if e_iso and a["date"] <= e_iso < b["date"]:
+                var = ((b["atm_iv"] / 100) ** 2 - (a["atm_iv"] / 100) ** 2) * b["dte"] / 365
+                move = 100 * math.sqrt(var) if var > 0 else None
+                line = ("Earnings bump: at-the-money IV jumps from %s at %d days to %s at %d days because the report on %s%s falls between those two expiries."
+                        % (_pct(a["atm_iv"]), a["dte"], _pct(b["atm_iv"]), b["dte"], _day(e_iso),
+                           "" if earnings.get("confirmed", True) else " (date not yet confirmed)"))
+                if move:
+                    line += " Those two prices imply a move of about %.1f%% on the report." % move
+                line += " Every expiry after %s includes the report, so part of what it costs is the event, not everyday movement." % _day(a["date"])
+                out.append(line)
+            elif b["dte"] > 150:
+                out.append("At-the-money IV also rises from %s at %d days to %s at %d days. Long-dated expiries are thinly quoted, so treat that bump with caution."
+                           % (_pct(a["atm_iv"]), a["dte"], _pct(b["atm_iv"]), b["dte"]))
+            else:
+                out.append("At-the-money IV steps up from %s at %d days to %s at %d days, which usually means a scheduled event (often another earnings report) falls between those dates."
+                           % (_pct(a["atm_iv"]), a["dte"], _pct(b["atm_iv"]), b["dte"]))
+        if e_iso and t[0]["date"] > e_iso:
+            out.append("The earnings report on %s comes before every expiry shown, so all of these prices include it." % _day(e_iso))
+        if not steps:
+            a, b = t[0], t[-1]
+            if a["atm_iv"] > b["atm_iv"] * 1.03:
+                out.append("Near-term options cost more than long-dated ones (%s at %d days vs %s at %d). The market is pricing something soon, such as an event, or is stressed."
+                           % (_pct(a["atm_iv"]), a["dte"], _pct(b["atm_iv"]), b["dte"]))
+            elif a["atm_iv"] < b["atm_iv"] * 0.97:
+                out.append("Normal shape: longer-dated options cost a bit more (%s at %d days, %s at %d)."
+                           % (_pct(a["atm_iv"]), a["dte"], _pct(b["atm_iv"]), b["dte"]))
+            else:
+                out.append("Flat across time (%s at %d days, %s at %d)." % (_pct(a["atm_iv"]), a["dte"], _pct(b["atm_iv"]), b["dte"]))
+    sk = [r for r in term if r.get("skew25") is not None]
+    if sk:
+        near = min(sk, key=lambda r: abs(r["dte"] - 30))
+        v = near["skew25"]
+        if v > 0.5:
+            out.append("Downside puts cost %.1f vol points more than matching upside calls at %d days. That is the usual price of crash protection. It describes what options cost; it is not, by itself, a reason to sell puts."
+                       % (v, near["dte"]))
+        elif v < -0.5:
+            out.append("Upside calls are priced above matching puts at %d days (%.1f vol points), which is unusual for a stock or index." % (near["dte"], abs(v)))
+        else:
+            out.append("Puts and calls are priced about the same at %d days (little skew)." % near["dte"])
+        last = sk[-1]
+        if last["dte"] >= 120 and last["dte"] != near["dte"] and last["skew25"] < -0.25 and v > 0.5:
+            out.append("At %d days calls are priced above puts (%.1f), the reverse of the near-term pattern. That can reflect demand for long-dated calls or just thin quotes."
+                       % (last["dte"], last["skew25"]))
+    return out
+
+
 def build_surface(client, ticker, spot=None, today=None):
     """Fetch and assemble the surface. Returns a dict; on failure {"error": "plain sentence"}."""
     today = today or datetime.date.today()
@@ -171,7 +236,12 @@ def build_surface(client, ticker, spot=None, today=None):
         d, dte = item
         return client.greeks_by_strike(ticker, d)
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        ef = ex.submit(client.next_earnings_date, ticker, today)
         fetched = list(ex.map(one, exps))
+        try:
+            nxt = ef.result()
+        except Exception:
+            nxt = None
     if not any(fetched):
         return {"error": client.error_summary() or "Unusual Whales returned no strike data."}
 
@@ -201,8 +271,11 @@ def build_surface(client, ticker, spot=None, today=None):
                      "skew25": None if skew is None else round(100 * skew, 2)})
     if len(z) < 3:
         return {"error": "Too few expiries had enough strikes to draw a surface."}
+    earnings = None
+    if nxt and 0 <= (nxt["date"] - today).days <= dtes[-1]:
+        earnings = {"date": nxt["date"].isoformat(), "dte": (nxt["date"] - today).days, "confirmed": bool(nxt["confirmed"])}
     return {
-        "ticker": ticker, "spot": round(spot, 2),
+        "ticker": ticker, "spot": round(spot, 2), "earnings": earnings, "reading": reading_lines(term, earnings),
         "moneyness": [round(g, 4) for g in grid], "dte": dtes, "expiry": dates, "iv": z,
         "term": term, "skipped_expiries": len(exps) - len(z),
         "as_of": today.isoformat(),

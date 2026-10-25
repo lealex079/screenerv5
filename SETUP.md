@@ -64,6 +64,8 @@ With `ENABLE_UW` on, UW also replaces some inputs, not just adds lines:
 
 If a call fails, that name falls back to the old Yahoo-based values and the report still sends.
 
+**3D IV surface (web app).** With `ENABLE_UW` on, each card gets an "IV surface (3D)" button. It calls UW's `expiry-breakdown` and `greeks` endpoints (about ten requests, cached for 15 minutes per ticker), builds a strike-by-expiry surface from out-of-the-money options, and draws it with a vendored plotly build served from `/api/scan?lib=plotly` (no external CDN). It needs a UW plan that includes those endpoints; a 403 shows as a plain message in the panel. It only describes what options cost and does not change any score. Tests: `python3 tests/test_iv_surface.py`.
+
 ## 2. Confirm the model string is still current
 
 `pipeline.py` hardcodes `claude-opus-4-8`. Model IDs change; a stale one 404s the

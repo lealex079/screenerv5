@@ -148,4 +148,43 @@ with urllib.request.urlopen(base + "/api/scan?lib=plotly") as resp:      # clien
 html = urllib.request.urlopen(base + "/").read().decode()
 assert "IV-SURFACE-BEGIN" in html and "addSurfaceButton(ticker, price)" in html and "'<div id=\"surf-'+d.ticker" in html
 
+# 9. event-aware reading (AAPL-like term structure from the live check)
+def T(rows):
+    return [{"dte": d, "date": (TODAY + dtm.timedelta(days=d)).isoformat(), "atm_iv": iv, "skew25": sk} for d, iv, sk in rows]
+aapl = T([(5, 22.1, 2.1), (12, 31.4, 3.4), (19, 28.9, 4.0), (33, 26.2, 3.1), (40, 25.5, 3.2), (54, 25.7, 2.5), (82, 25.0, 1.9), (117, 27.5, 1.3), (173, 26.6, 0.3), (235, 29.2, -0.5)])
+ed = (TODAY + dtm.timedelta(days=8)).isoformat()
+lines = S.reading_lines(aapl, {"date": ed, "dte": 8, "confirmed": True})
+txt = " ".join(lines)
+assert "Normal shape" not in txt, "an earnings hump must not be called normal"
+assert lines[0].startswith("Earnings bump") and "22.1%" in lines[0] and "31.4%" in lines[0], lines[0]
+m = float(lines[0].split("move of about ")[1].split("%")[0]); assert 3.5 < m < 4.6, m   # ~4%, matches UW's +/-3.9%
+assert "includes the report" in lines[0] or "include the report" in lines[0]
+assert any("rises from 25.0%" in l or "steps up from 25.0%" in l for l in lines), lines
+assert any("thinly quoted" in l for l in lines), "long-end bump gets a caution"
+assert "not, by itself, a reason to sell puts" in txt and "pays that extra" not in txt
+assert any("calls are priced above puts" in l for l in lines), "inverted long-dated skew is noted"
+# without a known earnings date the step is still flagged, generically
+g = " ".join(S.reading_lines(aapl, None)); assert "scheduled event" in g and "Normal shape" not in g
+# plain upward curve with no steps is called normal; unconfirmed date is labelled
+assert "Normal shape" in " ".join(S.reading_lines(T([(10, 20.0, 1.0), (30, 21.0, 1.0), (60, 22.0, 1.0), (120, 23.0, 1.0)]), None))
+assert "not yet confirmed" in S.reading_lines(aapl, {"date": ed, "dte": 8, "confirmed": False})[0]
+# earnings before the first expiry: every expiry includes it
+b4 = S.reading_lines(T([(5, 30.0, 1.0), (30, 28.0, 1.0), (60, 27.0, 1.0)]), {"date": (TODAY + dtm.timedelta(days=2)).isoformat(), "dte": 2, "confirmed": True})
+assert any("before every expiry" in l for l in b4), b4
+
+# 10. build_surface carries earnings + reading; thin far-out strikes are hidden at short expiries
+def with_earn(req, timeout=0):
+    if "/api/earnings/" in req.full_url:
+        return Resp(json.dumps({"data": [{"report_date": (TODAY + dtm.timedelta(days=20)).isoformat(), "source": "confirmed"}]}).encode())
+    return opener(req, timeout)
+o = S.build_surface(UWClient(KEY, with_earn), "TEST", spot=SPOT, today=TODAY)
+assert o["earnings"] and o["earnings"]["dte"] == 20 and o["earnings"]["confirmed"] and isinstance(o["reading"], list) and o["reading"], o.get("earnings")
+assert S.build_surface(UWClient(KEY, opener), "TEST", spot=SPOT, today=TODAY)["earnings"] is None      # earnings lookup failing must not break the surface
+first, last = o["iv"][0], o["iv"][-1]
+cov = lambda r: sum(v is not None for v in r)
+assert cov(first) < cov(last), (cov(first), cov(last))        # short expiries are narrower (cone shape), not spiked wings
+assert all(dl is None or dl >= S.MIN_ABS_DELTA for _, _, dl in S.otm_smile(greeks_rows(9), SPOT))
+html2 = urllib.request.urlopen(base + "/").read().decode()
+assert "j.earnings" in html2 and "cmin:" in html2 and "j.reading" in html2
+
 print("IV surface tests: all passed")

@@ -2025,32 +2025,14 @@ async function toggleSurface(ticker, price, btn) {
     body.innerHTML = '<div class="options-warn">Could not draw the surface: ' + surfEsc(e.message) + '</div>';
   }
 }
-function surfReading(j) {
-  const out = [];
-  const t = j.term.filter(function(r) { return r.atm_iv != null; });
-  if (t.length >= 2) {
-    const a = t[0], b = t[t.length - 1];
-    const f = function(v) { return v.toFixed(1) + '%'; };
-    if (a.atm_iv > b.atm_iv * 1.03) out.push('Near-term options cost more than long-dated ones (' + f(a.atm_iv) + ' at ' + a.dte + ' days vs ' + f(b.atm_iv) + ' at ' + b.dte + '). The market is pricing something soon, such as earnings or an event, or is stressed.');
-    else if (a.atm_iv < b.atm_iv * 0.97) out.push('Normal shape: longer-dated options cost a bit more (' + f(a.atm_iv) + ' at ' + a.dte + ' days, ' + f(b.atm_iv) + ' at ' + b.dte + ').');
-    else out.push('Flat across time (' + f(a.atm_iv) + ' at ' + a.dte + ' days, ' + f(b.atm_iv) + ' at ' + b.dte + ').');
-  }
-  const sk = j.term.filter(function(r) { return r.skew25 != null; });
-  if (sk.length) {
-    const near = sk.reduce(function(m, r) { return Math.abs(r.dte - 30) < Math.abs(m.dte - 30) ? r : m; });
-    if (near.skew25 > 0.5) out.push('Downside puts are priced ' + near.skew25.toFixed(1) + ' vol points above matching upside calls at ' + near.dte + ' days. Selling puts pays that extra, because buyers are paying up for protection.');
-    else if (near.skew25 < -0.5) out.push('Upside calls are priced above matching puts at ' + near.dte + ' days (' + Math.abs(near.skew25).toFixed(1) + ' vol points), which is unusual for a stock or index.');
-    else out.push('Puts and calls are priced about the same at ' + near.dte + ' days (little skew).');
-  }
-  return out;
-}
+function surfReading(j) { return (j.reading || []).slice(); }
 function drawSurface(body, j) {
   body.innerHTML = '';
   const box = document.createElement('div'); box.className = 'surf-box';
   const title = document.createElement('div'); title.className = 'uw-title'; title.textContent = 'Implied volatility surface (Unusual Whales)';
   box.appendChild(title);
   const cap = document.createElement('div'); cap.className = 'uw-sub';
-  cap.textContent = 'How much movement options price in, by strike and time to expiry. Left side is puts (below the stock price), right side is calls. Drag to rotate, scroll to zoom, hover for values.';
+  cap.textContent = 'How much movement options price in, by strike and time to expiry. Left side is puts (below the stock price), right side is calls. Drag to rotate, scroll to zoom, hover for values. Strikes with almost no chance of finishing in the money are hidden, so near expiries look narrower on purpose.';
   box.appendChild(cap);
   const plot = document.createElement('div'); plot.className = 'surf-plot'; box.appendChild(plot);
   const xs = j.moneyness.map(function(m) { return Math.round(m * 1000) / 10; });
@@ -2059,8 +2041,11 @@ function drawSurface(body, j) {
       return v == null ? '' : 'Strike about $' + (j.spot * j.moneyness[k]).toFixed(2) + ' (' + xs[k] + '% of price)<br>' + j.dte[i] + ' days, expires ' + j.expiry[i] + '<br>Implied vol ' + v.toFixed(1) + '%';
     });
   });
+  const flat = [].concat.apply([], j.iv).filter(function(v) { return v != null; }).sort(function(a, b) { return a - b; });
+  const q = function(p) { return flat[Math.min(flat.length - 1, Math.max(0, Math.round(p * (flat.length - 1))))]; };
   const surface = {
     type: 'surface', x: xs, y: j.dte, z: j.iv, text: text, hoverinfo: 'text', connectgaps: false, colorscale: 'Viridis',
+    cmin: flat.length ? q(0.03) : undefined, cmax: flat.length ? q(0.97) : undefined,
     colorbar: { title: { text: 'IV %' }, len: 0.6, thickness: 12, tickfont: { color: '#94a3b8' }, titlefont: { color: '#94a3b8' } },
     contours: { z: { show: true, usecolormap: true, highlightcolor: '#ffffff', project: { z: false } } },
     lighting: { ambient: 0.85, diffuse: 0.5 }
@@ -2073,6 +2058,16 @@ function drawSurface(body, j) {
     line: { color: '#f8fafc', width: 5 }, marker: { size: 3, color: '#f8fafc' }, hoverinfo: 'text',
     text: atm.map(function(r) { return 'At the money, ' + r.dte + ' days: ' + r.atm_iv.toFixed(1) + '%'; })
   });
+  if (j.earnings && flat.length && j.dte.length && j.earnings.dte >= j.dte[0] && j.earnings.dte <= j.dte[j.dte.length - 1]) {
+    const zf = Math.floor(flat[0]);
+    const xe = [xs[0], xs[xs.length - 1]];
+    traces.push({
+      type: 'scatter3d', mode: 'lines+text', name: 'Earnings', showlegend: false,
+      x: xe, y: [j.earnings.dte, j.earnings.dte], z: [zf, zf],
+      line: { color: '#f59e0b', width: 6 }, text: ['', 'Earnings ' + j.earnings.date], textposition: 'top center', textfont: { color: '#f59e0b', size: 11 },
+      hoverinfo: 'text', hovertext: ['Earnings ' + j.earnings.date + (j.earnings.confirmed ? '' : ' (not confirmed)'), 'Earnings ' + j.earnings.date]
+    });
+  }
   const ax = function(t) { return { title: { text: t }, color: '#94a3b8', gridcolor: '#1e2a35', backgroundcolor: '#0f1419', showbackground: true, zerolinecolor: '#1e2a35' }; };
   const eye0 = { x: 1.6, y: -1.7, z: 0.9 };
   const layout = {

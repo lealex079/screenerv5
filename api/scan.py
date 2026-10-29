@@ -579,6 +579,12 @@ MIN_OPTION_OI = 5
 # was still marked optimal and quoted as the trade.
 OPTIMAL_DELTA = 0.20
 OPTIMAL_DELTA_TOL = 0.08
+# A starred "optimal" contract must also be liquid enough to trade (AAPL Dec 4 $330
+# was starred with 103 open interest next to a 10,000-OI strike), and deep in-the-money
+# contracts are dropped outright: their quotes sit at or under intrinsic value, so the
+# IV computed from them is junk (AAPL $295 call showed 48% IV beside 28% neighbours).
+OPTIMAL_MIN_OI = 250
+DEEP_ITM_DELTA = 0.85
 
 # Stricter floors when the equity session is closed. Yahoo blanks most quotes
 # then, and what Unusual Whales fills in can be a stale last-session mark on
@@ -605,7 +611,10 @@ def pick_optimal(contracts):
     """The contract nearest the target delta, or None if none is close enough."""
     if not contracts:
         return None
-    best = min(contracts, key=lambda x: abs(x["delta"] - OPTIMAL_DELTA))
+    liquid = [c for c in contracts if c.get("openInterest", OPTIMAL_MIN_OI) >= OPTIMAL_MIN_OI]
+    if not liquid:
+        return None
+    best = min(liquid, key=lambda x: abs(x["delta"] - OPTIMAL_DELTA))
     return best if abs(best["delta"] - OPTIMAL_DELTA) <= OPTIMAL_DELTA_TOL else None
 
 
@@ -716,6 +725,8 @@ def fetch_options(ticker, ctx=None):
             if delta is None:
                 return None
             delta_abs = abs(delta)
+            if delta_abs > DEEP_ITM_DELTA:
+                return _drop("deep_itm")
 
             theta = bs_theta(spot, strike, dte_days, iv, is_put=is_put)
             ann_yield = (bid / strike) * (365 / dte_days) * 100 if strike > 0 and dte_days > 0 else 0
@@ -934,7 +945,7 @@ def fetch_options(ticker, ctx=None):
             key=lambda x: -x['total_oi']
         )[:3]
 
-        # Flag unusual concentration: top strike > 15% of chain OI
+        # Flag unusual concentration: top strike > 15% of the 27-45 DTE window OI
         concentration_flag = (
             len(ranked) > 0 and
             total_chain_oi > 0 and
@@ -2770,7 +2781,7 @@ function renderLiqIVHV(data){
     out += '<span class="mini-badge" style="border-color:'+c+';color:'+c+'">Liquidity '+L.grade+' '+L.score+'</span>';
     if(L.median_spread_pct!=null) out+='<span class="mini-badge-dim">spread '+L.median_spread_pct+'%</span>';
     if(L.avg_volume) out+='<span class="mini-badge-dim">avg vol '+(L.avg_volume/1e6).toFixed(1)+'M</span>';
-    if(L.total_chain_oi) out+='<span class="mini-badge-dim">chain OI '+(L.total_chain_oi/1e3).toFixed(0)+'k</span>';
+    if(L.total_chain_oi) out+='<span class="mini-badge-dim">window OI '+(L.total_chain_oi/1e3).toFixed(0)+'k</span>';
   }
   if(data.iv_hv!=null){
     const r=data.iv_hv;
@@ -2873,7 +2884,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
                 (be.length === 1 ? be[0].exp
                                  : 'mostly ' + be[0].exp + ' (' + be[0].oi.toLocaleString() + ' OI)') : '';
               return 'Unusual OI concentration detected — top strike holds >' + t.pct_of_chain.toFixed(0) +
-                     '% of chain' + where + '. Potential whale positioning.';
+                     '% of the 27-45 DTE window\'s open interest' + where + '. Potential whale positioning.';
             })()
           : 'No unusual OI concentration. Normal distribution across strikes.') +
       '</div>' +
@@ -2902,10 +2913,10 @@ function buildOptionsTabs(data, crashScore, ticker) {
         '<span style="color:#475569"> — ' + pcLabel + '</span>' +
       '</div>' +
       '<table class="opts-table">' +
-        '<thead><tr><th>Strike</th><th>Expiration</th><th style="text-align:right">Total OI</th><th style="text-align:right">% Chain</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th></tr></thead>' +
+        '<thead><tr><th>Strike</th><th>Expiration</th><th style="text-align:right">Total OI</th><th style="text-align:right">% of window</th><th style="text-align:right">Call OI</th><th style="text-align:right">Put OI</th></tr></thead>' +
         '<tbody>' + topRows + '</tbody>' +
       '</table>' +
-      '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of chain OI — unusual concentration (within 27–45 DTE window)</div>' +
+      '<div style="font-size:10px;color:#334155;margin-top:4px;margin-bottom:8px">▲ = >15% of the 27–45 DTE window OI — unusual concentration</div>' +
       (function(){
         const exps = data.all_exp_oi || [];
         if (!exps.length) return '';
@@ -3125,6 +3136,7 @@ function formatForClaude(d) {
       if (_optD.atm_iv != null && _optD.hv30 != null) {
         L.push('  ATM IV ' + _optD.atm_iv.toFixed(1) + '% vs 30d HV ' + _optD.hv30.toFixed(1) + '%');
       }
+      if (d.earnings_in_window) L.push('  Earnings fall inside the options window and inflate this ratio. See the Unusual Whales section below for the reading with the earnings move removed.');
     }
     // Vol rank (HV percentile) — primary premium driver
     if (_optD.vol_rank != null) {
@@ -3142,7 +3154,7 @@ function formatForClaude(d) {
       L.push('LIQUIDITY SCORE: ' + lq.score.toFixed(0) + '/100 (grade ' + lq.grade + ')');
       const bits = [];
       if (lq.avg_volume != null) bits.push('avg vol ' + (lq.avg_volume/1e6).toFixed(1) + 'M');
-      if (lq.total_chain_oi != null) bits.push('chain OI ' + lq.total_chain_oi.toLocaleString());
+      if (lq.total_chain_oi != null) bits.push('27-45 DTE OI ' + lq.total_chain_oi.toLocaleString());
       if (lq.median_spread_pct != null) bits.push('median spread ' + lq.median_spread_pct.toFixed(1) + '%');
       if (lq.median_spread_width != null) bits.push('$' + lq.median_spread_width.toFixed(2) + ' wide');
       if (bits.length) L.push('  ' + bits.join(' | '));
@@ -3180,7 +3192,7 @@ function formatForClaude(d) {
         const expStr = !be.length ? 'expiration n/a'
           : (be.length === 1 ? be[0].exp
              : be.map(function(e){ return e.exp + ' ' + e.oi.toLocaleString(); }).join(' / '));
-        L.push('    $' + s.strike.toFixed(0) + ' [' + expStr + ']: ' + s.total_oi.toLocaleString() + ' total OI (' + s.pct_of_chain.toFixed(1) + '% of chain) — calls: ' + s.call_oi.toLocaleString() + ', puts: ' + s.put_oi.toLocaleString());
+        L.push('    $' + s.strike.toFixed(0) + ' [' + expStr + ']: ' + s.total_oi.toLocaleString() + ' total OI (' + s.pct_of_chain.toFixed(1) + '% of 27-45 DTE window OI) — calls: ' + s.call_oi.toLocaleString() + ', puts: ' + s.put_oi.toLocaleString());
       });
     }
     // Options chain

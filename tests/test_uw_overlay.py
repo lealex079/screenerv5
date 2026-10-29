@@ -199,14 +199,16 @@ os.environ.pop("UW_FILL_QUOTES")
 lab = lambda d: d.strftime("%b %-d, %Y")
 rows_ = [{"exp": lab(D(30)), "dte": 30, "put_oi": 0, "call_oi": 0, "total_oi": 0, "pc_oi_ratio": None, "in_window": True},
          {"exp": lab(D(50)), "dte": 50, "put_oi": 0, "call_oi": 0, "total_oi": 0, "pc_oi_ratio": None, "in_window": False},
-         {"exp": lab(D(80)), "dte": 80, "put_oi": 40, "call_oi": 10, "total_oi": 50, "pc_oi_ratio": 4.0, "in_window": False}]
+         {"exp": lab(D(80)), "dte": 80, "put_oi": 40, "call_oi": 10, "total_oi": 50, "pc_oi_ratio": 4.0, "in_window": False},
+         {"exp": lab(D(90)), "dte": 90, "put_oi": 12, "call_oi": 0, "total_oi": 12, "pc_oi_ratio": None, "in_window": False}]
 meta = [{"exp": lab(D(30)), "put_oi": 600, "call_oi": 300}]
 uw = [{"expires": D(30).isoformat() + "T00:00:00.000Z", "open_interest": "950"}, {"expires": D(50).isoformat(), "open_interest": 700},
-      {"expires": D(80).isoformat(), "open_interest": 9999}, {"expires": "bad", "open_interest": 1}]
+      {"expires": D(80).isoformat(), "open_interest": 60}, {"expires": D(90).isoformat(), "open_interest": 5000}, {"expires": "bad", "open_interest": 1}]
 scan.fill_oi_from_uw(rows_, uw, meta)
 assert rows_[0]["put_oi"] == 600 and rows_[0]["call_oi"] == 300 and rows_[0]["total_oi"] == 950 and rows_[0]["pc_oi_ratio"] == 2.0, rows_[0]   # split kept: window contracts cover >= 90%
 assert rows_[1]["total_oi"] == 700 and rows_[1]["put_oi"] is None and rows_[1]["pc_oi_ratio"] is None, rows_[1]                                # split unknown, total from UW
-assert rows_[2]["total_oi"] == 50, "Yahoo values that are not zero are never overwritten"
+assert rows_[2]["total_oi"] == 50 and rows_[2]["put_oi"] == 40, "Yahoo values at least half of UW's total are kept"
+assert rows_[3]["total_oi"] == 5000 and rows_[3]["put_oi"] is None, "a partial Yahoo figure (12 of 5,000) is replaced by UW's total"
 r_ = [{"exp": lab(D(30)), "dte": 30, "put_oi": 0, "call_oi": 0, "total_oi": 0, "pc_oi_ratio": None}]
 scan.fill_oi_from_uw(r_, uw, [{"exp": lab(D(30)), "put_oi": 100, "call_oi": 50}]); assert r_[0]["put_oi"] is None and r_[0]["total_oi"] == 950   # window covers only 16%
 scan.fill_oi_from_uw(r_, None, None)                                                                                                            # no UW data: nothing changes, no error
@@ -221,6 +223,7 @@ BREAKDOWN = [{"expires": e1.isoformat() + "T00:00:00.000Z", "open_interest": "12
 r = scan.fetch_options("RTX")
 oi = {x["exp"]: x for x in r["all_exp_oi"]}
 assert oi[lab(e1)]["total_oi"] == 1200 and oi[lab(e2)]["total_oi"] == 4000 and r["full_chain_oi"]["total_chain_oi"] == 5200, r["all_exp_oi"]
+assert r["full_chain_oi"]["total_put_oi"] is None and r["full_chain_oi"]["pc_oi_ratio"] is None, "split unknown for some expirations: whole-chain put/call withheld"
 os.environ["UW_FILL_QUOTES"] = "0"; r = scan.fetch_options("RTX"); assert r["full_chain_oi"] is None, "UW off: Yahoo zeros stay zeros"
 os.environ.pop("UW_FILL_QUOTES"); BREAKDOWN = []
 

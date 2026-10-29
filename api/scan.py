@@ -1077,9 +1077,9 @@ def fetch_options(ticker, ctx=None):
                 "in_window": 27 <= _dte <= 45,
             })
         all_exp_oi.sort(key=lambda x: x["dte"])
-        # Yahoo reports zero OI for many expirations outside market hours. Where
-        # it does, take UW's per-expiry total (one extra call, only when needed).
-        if any(x["total_oi"] == 0 for x in all_exp_oi):
+        # Yahoo reports zero or partial OI for many expirations outside market
+        # hours. Where it does, take UW's per-expiry total (one extra call).
+        if all_exp_oi:
             try:
                 _uwc = _uw_client_or_none() if (
                     _os.environ.get("UW_FILL_QUOTES", "1") != "0" and _UW_TICKER_RE.match(ticker.upper())) else None
@@ -1087,15 +1087,18 @@ def fetch_options(ticker, ctx=None):
                     fill_oi_from_uw(all_exp_oi, _uwc.expiry_breakdown(ticker.upper()), expirations_meta)
             except Exception:
                 pass
+        _split_ok = all(x["put_oi"] is not None for x in all_exp_oi)
         _fp = sum(x["put_oi"] or 0 for x in all_exp_oi)
         _fc = sum(x["call_oi"] or 0 for x in all_exp_oi)
         _ft = sum(x["total_oi"] for x in all_exp_oi)
         if _ft > 0:
+            # With some put/call splits unknown, whole-chain put, call and P/C
+            # would not add up to the total, so they are withheld (None).
             full_chain_oi = {
-                "total_put_oi": _fp,
-                "total_call_oi": _fc,
+                "total_put_oi": _fp if _split_ok else None,
+                "total_call_oi": _fc if _split_ok else None,
                 "total_chain_oi": _ft,
-                "pc_oi_ratio": round(_fp / _fc, 3) if _fc > 0 else None,
+                "pc_oi_ratio": round(_fp / _fc, 3) if (_split_ok and _fc > 0) else None,
                 "n_expirations": len(all_exp_oi),
             }
     except Exception:
@@ -2911,10 +2914,12 @@ function buildOptionsTabs(data, crashScore, ticker) {
       (data.full_chain_oi
         ? '<div style="font-size:11px;margin-bottom:4px">' +
             '<span style="color:#64748b">Entire chain (' + data.full_chain_oi.n_expirations + ' expirations): </span>' +
-            '<span class="c-red">' + (data.full_chain_oi.total_put_oi || 0).toLocaleString() + ' put OI</span>' +
-            '<span style="color:#475569"> + </span>' +
-            '<span class="c-green">' + (data.full_chain_oi.total_call_oi || 0).toLocaleString() + ' call OI</span>' +
-            '<span style="color:#475569"> = </span>' +
+            (data.full_chain_oi.total_put_oi == null
+              ? '<span style="color:#94a3b8">put/call split not available for every expiration</span><span style="color:#475569"> · </span>'
+              : '<span class="c-red">' + data.full_chain_oi.total_put_oi.toLocaleString() + ' put OI</span>' +
+                '<span style="color:#475569"> + </span>' +
+                '<span class="c-green">' + data.full_chain_oi.total_call_oi.toLocaleString() + ' call OI</span>' +
+                '<span style="color:#475569"> = </span>') +
             '<span style="color:#e2e8f0">' + (data.full_chain_oi.total_chain_oi || 0).toLocaleString() + ' total</span>' +
             '<span style="color:#475569"> · P/C ' + (data.full_chain_oi.pc_oi_ratio != null ? data.full_chain_oi.pc_oi_ratio.toFixed(2) : 'N/A') + '</span>' +
           '</div>'
@@ -3186,7 +3191,7 @@ function formatForClaude(d) {
       L.push('OPEN INTEREST ANALYSIS');
       if (_optD.full_chain_oi) {
         const fc = _optD.full_chain_oi;
-        L.push('  Entire chain (' + fc.n_expirations + ' expirations): ' + (fc.total_chain_oi || 0).toLocaleString() + ' total OI (puts: ' + (fc.total_put_oi||0).toLocaleString() + ', calls: ' + (fc.total_call_oi||0).toLocaleString() + ', P/C ' + (fc.pc_oi_ratio != null ? fc.pc_oi_ratio.toFixed(2) : 'N/A') + ')');
+        L.push('  Entire chain (' + fc.n_expirations + ' expirations): ' + (fc.total_chain_oi || 0).toLocaleString() + ' total OI' + (fc.total_put_oi == null ? ' (put/call split not available for every expiration)' : ' (puts: ' + fc.total_put_oi.toLocaleString() + ', calls: ' + fc.total_call_oi.toLocaleString() + ', P/C ' + (fc.pc_oi_ratio != null ? fc.pc_oi_ratio.toFixed(2) : 'N/A') + ')'));
       }
       L.push('  27-45 DTE window OI: ' + (uoi.total_chain_oi || 0).toLocaleString() + ' (puts: ' + uoi.total_put_oi.toLocaleString() + ', calls: ' + uoi.total_call_oi.toLocaleString() + ')');
       L.push('  Put/Call OI ratio (window): ' + (uoi.pc_oi_ratio != null ? uoi.pc_oi_ratio.toFixed(2) : 'N/A'));
@@ -3356,7 +3361,7 @@ def fill_oi_from_uw(exp_rows, uw_rows, meta):
     """
     Pure (edits exp_rows in place). exp_rows: whole-chain OI per expiration built
     from Yahoo, as [{exp, put_oi, call_oi, total_oi, pc_oi_ratio, ...}]. Where
-    Yahoo gave zero, use UW's expiry-breakdown total. Keep a put/call split only
+    Yahoo gave zero or under half of UW's expiry-breakdown total, use UW's total. Keep a put/call split only
     when the window contracts in `meta` account for at least 90% of that total;
     otherwise the split is unknown (None) and the total still stands.
     """
@@ -3372,7 +3377,10 @@ def fill_oi_from_uw(exp_rows, uw_rows, meta):
     by_meta = {m["exp"]: m for m in (meta or [])}
     for x in exp_rows:
         n = totals.get(x["exp"])
-        if x["total_oi"] > 0 or not n:
+        # Yahoo's after-hours OI is zero or partial (a liquid monthly showing
+        # 12 contracts, or all puts and no calls). Trust UW when Yahoo shows
+        # less than half of UW's total.
+        if not n or x["total_oi"] >= 0.5 * n:
             continue
         m = by_meta.get(x["exp"])
         if m and (m["put_oi"] + m["call_oi"]) >= 0.9 * n:

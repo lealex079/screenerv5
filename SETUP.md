@@ -53,7 +53,7 @@ Adds large-trader activity and IV rank lines to the pinned-name cards. UW's numb
 | `ENABLE_UW` | variable | `1` turns it on. Default `0`. Leave off until a manual run shows the lines render. |
 | `UW_FLOW_MIN_PREMIUM` | variable | Smallest options trade, in dollars of premium, counted as large. Default `10000`. |
 | `UW_DARKPOOL_MIN_PREMIUM` | variable | Smallest dark pool print, in dollars, reported. Default `250000`. |
-| `UW_FILL_QUOTES` | variable | Default on when `ENABLE_UW` is 1. `0` stops filling blank after-hours option quotes from UW. |
+| `UW_FILL_QUOTES` | variable | Default on when `ENABLE_UW` is 1. `0` turns off Unusual Whales as the default chain source (bid, ask, IV and open interest) and uses Yahoo only. |
 | `UW_SHOW_13F` | variable | `1` adds the quarterly institutional ownership line. Default off (data is up to 45 days old). |
 
 With `ENABLE_UW` on, UW also replaces some inputs, not just adds lines:

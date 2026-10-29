@@ -88,6 +88,8 @@ def opener(req, timeout=0):
         return Resp(json.dumps({"data": rows(13)}).encode())
     if "volatility/stats" in u:
         return Resp(json.dumps({"data": {"iv_rank": "61", "iv": "0.30", "iv_low": "0.19", "iv_high": "0.39", "rv": "0.13"}}).encode())
+    if "expiry-breakdown" in u:
+        return Resp(json.dumps({"data": BREAKDOWN}).encode())
     if "option-contracts" in u:
         return Resp(json.dumps({"data": CONTRACTS(u)}).encode())
     raise urllib.error.HTTPError(u, 404, "nf", {}, io.BytesIO(b"{}"))
@@ -96,6 +98,7 @@ def contract(sym, bid, ask, iv="0.30", oi=900, vol=40):
     return {"option_symbol": sym, "nbbo_bid": str(bid), "nbbo_ask": str(ask), "implied_volatility": iv,
             "open_interest": oi, "volume": vol}
 CONTRACTS = lambda u: []
+BREAKDOWN = []
 scan._uw_client_factory = lambda: UWClient(KEY, opener)
 
 os.environ["ENABLE_UW"] = "0"
@@ -168,4 +171,57 @@ os.environ.pop("UW_FILL_QUOTES")
 scan._uw_client_factory = boom; scan._UW_STATS_CACHE.clear()
 r3 = scan.fetch_options("RTX")
 assert r3["iv_rank_source"] in (None, "proxy") and r3["quotes_filled"] == 0
+
+# ---- 6. UW is the default source: it beats a real Yahoo quote; junk Yahoo IV is dropped ----
+class MixedTicker(FakeTicker):
+    def option_chain(self, e):
+        rows_ = [{"contractSymbol": sym(e1, "P", 170), "strike": 170.0, "bid": 1.0, "ask": 1.2, "impliedVolatility": 0.02, "openInterest": 50, "volume": 3},   # UW has a quote
+                 {"contractSymbol": sym(e1, "P", 175), "strike": 175.0, "bid": 2.0, "ask": 2.2, "impliedVolatility": 0.02, "openInterest": 500, "volume": 3},  # UW has none, junk IV
+                 {"contractSymbol": sym(e1, "P", 160), "strike": 160.0, "bid": 0.8, "ask": 0.9, "impliedVolatility": 0.40, "openInterest": 500, "volume": 3}]  # UW has none, real IV
+        return types.SimpleNamespace(puts=pd.DataFrame(rows_), calls=pd.DataFrame([{"contractSymbol": sym(e1, "C", 190), "strike": 190.0, "bid": 0.0, "ask": 0.0, "impliedVolatility": 0.0, "openInterest": 5, "volume": 0}]))
+scan.yf.Ticker = MixedTicker
+os.environ["ENABLE_UW"] = "1"; os.environ.pop("UW_FILL_QUOTES", None)
+scan._uw_client_factory = lambda: UWClient(KEY, opener); scan._UW_STATS_CACHE.clear()
+r = scan.fetch_options("RTX")
+by = {p["strike"]: p for p in r["puts"]}
+assert by[170.0]["bid"] == 1.9 and by[170.0]["ask"] == 2.1 and by[170.0]["impliedVolatility"] == 0.30 and by[170.0]["openInterest"] == 900, by.get(170.0)   # UW wins over Yahoo
+assert by[170.0]["delta"] > 0.05, "delta must come from the real IV, not print 0.00"
+assert 175.0 not in by, "Yahoo IV of 0.02 is junk and must be dropped when UW has no quote"
+assert by[160.0]["bid"] == 0.8 and by[160.0]["impliedVolatility"] == 0.40, "Yahoo is the fallback when UW has no quote and Yahoo is sane"
+assert r["quotes_filled"] == 1
+
+os.environ["UW_FILL_QUOTES"] = "0"
+r = scan.fetch_options("RTX"); by = {p["strike"]: p for p in r["puts"]}
+assert r["quotes_filled"] == 0 and 170.0 not in by and 175.0 not in by and by[160.0]["bid"] == 0.8, "UW_FILL_QUOTES=0 is Yahoo only; its junk IV (0.02) is dropped, not shown as delta 0.00"
+os.environ.pop("UW_FILL_QUOTES")
+
+# ---- 7. whole-chain OI: fill Yahoo zeros from UW's expiry breakdown ---------------
+lab = lambda d: d.strftime("%b %-d, %Y")
+rows_ = [{"exp": lab(D(30)), "dte": 30, "put_oi": 0, "call_oi": 0, "total_oi": 0, "pc_oi_ratio": None, "in_window": True},
+         {"exp": lab(D(50)), "dte": 50, "put_oi": 0, "call_oi": 0, "total_oi": 0, "pc_oi_ratio": None, "in_window": False},
+         {"exp": lab(D(80)), "dte": 80, "put_oi": 40, "call_oi": 10, "total_oi": 50, "pc_oi_ratio": 4.0, "in_window": False}]
+meta = [{"exp": lab(D(30)), "put_oi": 600, "call_oi": 300}]
+uw = [{"expires": D(30).isoformat() + "T00:00:00.000Z", "open_interest": "950"}, {"expires": D(50).isoformat(), "open_interest": 700},
+      {"expires": D(80).isoformat(), "open_interest": 9999}, {"expires": "bad", "open_interest": 1}]
+scan.fill_oi_from_uw(rows_, uw, meta)
+assert rows_[0]["put_oi"] == 600 and rows_[0]["call_oi"] == 300 and rows_[0]["total_oi"] == 950 and rows_[0]["pc_oi_ratio"] == 2.0, rows_[0]   # split kept: window contracts cover >= 90%
+assert rows_[1]["total_oi"] == 700 and rows_[1]["put_oi"] is None and rows_[1]["pc_oi_ratio"] is None, rows_[1]                                # split unknown, total from UW
+assert rows_[2]["total_oi"] == 50, "Yahoo values that are not zero are never overwritten"
+r_ = [{"exp": lab(D(30)), "dte": 30, "put_oi": 0, "call_oi": 0, "total_oi": 0, "pc_oi_ratio": None}]
+scan.fill_oi_from_uw(r_, uw, [{"exp": lab(D(30)), "put_oi": 100, "call_oi": 50}]); assert r_[0]["put_oi"] is None and r_[0]["total_oi"] == 950   # window covers only 16%
+scan.fill_oi_from_uw(r_, None, None)                                                                                                            # no UW data: nothing changes, no error
+
+class ZeroOITicker(FakeTicker):
+    options = (e1.isoformat(), e2.isoformat())
+    def option_chain(self, e):
+        d = pd.DataFrame([{"contractSymbol": sym(e1, "P", 170), "strike": 170.0, "bid": 0.0, "ask": 0.0, "impliedVolatility": 0.0, "openInterest": 0, "volume": 0}])
+        return types.SimpleNamespace(puts=d, calls=d.assign(contractSymbol=sym(e1, "C", 190), strike=190.0))
+scan.yf.Ticker = ZeroOITicker
+BREAKDOWN = [{"expires": e1.isoformat() + "T00:00:00.000Z", "open_interest": "1200"}, {"expires": e2.isoformat() + "T00:00:00.000Z", "open_interest": "4000"}]
+r = scan.fetch_options("RTX")
+oi = {x["exp"]: x for x in r["all_exp_oi"]}
+assert oi[lab(e1)]["total_oi"] == 1200 and oi[lab(e2)]["total_oi"] == 4000 and r["full_chain_oi"]["total_chain_oi"] == 5200, r["all_exp_oi"]
+os.environ["UW_FILL_QUOTES"] = "0"; r = scan.fetch_options("RTX"); assert r["full_chain_oi"] is None, "UW off: Yahoo zeros stay zeros"
+os.environ.pop("UW_FILL_QUOTES"); BREAKDOWN = []
+
 print("uw overlay tests: all passed")

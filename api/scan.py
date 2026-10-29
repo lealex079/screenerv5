@@ -573,6 +573,10 @@ def compute_liquidity(all_puts, all_calls, spot, total_chain_oi, avg_volume, tod
 MIN_OPTION_BID = 0.10
 MIN_OPTION_OI = 5
 
+# Annualized IV below this is not a real option IV (equities sit above ~10%).
+# Yahoo returns values like 0.00001-0.13 after hours; treat them as missing.
+MIN_PLAUSIBLE_IV = 0.05
+
 # A contract is only "optimal" if its delta is actually near the 0.20 target.
 # Without this, when only deep out-of-the-money strikes survive the quote
 # filter, the one closest to 0.20 (e.g. MU $310 on an $879 stock, delta 0.0)
@@ -650,11 +654,10 @@ def fetch_options(ticker, ctx=None):
     except Exception:
         spot = 0
 
-    # Yahoo blanks bid/ask (and often open interest) outside market hours, which
-    # used to leave the weekend screen with no usable contracts. When that
-    # happens, quotes are filled from Unusual Whales NBBO, loaded once and only if
-    # needed. Off with UW_FILL_QUOTES=0 or ENABLE_UW=0; Yahoo is used whenever it
-    # has a real quote.
+    # Unusual Whales is the default source for bid, ask, IV and open interest
+    # (Yahoo blanks or garbles all four outside market hours). The UW chain is
+    # loaded once per call. Yahoo is the fallback for any contract UW has no real
+    # quote for. Off with UW_FILL_QUOTES=0 or ENABLE_UW=0, which restores Yahoo only.
     _fill = {"quotes": None, "filled": 0}
     _closed = not market_session_open()
     _drops = {}      # why contracts were rejected, so a closed-market run that
@@ -696,18 +699,23 @@ def fetch_options(ticker, ctx=None):
             vol = int(vol_raw) if vol_raw and not np.isnan(float(vol_raw)) else 0
             sym = str(getattr(row, "contractSymbol", ""))
 
-            if bid <= 0 and ask <= 0:
-                # Truly blank quote (not merely a small real bid): ask UW.
-                _q = uw_quote_for(sym)
-                if _q:
-                    bid, ask = _q["bid"], _q["ask"]
-                    if iv <= 0:
-                        iv = _q["iv"]
-                    if _q["oi"] > oi:      # Yahoo's OI is unreliable when its quote is blank
-                        oi = _q["oi"]
-                    if not vol:
-                        vol = _q["volume"]
-                    _fill["filled"] += 1
+            # Unusual Whales is the default source. When it has a real two-sided
+            # market for this contract its bid, ask, IV and open interest win;
+            # Yahoo is the fallback (UW off or down, contract missing, quote too wide).
+            _q = uw_quote_for(sym)
+            if _q:
+                bid, ask = _q["bid"], _q["ask"]
+                if _q["iv"] > 0:
+                    iv = _q["iv"]
+                if _q["oi"] > 0:
+                    oi = _q["oi"]
+                if _q["volume"] > 0:
+                    vol = _q["volume"]
+                _fill["filled"] += 1
+            if 0 < iv < MIN_PLAUSIBLE_IV:
+                # Yahoo returns junk IV (0.00001 to 0.13) outside market hours; a
+                # delta computed from it prints 0.00 on every strike.
+                iv = 0
 
             if bid < MIN_OPTION_BID:
                 return _drop("bid_below_min")
@@ -1069,7 +1077,19 @@ def fetch_options(ticker, ctx=None):
                 "in_window": 27 <= _dte <= 45,
             })
         all_exp_oi.sort(key=lambda x: x["dte"])
-        _ft = _fp + _fc
+        # Yahoo reports zero OI for many expirations outside market hours. Where
+        # it does, take UW's per-expiry total (one extra call, only when needed).
+        if any(x["total_oi"] == 0 for x in all_exp_oi):
+            try:
+                _uwc = _uw_client_or_none() if (
+                    _os.environ.get("UW_FILL_QUOTES", "1") != "0" and _UW_TICKER_RE.match(ticker.upper())) else None
+                if _uwc:
+                    fill_oi_from_uw(all_exp_oi, _uwc.expiry_breakdown(ticker.upper()), expirations_meta)
+            except Exception:
+                pass
+        _fp = sum(x["put_oi"] or 0 for x in all_exp_oi)
+        _fc = sum(x["call_oi"] or 0 for x in all_exp_oi)
+        _ft = sum(x["total_oi"] for x in all_exp_oi)
         if _ft > 0:
             full_chain_oi = {
                 "total_put_oi": _fp,
@@ -2926,8 +2946,8 @@ function buildOptionsTabs(data, crashScore, ticker) {
           const mark = e.in_window ? ' <span style="color:#22c55e">•</span>' : '';
           expRows += '<tr>' +
             '<td class="c-muted">' + e.exp + ' (' + e.dte + 'd)' + mark + '</td>' +
-            '<td style="text-align:right" class="c-green">' + (e.call_oi||0).toLocaleString() + '</td>' +
-            '<td style="text-align:right" class="c-red">' + (e.put_oi||0).toLocaleString() + '</td>' +
+            '<td style="text-align:right" class="c-green">' + (e.call_oi == null ? 'n/a' : e.call_oi.toLocaleString()) + '</td>' +
+            '<td style="text-align:right" class="c-red">' + (e.put_oi == null ? 'n/a' : e.put_oi.toLocaleString()) + '</td>' +
             '<td style="text-align:right;color:#e2e8f0">' + (e.total_oi||0).toLocaleString() + '</td>' +
             '<td style="text-align:right" class="c-muted">' + r + '</td>' +
           '</tr>';
@@ -2948,7 +2968,7 @@ function buildOptionsTabs(data, crashScore, ticker) {
   let quoteBanner = '';
   if (data.quotes_filled > 0) {
     quoteBanner = '<div style="background:#0f1419;border:1px solid #1e2a35;border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#94a3b8">' +
-      'Quotes: ' + data.quotes_filled + ' contracts had blank Yahoo prices (market closed), so their bid and ask come from Unusual Whales NBBO.</div>';
+      'Quotes: ' + data.quotes_filled + ' contracts priced from Unusual Whales (bid, ask, IV and open interest). Any contract Unusual Whales had no real quote for uses Yahoo.</div>';
   }
   return quoteBanner + renderLiqIVHV(data) + imBanner + skewBanner + ivRankBanner + unusualOISection +
     '<div class="opts-tabs" id="exp-tabs-'+ticker+'">' + expTabs + '</div>' +
@@ -3183,7 +3203,7 @@ function formatForClaude(d) {
         L.push('  OI by expiration (entire chain; * = 27-45 DTE tradeable window):');
         _allExp.forEach(function(e) {
           const r = e.pc_oi_ratio != null ? e.pc_oi_ratio.toFixed(2) : 'N/A';
-          L.push('    ' + (e.in_window ? '* ' : '  ') + e.exp + ' (' + e.dte + 'd): call OI ' + (e.call_oi||0).toLocaleString() + ', put OI ' + (e.put_oi||0).toLocaleString() + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
+          L.push('    ' + (e.in_window ? '* ' : '  ') + e.exp + ' (' + e.dte + 'd): call OI ' + (e.call_oi == null ? 'n/a' : e.call_oi.toLocaleString()) + ', put OI ' + (e.put_oi == null ? 'n/a' : e.put_oi.toLocaleString()) + ', total ' + (e.total_oi||0).toLocaleString() + ' (P/C ' + r + ')');
         });
       }
       L.push('  Top 3 strikes by OI (with the expiration(s) holding that OI):');
@@ -3330,6 +3350,39 @@ def uw_usable_quote(row):
         return None
     return {"bid": bid, "ask": ask, "iv": f("implied_volatility") or 0.0,
             "oi": int(f("open_interest") or 0), "volume": int(f("volume") or 0)}
+
+
+def fill_oi_from_uw(exp_rows, uw_rows, meta):
+    """
+    Pure (edits exp_rows in place). exp_rows: whole-chain OI per expiration built
+    from Yahoo, as [{exp, put_oi, call_oi, total_oi, pc_oi_ratio, ...}]. Where
+    Yahoo gave zero, use UW's expiry-breakdown total. Keep a put/call split only
+    when the window contracts in `meta` account for at least 90% of that total;
+    otherwise the split is unknown (None) and the total still stands.
+    """
+    totals = {}
+    for r in uw_rows or []:
+        try:
+            d = _dt.date.fromisoformat(str(r.get("expires"))[:10])
+            n = int(float(r.get("open_interest") or 0))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            totals[d.strftime("%b %-d, %Y")] = n
+    by_meta = {m["exp"]: m for m in (meta or [])}
+    for x in exp_rows:
+        n = totals.get(x["exp"])
+        if x["total_oi"] > 0 or not n:
+            continue
+        m = by_meta.get(x["exp"])
+        if m and (m["put_oi"] + m["call_oi"]) >= 0.9 * n:
+            x["put_oi"], x["call_oi"] = m["put_oi"], m["call_oi"]
+            x["total_oi"] = max(n, m["put_oi"] + m["call_oi"])
+            x["pc_oi_ratio"] = round(m["put_oi"] / m["call_oi"], 3) if m["call_oi"] > 0 else None
+        else:
+            x["put_oi"] = x["call_oi"] = x["pc_oi_ratio"] = None
+            x["total_oi"] = n
+        x["oi_source"] = "uw"
 
 
 def uw_chain_quotes(client, ticker, expiries):

@@ -55,6 +55,48 @@ def next_earnings_from_rows(rows, today=None):
 
 
 
+_OI_DATE_KEYS = ("expiry", "expires", "expiration", "expiry_date", "date")
+_OI_CALL_KEYS = ("call_oi", "calls_oi", "call_open_interest", "callOi")
+_OI_PUT_KEYS = ("put_oi", "puts_oi", "put_open_interest", "putOi")
+
+
+def _first_num(row, keys):
+    for k in keys:
+        v = num(row.get(k))
+        if v is not None:
+            return v
+    return None
+
+
+def oi_split_by_expiry(rows):
+    """Pure. oi-per-expiry rows -> {"YYYY-MM-DD": (put_oi, call_oi)}. Rows without a date, put or call are skipped."""
+    out = {}
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        d = next((str(r[k])[:10] for k in _OI_DATE_KEYS if r.get(k)), None)
+        pu, ca = _first_num(r, _OI_PUT_KEYS), _first_num(r, _OI_CALL_KEYS)
+        if d and pu is not None and ca is not None:
+            out[d] = (int(pu), int(ca))
+    return out
+
+
+def oi_split_from_strikes(rows):
+    """Pure. oi-per-strike rows for one expiry -> (put_oi, call_oi) summed over strikes, or None if no usable row."""
+    pu = ca = 0.0
+    n = 0
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        p_, c_ = _first_num(r, _OI_PUT_KEYS), _first_num(r, _OI_CALL_KEYS)
+        if p_ is None and c_ is None:
+            continue
+        pu += p_ or 0.0
+        ca += c_ or 0.0
+        n += 1
+    return (int(pu), int(ca)) if n else None
+
+
 class UWClient:
     def __init__(self, key=None, opener=None):
         self.errors = {}        # request path -> HTTP status or exception name, for diagnostics (never the key or URL query)
@@ -243,6 +285,18 @@ class UWClient:
         """Per-strike call/put implied vol and delta for one expiry (a date). Rows, or None on failure.
         Docs: GET /api/stock/{ticker}/greeks?expiry=. Values arrive as strings; use num()."""
         j = self._get("/api/stock/%s/greeks" % ticker, {"expiry": expiry.isoformat()})
+        return self._rows(j) if j is not None else None
+
+    def oi_per_expiry(self, ticker):
+        """Open interest rolled up by expiry. UNVERIFIED fields: expects a date plus call and put OI
+        per row (see oi_split_by_expiry). Rows, or None on failure."""
+        j = self._get("/api/stock/%s/oi-per-expiry" % ticker)
+        return self._rows(j) if j is not None else None
+
+    def oi_per_strike(self, ticker, expiry):
+        """Call and put open interest per strike for one expiry (a date). UNVERIFIED fields: expects
+        strike, call_oi, put_oi (see oi_split_from_strikes). Rows, or None on failure."""
+        j = self._get("/api/stock/%s/oi-per-strike" % ticker, {"expiry": expiry.isoformat()})
         return self._rows(j) if j is not None else None
 
     def option_contracts(self, ticker, expiry=None):

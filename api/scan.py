@@ -1085,6 +1085,7 @@ def fetch_options(ticker, ctx=None):
                     _os.environ.get("UW_FILL_QUOTES", "1") != "0" and _UW_TICKER_RE.match(ticker.upper())) else None
                 if _uwc:
                     fill_oi_from_uw(all_exp_oi, _uwc.expiry_breakdown(ticker.upper()), expirations_meta)
+                    fill_oi_split_from_uw(all_exp_oi, _uwc, ticker.upper())
             except Exception:
                 pass
         _split_ok = all(x["put_oi"] is not None for x in all_exp_oi)
@@ -3391,6 +3392,64 @@ def fill_oi_from_uw(exp_rows, uw_rows, meta):
             x["put_oi"] = x["call_oi"] = x["pc_oi_ratio"] = None
             x["total_oi"] = n
         x["oi_source"] = "uw"
+
+
+def fill_oi_split_from_uw(exp_rows, client, ticker):
+    """
+    Edits exp_rows in place; returns how many expirations got a put/call split.
+    For rows whose total is known but whose put/call split is not, ask UW:
+    first one oi-per-expiry call, then oi-per-strike for each still-missing
+    expiry (4 at a time). A split is accepted only if put + call lands within
+    15% of the row's total, so a partial or misread response leaves the split
+    as n/a instead of showing wrong numbers. Never raises.
+    """
+    try:
+        need = [x for x in exp_rows if x.get("put_oi") is None and (x.get("total_oi") or 0) > 0]
+        if not need or client is None:
+            return 0
+        uwc, _ = _uw_modules()
+        got = 0
+
+        def accept(x, pc):
+            nonlocal got
+            if not pc:
+                return False
+            p_, c_ = pc
+            t = x["total_oi"]
+            if t <= 0 or not (0.85 * t <= p_ + c_ <= 1.15 * t):
+                return False
+            x["put_oi"], x["call_oi"], x["total_oi"] = p_, c_, p_ + c_
+            x["pc_oi_ratio"] = round(p_ / c_, 3) if c_ > 0 else None
+            x["oi_source"] = "uw"
+            got += 1
+            return True
+
+        by_exp = {}
+        try:
+            by_exp = uwc.oi_split_by_expiry(client.oi_per_expiry(ticker))
+        except Exception:
+            by_exp = {}
+        for x in need:
+            try:
+                d = _dt.datetime.strptime(x["exp"], "%b %d, %Y").date().isoformat()
+            except ValueError:
+                continue
+            accept(x, by_exp.get(d))
+        rest = [x for x in need if x.get("put_oi") is None]
+        if rest and _os.environ.get("UW_OI_SPLIT", "1") != "0":
+            def one(x):
+                try:
+                    d = _dt.datetime.strptime(x["exp"], "%b %d, %Y").date()
+                    return x, uwc.oi_split_from_strikes(client.oi_per_strike(ticker, d))
+                except Exception:
+                    return x, None
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                for x, pc in ex.map(one, rest):
+                    accept(x, pc)
+        return got
+    except Exception:
+        return 0
 
 
 def uw_chain_quotes(client, ticker, expiries):

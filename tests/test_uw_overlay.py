@@ -88,6 +88,10 @@ def opener(req, timeout=0):
         return Resp(json.dumps({"data": rows(13)}).encode())
     if "volatility/stats" in u:
         return Resp(json.dumps({"data": {"iv_rank": "61", "iv": "0.30", "iv_low": "0.19", "iv_high": "0.39", "rv": "0.13"}}).encode())
+    if "oi-per-expiry" in u:
+        return Resp(json.dumps({"data": OI_PER_EXPIRY}).encode())
+    if "oi-per-strike" in u:
+        return Resp(json.dumps({"data": OI_PER_STRIKE(u)}).encode())
     if "expiry-breakdown" in u:
         return Resp(json.dumps({"data": BREAKDOWN}).encode())
     if "option-contracts" in u:
@@ -99,6 +103,8 @@ def contract(sym, bid, ask, iv="0.30", oi=900, vol=40):
             "open_interest": oi, "volume": vol}
 CONTRACTS = lambda u: []
 BREAKDOWN = []
+OI_PER_EXPIRY = []
+OI_PER_STRIKE = lambda u: []
 scan._uw_client_factory = lambda: UWClient(KEY, opener)
 
 os.environ["ENABLE_UW"] = "0"
@@ -226,5 +232,55 @@ assert oi[lab(e1)]["total_oi"] == 1200 and oi[lab(e2)]["total_oi"] == 4000 and r
 assert r["full_chain_oi"]["total_put_oi"] is None and r["full_chain_oi"]["pc_oi_ratio"] is None, "split unknown for some expirations: whole-chain put/call withheld"
 os.environ["UW_FILL_QUOTES"] = "0"; r = scan.fetch_options("RTX"); assert r["full_chain_oi"] is None, "UW off: Yahoo zeros stay zeros"
 os.environ.pop("UW_FILL_QUOTES"); BREAKDOWN = []
+
+
+# ---- 8. call/put OI split for every expiration -------------------------------------
+import uw_client as _uwc
+assert _uwc.oi_split_by_expiry([{"expiry": "2026-11-27T00:00:00Z", "call_oi": "700", "put_oi": 300}, {"date": "2026-12-04", "calls_oi": 5, "puts_oi": 1},
+                                {"expiry": "2026-12-11", "call_oi": 9}, {"call_oi": 1, "put_oi": 1}, "junk", None]) == {"2026-11-27": (300, 700), "2026-12-04": (1, 5)}
+assert _uwc.oi_split_from_strikes([{"strike": 90, "call_oi": "400", "put_oi": "100"}, {"strike": 95, "call_oi": 50}, {"strike": 99}, "x"]) == (100, 450)
+assert _uwc.oi_split_from_strikes([]) is None and _uwc.oi_split_from_strikes([{"strike": 1}]) is None
+
+class StubOI:
+    def __init__(self, per_exp=None, per_strike=None): self.per_exp, self.per_strike, self.strike_calls = per_exp, per_strike or {}, []
+    def oi_per_expiry(self, t): return self.per_exp
+    def oi_per_strike(self, t, d):
+        self.strike_calls.append(d); return self.per_strike.get(d)
+mk_row = lambda d, tot: {"exp": lab(d), "dte": (d - today).days, "put_oi": None, "call_oi": None, "total_oi": tot, "pc_oi_ratio": None, "in_window": False}
+
+# route 1: one oi-per-expiry call gives every split
+rows_ = [mk_row(D(30), 1000), mk_row(D(60), 5000)]
+st = StubOI(per_exp=[{"expiry": D(30).isoformat(), "call_oi": 600, "put_oi": 400}, {"expiry": D(60).isoformat(), "call_oi": 1000, "put_oi": 4000}])
+assert scan.fill_oi_split_from_uw(rows_, st, "RTX") == 2 and st.strike_calls == []
+assert (rows_[0]["put_oi"], rows_[0]["call_oi"], rows_[0]["pc_oi_ratio"]) == (400, 600, 0.667) and rows_[1]["pc_oi_ratio"] == 4.0, rows_
+
+# route 2: oi-per-expiry fails, oi-per-strike per expiry
+rows_ = [mk_row(D(30), 1000), mk_row(D(60), 5000)]
+st = StubOI(per_exp=None, per_strike={D(30): [{"strike": 90, "call_oi": 500, "put_oi": 100}, {"strike": 95, "call_oi": 100, "put_oi": 300}],
+                                       D(60): [{"strike": 90, "call_oi": 1000, "put_oi": 4000}]})
+assert scan.fill_oi_split_from_uw(rows_, st, "RTX") == 2 and len(st.strike_calls) == 2 and rows_[0]["put_oi"] == 400 and rows_[1]["call_oi"] == 1000
+
+# a response that does not add up to the known total is rejected, not shown
+rows_ = [mk_row(D(30), 1000)]
+assert scan.fill_oi_split_from_uw(rows_, StubOI(per_exp=[{"expiry": D(30).isoformat(), "call_oi": 50, "put_oi": 20}]), "RTX") == 0 and rows_[0]["put_oi"] is None
+rows_ = [mk_row(D(30), 1000)]
+assert scan.fill_oi_split_from_uw(rows_, StubOI(), "RTX") == 0 and rows_[0]["put_oi"] is None and rows_[0]["total_oi"] == 1000
+assert scan.fill_oi_split_from_uw([mk_row(D(30), 1000)], None, "RTX") == 0                      # no client: no-op
+r_keep = [dict(mk_row(D(30), 1000), put_oi=1, call_oi=2)]
+assert scan.fill_oi_split_from_uw(r_keep, StubOI(per_exp=[{"expiry": D(30).isoformat(), "call_oi": 600, "put_oi": 400}]), "RTX") == 0 and r_keep[0]["put_oi"] == 1   # known splits untouched
+os.environ["UW_OI_SPLIT"] = "0"
+rows_ = [mk_row(D(30), 1000)]; st = StubOI(per_strike={D(30): [{"strike": 1, "call_oi": 600, "put_oi": 400}]})
+assert scan.fill_oi_split_from_uw(rows_, st, "RTX") == 0 and st.strike_calls == [], "UW_OI_SPLIT=0 skips the per-strike route"
+os.environ.pop("UW_OI_SPLIT")
+
+# end to end through fetch_options (real UWClient, fake HTTP)
+scan.yf.Ticker = ZeroOITicker
+BREAKDOWN = [{"expires": e1.isoformat(), "open_interest": "1200"}, {"expires": e2.isoformat(), "open_interest": "4000"}]
+OI_PER_EXPIRY = [{"expiry": e1.isoformat(), "call_oi": "700", "put_oi": "500"}, {"expiry": e2.isoformat(), "call_oi": "1000", "put_oi": "3000"}]
+r = scan.fetch_options("RTX")
+oi = {x["exp"]: x for x in r["all_exp_oi"]}
+assert oi[lab(e1)]["put_oi"] == 500 and oi[lab(e2)]["call_oi"] == 1000 and r["full_chain_oi"]["total_put_oi"] == 3500 and r["full_chain_oi"]["total_call_oi"] == 1700, r["full_chain_oi"]
+assert r["full_chain_oi"]["total_chain_oi"] == 5200 and r["full_chain_oi"]["pc_oi_ratio"] == round(3500 / 1700, 3)
+OI_PER_EXPIRY = []; BREAKDOWN = []
 
 print("uw overlay tests: all passed")

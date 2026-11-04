@@ -65,6 +65,11 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
     rows, cmeta = _pull_contracts(client, params, log)
     df = contracts_frame(rows)
     df = df[df.type == "put"].reset_index(drop=True)
+    n_raw = len(df)
+    df = df.drop_duplicates("option_symbol").reset_index(drop=True)      # the screener's order shifts while paging: the same contract can come back on two pages
+    dups = n_raw - len(df)
+    if dups:
+        log(f"dropped {dups} duplicate contract rows from paging")
     log(f"contracts: {len(df):,} puts on {df.ticker.nunique():,} tickers ({cmeta['pages']} pages, complete={cmeta['complete']})")
     if df.empty:
         raise IngestError("the screener returned no puts for these filters")
@@ -134,7 +139,7 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
     meta = {"snapshot_date": snap.date().isoformat(), "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "rows": int(len(df)), "rows_quoted": quoted, "rows_without_quotes": int(len(df) - quoted), "tickers": int(df.ticker.nunique()),
             "pages": cmeta["pages"], "screener_complete": bool(cmeta["complete"]), "sliced_by_sector": cmeta.get("sliced_by_sector", 0),
-            "quote_calls": int(len(groups)), "quote_calls_failed": int(failed), "elapsed_s": round(time.time() - t_start, 1), "quote_calls_capped": int(capped), "capped_chains": capped_t[:30], "quote_extras_ok": bool(getattr(client, "_extras_ok", True)), "coverage": cov, "quote_pairs_skipped": int(skipped), "uw_requests": client.requests_made,
+            "quote_calls": int(len(groups)), "duplicates_dropped": int(dups), "quote_calls_failed": int(failed), "elapsed_s": round(time.time() - t_start, 1), "quote_calls_capped": int(capped), "capped_chains": capped_t[:30], "quote_extras_ok": bool(getattr(client, "_extras_ok", True)), "coverage": cov, "quote_pairs_skipped": int(skipped), "uw_requests": client.requests_made,
             "delta_from_uw": int((df.delta_src == "uw").sum()), "delta_from_model": int((df.delta_src == "bs").sum()), "is_sample": bool(is_sample),
             "filters": {"min_dte": min_dte, "max_dte": max_dte, "delta": list(delta), "min_open_interest": min_oi}}
     if out_dir:                                     # out_dir=None: in-memory only (the live web endpoint)

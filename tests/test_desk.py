@@ -139,6 +139,14 @@ check("yesterday's after-close report still counts as pending", bool(post.earnin
 from desk.ingest import market_today
 check("market_today is a date within a day of UTC today", abs((market_today() - datetime.datetime.now(datetime.timezone.utc).date()).days) <= 1)
 
+# 13 duplicate contract from paging is dropped, and counted
+cd = ScreenerClient(key="x", opener=mock_opener(seed=7, today=TODAY)); _orig = cd.screener_contracts
+def _dup(params, max_pages=40):
+    rows, mt = _orig(params, max_pages); return rows + [rows[0]], mt
+cd.screener_contracts = _dup
+dfd, md = ingest(cd, out_dir=tempfile.mkdtemp(), is_sample=True, log=lambda *a: None)
+check("duplicate paging row dropped and counted", dfd.option_symbol.is_unique and md["duplicates_dropped"] == 1, str(md["duplicates_dropped"]))
+
 # 10 generated page in sync with web/index.html
 _root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if os.path.exists(os.path.join(_root, "desk_page.py")):

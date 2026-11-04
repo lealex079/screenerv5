@@ -40,7 +40,8 @@ def add_derived(df, snapshot_date, crash_drop=CRASH_DROP, credit_from="bid"):
     quoted = (d.bid > 0) & (d.ask >= d.bid)                         # two-sided quote; anything else cannot be screened on yield
     d["credit"] = np.where(quoted, d[credit_from] if credit_from in ("bid", "mid") else d.mid, np.nan)
     d["spread_pct"] = np.where(quoted & (d.mid > 0), (d.ask - d.bid) / d.mid, np.nan)
-    d["premium_usd"] = d.credit * 100
+    d["premium_usd"] = d.credit * 100                                # cash collected per contract at the bid
+    d["cash_required"] = d.strike * 100                               # cash secured per contract if assigned
     d["premium_yield"] = d.credit / d.strike
     d["annualized_yield"] = d.premium_yield * 365 / d.dte.replace(0, np.nan)
     d["otm_pct"] = (d.stock_price - d.strike) / d.stock_price

@@ -11,6 +11,7 @@ Rows with no two-sided quote are kept in the parquet but cannot pass a yield fil
 """
 import datetime
 import json
+import time
 import os
 from concurrent.futures import ThreadPoolExecutor
 
@@ -47,6 +48,7 @@ def _pull_contracts(client, params, log):
 
 def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, delta=(-0.40, -0.05), min_oi=50, max_enrich=3000,
            workers=8, min_approx_yield=0.03, is_sample=False, log=print):
+    t_start = time.time()
     snap = pd.Timestamp(snapshot_date or datetime.date.today()).normalize()
     params = {"type": "put", "min_dte": min_dte, "max_dte": max_dte, "min_delta": str(delta[0]), "max_delta": str(delta[1]), "min_open_interest": min_oi}
     if snapshot_date:
@@ -109,9 +111,9 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
     df = df[df.option_symbol.notna()].reset_index(drop=True)
 
     # one-day change in mid, if yesterday's snapshot exists
-    prev_path = os.path.join(out_dir, "latest.parquet")
+    prev_path = os.path.join(out_dir, "latest.parquet") if out_dir else None
     df["premium_chg_1d"] = np.nan
-    if os.path.exists(prev_path):
+    if prev_path and os.path.exists(prev_path):
         try:
             pv = pd.read_parquet(prev_path, columns=["option_symbol", "mid"]).drop_duplicates("option_symbol").set_index("option_symbol").mid
             pm = df.option_symbol.map(pv)
@@ -123,12 +125,13 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
     meta = {"snapshot_date": snap.date().isoformat(), "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "rows": int(len(df)), "rows_quoted": quoted, "rows_without_quotes": int(len(df) - quoted), "tickers": int(df.ticker.nunique()),
             "pages": cmeta["pages"], "screener_complete": bool(cmeta["complete"]), "sliced_by_sector": cmeta.get("sliced_by_sector", 0),
-            "quote_calls": int(len(groups)), "quote_calls_failed": int(failed), "quote_calls_capped": int(capped), "capped_chains": capped_t[:30], "quote_extras_ok": bool(getattr(client, "_extras_ok", True)), "coverage": cov, "quote_pairs_skipped": int(skipped), "uw_requests": client.requests_made,
+            "quote_calls": int(len(groups)), "quote_calls_failed": int(failed), "elapsed_s": round(time.time() - t_start, 1), "quote_calls_capped": int(capped), "capped_chains": capped_t[:30], "quote_extras_ok": bool(getattr(client, "_extras_ok", True)), "coverage": cov, "quote_pairs_skipped": int(skipped), "uw_requests": client.requests_made,
             "delta_from_uw": int((df.delta_src == "uw").sum()), "delta_from_model": int((df.delta_src == "bs").sum()), "is_sample": bool(is_sample),
             "filters": {"min_dte": min_dte, "max_dte": max_dte, "delta": list(delta), "min_open_interest": min_oi}}
-    os.makedirs(os.path.join(out_dir, "snapshots"), exist_ok=True)
-    df.to_parquet(os.path.join(out_dir, "snapshots", f"{meta['snapshot_date']}.parquet"), index=False)
-    df.to_parquet(prev_path, index=False)
-    json.dump(meta, open(os.path.join(out_dir, "latest_meta.json"), "w"), indent=1)
+    if out_dir:                                     # out_dir=None: in-memory only (the live web endpoint)
+        os.makedirs(os.path.join(out_dir, "snapshots"), exist_ok=True)
+        df.to_parquet(os.path.join(out_dir, "snapshots", f"{meta['snapshot_date']}.parquet"), index=False)
+        df.to_parquet(prev_path, index=False)
+        json.dump(meta, open(os.path.join(out_dir, "latest_meta.json"), "w"), indent=1)
     log(f"saved {len(df):,} rows ({quoted:,} with a two-sided quote) for {meta['snapshot_date']}; UW requests {client.requests_made}")
     return df, meta

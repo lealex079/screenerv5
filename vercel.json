@@ -1,4 +1,10 @@
 {
+  "functions": {
+    "api/scan.py": {
+      "maxDuration": 60,
+      "includeFiles": "desk/**"
+    }
+  },
   "rewrites": [
     {
       "source": "/(.*)",

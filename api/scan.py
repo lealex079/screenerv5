@@ -3735,6 +3735,42 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        # Put desk live data: password-gated, fails closed when DESK_PASSWORD is not set. Never cached by browsers or crawlers.
+        if params.get("desk_data"):
+            for _p in (_os.path.dirname(_os.path.abspath(__file__)), _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))):
+                if _p not in _sys.path:
+                    _sys.path.append(_p)
+            from desk import live as _live
+            from desk.ingest import IngestError as _IngestError
+            from desk.uw_screener import ScreenerClient as _ScreenerClient
+            _status = _live.check_password(self.headers.get("X-Desk-Password", ""))
+            _code, _body = 200, None
+            if _status == "disabled":
+                _code, _body = 503, {"error": "The live desk is switched off: DESK_PASSWORD is not set on the server."}
+            elif _status == "denied":
+                _time.sleep(1.0)
+                _code, _body = 401, {"error": "Wrong password."}
+            else:
+                _factory = _uw_client_factory or _ScreenerClient
+                try:
+                    _probe = _factory()
+                    if not getattr(_probe, "enabled", True):
+                        _code, _body = 503, {"error": "UW_API_KEY is not set on the server."}
+                    else:
+                        _body, _cached = _live.snapshot_payload(lambda: _probe, force=bool(params.get("refresh")))
+                        _body = dict(_body, cached=_cached)
+                except _IngestError as e:
+                    _code, _body = 502, {"error": "Unusual Whales returned no data: %s" % e}
+                except Exception as e:
+                    _code, _body = 500, {"error": "Could not build the snapshot (%s)." % type(e).__name__}
+            self.send_response(_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Robots-Tag", "noindex")
+            self.end_headers()
+            self.wfile.write(json.dumps(_body).encode())
+            return
+
         # Put desk: the filter-screener page. Code only; it holds no market data (the user loads their own data.json in the browser).
         if params.get("desk"):
             for _p in (_os.path.dirname(_os.path.abspath(__file__)), _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))):

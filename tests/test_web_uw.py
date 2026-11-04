@@ -73,6 +73,11 @@ scan._uw_client_factory = lambda: UWClient(KEY, opener)
 # 5. real HTTP route through the handler
 srv = HTTPServer(("127.0.0.1", 0), scan.handler)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
+# The whole app sits behind the shared password now: send a valid login cookie on every request.
+os.environ["DESK_PASSWORD"] = "test password"
+from desk import auth as _auth
+_op = urllib.request.build_opener(); _op.addheaders = [("Cookie", _auth.COOKIE + "=" + _auth.make_token("test password"))]
+urllib.request.install_opener(_op)
 base = "http://127.0.0.1:%d" % srv.server_port
 j = json.load(urllib.request.urlopen(base + "/api/scan?uw=UNP&price=276.61"))
 assert j["enabled"] and j["ticker"] == "UNP" and j["lines"], j

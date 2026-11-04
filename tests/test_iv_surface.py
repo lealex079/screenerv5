@@ -130,6 +130,11 @@ e = scan.fetch_surface("GE")
 assert e["error"].startswith("Could not build the surface") and KEY not in json.dumps(e) and "http" not in json.dumps(e), e
 scan._uw_client_factory = lambda: UWClient(KEY, opener); scan._SURF_CACHE.clear()
 
+# The whole app sits behind the shared password now: send a valid login cookie on every request.
+os.environ["DESK_PASSWORD"] = "test password"
+from desk import auth as _auth
+_op = urllib.request.build_opener(); _op.addheaders = [("Cookie", _auth.COOKIE + "=" + _auth.make_token("test password"))]
+urllib.request.install_opener(_op)
 srv = HTTPServer(("127.0.0.1", 0), scan.handler)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = "http://127.0.0.1:%d" % srv.server_port

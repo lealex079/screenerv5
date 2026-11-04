@@ -1827,6 +1827,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <div class="header">
     <h1><span class="dot"></span> Screener v5</h1>
     <p>Three-layer validated scanner: fundamentals, trend, crash risk</p>
+    <div style="display:flex;gap:14px;margin-top:6px;font-size:13px"><a href="/" style="color:#e5e7eb;text-decoration:none;border-bottom:2px solid #4ade80;padding-bottom:3px">Ticker scan</a><a href="/?desk=1" style="color:#8b98a5;text-decoration:none">Put desk</a></div>
   </div>
   <div class="input-row">
     <div class="input-wrap">
@@ -3732,6 +3733,18 @@ class handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+
+        # Put desk: the filter-screener page. Code only; it holds no market data (the user loads their own data.json in the browser).
+        if params.get("desk"):
+            for _p in (_os.path.dirname(_os.path.abspath(__file__)), _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))):
+                if _p not in _sys.path:
+                    _sys.path.append(_p)
+            from desk_page import DESK_HTML
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(DESK_HTML.encode())
             return
 
         tickers_raw = params.get("tickers", [""])[0].strip()

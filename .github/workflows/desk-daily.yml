@@ -1,0 +1,49 @@
+name: Desk daily snapshot
+
+# Pulls the Unusual Whales snapshot after the close and exports the filter-tool data.
+# UW data may not be redistributed, so this job REFUSES to run in a public repo.
+# Make the repo private (or move the desk to a private repo) before enabling it.
+on:
+  schedule:
+    # 4 PM Pacific, Mon-Fri. Both UTC times registered; the guard step keeps whichever matches Pacific 16:xx.
+    - cron: "17 23 * * 1-5"   # 4:17 PM PDT
+    - cron: "17 0 * * 2-6"    # 4:17 PM PST (UTC date is one day later)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    if: ${{ github.event.repository.private == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pacific-time guard
+        id: guard
+        run: |
+          H=$(TZ=America/Los_Angeles date +%H)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$H" = "16" ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else echo "go=false" >> "$GITHUB_OUTPUT"; echo "not 4 PM Pacific ($H), skipping"; fi
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.go == 'true'
+        with: { python-version: "3.12", cache: "pip" }
+      - name: Install
+        if: steps.guard.outputs.go == 'true'
+        run: pip install pandas numpy pyarrow
+      - name: Ingest + export
+        if: steps.guard.outputs.go == 'true'
+        env: { UW_API_KEY: "${{ secrets.UW_API_KEY }}" }
+        run: |
+          python -m desk.cli ingest --out desk_out
+          python -m desk.cli web --out desk_out
+      - name: Keep the snapshot for the filter tool (private repo only)
+        if: steps.guard.outputs.go == 'true'
+        run: |
+          mkdir -p desk_site && cp web/index.html desk_site/ && cp desk_out/web/data.json desk_site/
+      - uses: actions/upload-artifact@v4
+        if: steps.guard.outputs.go == 'true'
+        with: { name: desk-site, path: desk_site, retention-days: 14 }
+      - uses: actions/upload-artifact@v4
+        if: steps.guard.outputs.go == 'true'
+        with: { name: desk-latest, path: desk_out/latest.parquet, retention-days: 14 }

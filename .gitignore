@@ -4,3 +4,11 @@ __pycache__/
 .vercel/
 node_modules/
 uw_probe_out/
+
+# Put desk: Unusual Whales-derived data must never be committed (license, public repo)
+out/
+desk_out/
+desk_site/
+*.parquet
+data.json
+uw_probe_report.json

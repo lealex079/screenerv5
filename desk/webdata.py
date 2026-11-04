@@ -9,7 +9,7 @@ import pandas as pd
 
 from desk.screens import load_screens
 
-COLS = ["ticker", "sector", "option_symbol", "expiry", "dte", "strike", "stock_price", "bid", "ask", "credit", "delta", "iv", "iv_rank",
+COLS = ["ticker", "sector", "option_symbol", "expiry", "dte", "strike", "stock_price", "bid", "ask", "credit", "premium_usd", "cash_required", "delta", "iv", "iv_rank",
         "annualized_yield", "premium_yield", "otm_pct", "cushion", "breakeven", "pop_delta", "spread_pct", "open_interest", "volume",
         "marketcap", "days_to_earnings", "earnings_in_life", "crash_loss_pct", "yield_per_crash_loss", "premium_chg_1d", "triage_score",
         "leveraged", "delta_src", "earnings_unknown", "issue_type", "industry", "rsi_14", "sma50_dist", "sma200_dist", "beta", "dividend_yield",

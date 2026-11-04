@@ -121,6 +121,9 @@ check("every screen requires earnings_unknown false", all(any(c["col"] == "earni
 
 check("index options (VIX, SPX) flagged and excluded", bool(_ad(pd.DataFrame([dict(ticker="VIX", option_symbol="VIX261118P00017000", type="put", strike=17.0, expiry=pd.Timestamp("2026-11-18"), stock_price=18.0, bid=.3, ask=.34, iv=.9, delta=-.13, open_interest=5, volume=5, last=.3, sector=None, next_earnings_date=pd.NaT)]), pd.Timestamp(TODAY)).leveraged.iloc[0]))
 
+_m = dict(meta, coverage={"marketcap_coverage": 0.5, "iv_rank_coverage": 1.0}, quote_calls_capped=3)
+check("digest warns on thin coverage and capped quotes", "Data warning" in digest.build(df, _m, [])[0] and "market cap is missing" in digest.build(df, _m, [])[0])
+
 # 10 generated page in sync with web/index.html
 _root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if os.path.exists(os.path.join(_root, "desk_page.py")):

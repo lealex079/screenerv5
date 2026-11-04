@@ -45,6 +45,20 @@ def build(df, meta, runs, n=8, max_per_sector=3, screens=None):
                  f"Delta from UW on {meta.get('delta_from_uw', 0):,} rows, from a Black-Scholes fallback on {meta.get('delta_from_model', 0):,}.</p>")
     if not meta.get("screener_complete", True):
         parts.append("<p style='color:#b45309'><b>Warning:</b> the contract screener was cut off by the page cap, so some contracts may be missing.</p>")
+    cov = meta.get("coverage") or {}
+    warns = []
+    if cov and cov.get("marketcap_coverage", 1) < 0.8:
+        warns.append(f"market cap is missing on {1 - cov['marketcap_coverage']:.0%} of rows, and screens with a market-cap rule drop those rows")
+    if cov and cov.get("iv_rank_coverage", 1) < 0.8:
+        warns.append(f"IV rank is missing on {1 - cov['iv_rank_coverage']:.0%} of rows")
+    if meta.get("quote_calls_capped"):
+        warns.append(f"{meta['quote_calls_capped']} quote responses had exactly 50 or 500 rows, so some strikes may lack quotes")
+    if meta.get("quote_pairs_skipped"):
+        warns.append(f"{meta['quote_pairs_skipped']} (ticker, expiry) pairs were skipped by the quote-call cap")
+    if meta.get("quote_calls_failed"):
+        warns.append(f"{meta['quote_calls_failed']} quote calls failed")
+    for w in warns:
+        parts.append(f"<p style='color:#b45309'><b>Data warning:</b> {w}.</p>")
     for s in sel:
         ranked = apply_screen(df, s)
         book = pick_book(ranked, n=n, max_per_sector=max_per_sector)

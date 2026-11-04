@@ -72,8 +72,9 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
     df = df.drop(columns=["stock_sector", "next_earnings_stock", "stock_close"])
     cov = {"stock_rows": int(len(st)), "iv_rank_coverage": float(df.iv_rank.notna().mean()), "marketcap_coverage": float(df.marketcap.notna().mean()),
            "stock_price_filled": sp_missing - int(df.stock_price.isna().sum()), "stock_price_missing": int(df.stock_price.isna().sum())}
+    miss_t = sorted(df[df.stock_price.isna()].ticker.unique())
     log(f"stock fields: {cov['stock_rows']:,} stocks; iv_rank on {cov['iv_rank_coverage']:.0%} of rows, market cap on {cov['marketcap_coverage']:.0%}; "
-        f"stock_price filled {cov['stock_price_filled']:,}, still missing {cov['stock_price_missing']:,}")
+        f"stock_price filled {cov['stock_price_filled']:,}, still missing {cov['stock_price_missing']:,}" + (f" ({', '.join(miss_t[:10])}{'...' if len(miss_t) > 10 else ''})" if miss_t else ""))
 
     # quotes
     need = df[(df.bid.isna()) | (df.ask.isna()) | (df.iv.isna())]
@@ -82,7 +83,7 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
     groups = (need.groupby(["ticker", "expiry"]).open_interest.max().sort_values(ascending=False).head(max_enrich))
     skipped = need.groupby(["ticker", "expiry"]).ngroups - len(groups)
     log(f"quotes: {need.groupby(['ticker', 'expiry']).ngroups} (ticker, expiry) pairs need them; fetching {len(groups)}" + (f", skipping {skipped} (cap {max_enrich})" if skipped else ""))
-    failed, capped = 0, 0
+    failed, capped, capped_t = 0, 0, []
     if len(groups):
         def fetch(key):
             t, e = key
@@ -95,12 +96,15 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
             if rws is None:
                 failed += 1; continue
             capped += int(cap)
+            if cap:
+                capped_t.append(f"{t} {pd.Timestamp(e):%m-%d} ({len(rws)})")
             for r in rws:
                 if isinstance(r, dict) and r.get("option_symbol"):
                     quote_rows[str(r["option_symbol"]).upper()] = r
         df = apply_quotes(df, quote_rows)
         if capped:
-            log(f"WARNING: {capped} quote responses had exactly 50 or 500 rows, so some strikes may be missing quotes")
+            log(f"WARNING: {capped} quote responses had exactly 50 or 500 rows, so some strikes may be missing quotes: " + ", ".join(capped_t[:12])
+                + f" | extra params (limit=500, option_type=put) accepted: {getattr(client, '_extras_ok', 'n/a')}")
     df = add_score(add_derived(df, snap))
     df = df[df.option_symbol.notna()].reset_index(drop=True)
 
@@ -119,7 +123,7 @@ def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, del
     meta = {"snapshot_date": snap.date().isoformat(), "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "rows": int(len(df)), "rows_quoted": quoted, "rows_without_quotes": int(len(df) - quoted), "tickers": int(df.ticker.nunique()),
             "pages": cmeta["pages"], "screener_complete": bool(cmeta["complete"]), "sliced_by_sector": cmeta.get("sliced_by_sector", 0),
-            "quote_calls": int(len(groups)), "quote_calls_failed": int(failed), "quote_calls_capped": int(capped), "coverage": cov, "quote_pairs_skipped": int(skipped), "uw_requests": client.requests_made,
+            "quote_calls": int(len(groups)), "quote_calls_failed": int(failed), "quote_calls_capped": int(capped), "capped_chains": capped_t[:30], "quote_extras_ok": bool(getattr(client, "_extras_ok", True)), "coverage": cov, "quote_pairs_skipped": int(skipped), "uw_requests": client.requests_made,
             "delta_from_uw": int((df.delta_src == "uw").sum()), "delta_from_model": int((df.delta_src == "bs").sum()), "is_sample": bool(is_sample),
             "filters": {"min_dte": min_dte, "max_dte": max_dte, "delta": list(delta), "min_open_interest": min_oi}}
     os.makedirs(os.path.join(out_dir, "snapshots"), exist_ok=True)

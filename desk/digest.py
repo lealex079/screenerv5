@@ -15,7 +15,7 @@ from desk import history
 from desk.screens import apply_screen, book_stress, load_screens, pick_book, sector_mix
 
 CAVEAT = ("Research note: in our backtests, systematic put-selling returned its equity beta and no measurable alpha, and losses "
-          "cluster in market crashes. The ranking below is a triage order, not a forecast. The stress line assumes every stock "
+          "cluster in market crashes. The ranking above is a triage order, not a forecast. The stress line assumes every stock "
           "gaps down 30% at once.")
 
 

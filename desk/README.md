@@ -45,3 +45,11 @@ Dependencies: pandas, numpy, pyarrow (add pyarrow to requirements.txt if you wan
 
 ## Tests
 `PYTHONPATH=. python tests/test_desk.py` and `PYTHONPATH=. python tests/test_web_equiv.py`
+
+## Live mode in the web app (Put desk tab)
+`/?desk_data=1` pulls a fresh UW snapshot on the server, in memory, and the Put desk tab loads it after a password.
+- Vercel environment variables: `UW_API_KEY` (already set for the app) and `DESK_PASSWORD` (new; if unset the endpoint is OFF and returns 503).
+- `vercel.json` sets `maxDuration: 60` for api/scan.py. A pull makes roughly 900-1,000 UW requests; the snapshot meta records `elapsed_s`. If it ever exceeds the plan's function limit, move the pull to the scheduled workflow.
+- One snapshot is cached per server instance for 20 minutes; Refresh is throttled to once per 90 seconds.
+- Responses are `Cache-Control: no-store` and `X-Robots-Tag: noindex`. The desk page itself contains no market data.
+- The existing ticker-scan overlay already serves UW-derived fields to anyone with the app URL. Check your UW plan's redistribution terms for both, or put the whole app behind a login.

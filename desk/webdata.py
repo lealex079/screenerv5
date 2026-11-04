@@ -16,7 +16,7 @@ COLS = ["ticker", "sector", "option_symbol", "expiry", "dte", "strike", "stock_p
         "days_to_ex_div", "ex_div_in_life", "vrp", "put_call_ratio", "iv30d", "realized_vol", "theta", "vega", "gamma"]
 
 
-def export(df, meta, out_path):
+def payload(df, meta):
     d = df[df.credit.notna()].copy()
     d["expiry"] = pd.to_datetime(d.expiry).dt.strftime("%Y-%m-%d")
     cols = [c for c in COLS if c in d.columns]
@@ -29,7 +29,11 @@ def export(df, meta, out_path):
             data[c] = [None if (v is None or (isinstance(v, float) and not np.isfinite(v))) else round(float(v), 4) for v in s]
         else:
             data[c] = [None if pd.isna(v) else str(v) for v in s]
-    payload = {"meta": meta, "screens": load_screens(), "n": int(len(d)), "cols": cols, "data": data}
+    return {"meta": meta, "screens": load_screens(), "n": int(len(d)), "cols": cols, "data": data}
+
+
+def export(df, meta, out_path):
+    payload_ = payload(df, meta)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    json.dump(payload, open(out_path, "w"), separators=(",", ":"))
+    json.dump(payload_, open(out_path, "w"), separators=(",", ":"))
     return os.path.getsize(out_path)

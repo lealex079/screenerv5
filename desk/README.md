@@ -46,13 +46,16 @@ Dependencies: pandas, numpy, pyarrow (add pyarrow to requirements.txt if you wan
 ## Tests
 `PYTHONPATH=. python tests/test_desk.py` and `PYTHONPATH=. python tests/test_web_equiv.py`
 
-## Live mode in the web app (Put screener tab)
-`/?desk_data=1` pulls a fresh UW snapshot on the server, in memory, and the Put screener tab loads it after a password.
-- Vercel environment variables: `UW_API_KEY` (already set for the app) and `DESK_PASSWORD` (new; if unset the endpoint is OFF and returns 503).
-- `vercel.json` sets `maxDuration: 60` for api/scan.py. A pull makes roughly 900-1,000 UW requests; the snapshot meta records `elapsed_s`. If it ever exceeds the plan's function limit, move the pull to the scheduled workflow.
-- One snapshot is cached per server instance for 20 minutes; Refresh is throttled to once per 90 seconds.
-- Responses are `Cache-Control: no-store` and `X-Robots-Tag: noindex`. The desk page itself contains no market data.
-- The existing ticker-scan overlay already serves UW-derived fields to anyone with the app URL. Check your UW plan's redistribution terms for both, or put the whole app behind a login.
+## Login and live mode in the web app
+The whole app (Ticker scan, Put screener and every `/api/scan` route) sits behind one shared password. A wrong or missing login gets only the login page or a 401; nothing is checked in the browser alone.
+- `DESK_PASSWORD` (Vercel environment variable) is the password. **If it is not set the whole app is off and returns 503**, so set it before deploying this. Changing it logs everyone out.
+- A correct password sets a signed, HttpOnly, SameSite=Lax cookie (Secure on https) that lasts 12 hours. Wrong passwords wait one second, and 10 wrong ones from one address in 15 minutes lock that address out (per server instance, so it slows guessing and does not stop it).
+- The Put screener loads the Unusual Whales snapshot by itself when the tab opens (`/?desk_data=1`, in memory on the server). The "Refresh from UW" button forces a new pull.
+- Vercel environment variables: `UW_API_KEY` and `DESK_PASSWORD`. `vercel.json` sets `maxDuration: 60` for api/scan.py. A pull makes roughly 900-1,000 UW requests; the snapshot meta records `elapsed_s`. If it ever exceeds the plan's function limit, move the pull to the scheduled workflow.
+- One snapshot is cached per server instance for 20 minutes; Refresh is throttled to once per 90 seconds. The first visitor after the cache expires waits 20-40 seconds with a progress timer.
+- Responses are `Cache-Control: no-store` and `X-Robots-Tag: noindex`. The Put screener page itself contains no market data.
+- One shared password means no per-person access and no way to remove one person except changing it for everyone.
+- Tests: `PYTHONPATH=. python tests/test_auth.py` and `tests/test_desk_live.py`.
 
 ## Changes after the first real web run (2026-11-04 CSV)
 - Snapshot date now uses New York time (a UTC server was a day ahead all evening).

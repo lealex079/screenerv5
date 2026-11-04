@@ -3690,10 +3690,86 @@ def fetch_surface(ticker, price=None):
     return out
 
 
+_AUTH_THROTTLE = None
+
+
+def _desk_auth():
+    for _p in (_os.path.dirname(_os.path.abspath(__file__)), _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))):
+        if _p not in _sys.path:
+            _sys.path.append(_p)
+    from desk import auth as _auth
+    return _auth
+
+
 class handler(BaseHTTPRequestHandler):
+    def _reply(self, code, ctype, body, headers=()):
+        data = body if isinstance(body, bytes) else (json.dumps(body) if ctype.startswith("application/json") else body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Robots-Tag", "noindex")
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _who(self):
+        return (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()) or self.client_address[0]
+
+    def _gate(self, params):
+        """One shared password in front of everything. True means the request was answered here (blocked)."""
+        if not _os.environ.get("DESK_PASSWORD"):
+            self._reply(503, "text/html; charset=utf-8", "<p style='font-family:sans-serif'>The app is switched off: DESK_PASSWORD is not set on the server.</p>")
+            return True
+        auth = _desk_auth()
+        if auth.authenticated(self.headers.get("Cookie", ""), _os.environ):
+            return False
+        if any(params.get(k) for k in ("tickers", "options", "chart", "uw", "surface", "desk_data", "lib")):
+            self._reply(401, "application/json", {"error": "Login required."})
+        else:
+            self._reply(200, "text/html; charset=utf-8", auth.login_page(self.path))
+        return True
+
+    def do_POST(self):
+        global _AUTH_THROTTLE
+        params = parse_qs(urlparse(self.path).query)
+        if not params.get("login"):
+            self._reply(404, "application/json", {"error": "Not found."})
+            return
+        if not _os.environ.get("DESK_PASSWORD"):
+            self._reply(503, "text/html; charset=utf-8", "<p style='font-family:sans-serif'>The app is switched off: DESK_PASSWORD is not set on the server.</p>")
+            return
+        auth = _desk_auth()
+        if _AUTH_THROTTLE is None:
+            _AUTH_THROTTLE = auth.Throttle()
+        who = self._who()
+        if _AUTH_THROTTLE.locked(who):
+            self._reply(429, "text/html; charset=utf-8", auth.login_page("/", "Too many wrong passwords. Try again in a few minutes."))
+            return
+        try:
+            n = min(int(self.headers.get("Content-Length") or 0), 4096)
+        except ValueError:
+            n = 0
+        form = parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
+        nxt = auth.safe_next(form.get("next", ["/"])[0])
+        if auth.login(form.get("password", [""])[0], _os.environ) == "ok":
+            _AUTH_THROTTLE.clear(who)
+            secure = self.headers.get("X-Forwarded-Proto", "") == "https"
+            self.send_response(303)
+            self.send_header("Location", nxt)
+            self.send_header("Set-Cookie", auth.set_cookie_header(auth.make_token(_os.environ["DESK_PASSWORD"]), secure))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        _AUTH_THROTTLE.fail(who)
+        _time.sleep(1.0)
+        self._reply(401, "text/html; charset=utf-8", auth.login_page(nxt, "Wrong password."))
+
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        if self._gate(params):
+            return
 
         # Serve the vendored charting library same-origin (no external CDN).
         if params.get("lib", [""])[0] == "lwc":
@@ -3726,7 +3802,7 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # Put desk live data: password-gated, fails closed when DESK_PASSWORD is not set. Never cached by browsers or crawlers.
+        # Put screener live data. The app-wide login gate above has already run. Never cached by browsers or crawlers.
         if params.get("desk_data"):
             for _p in (_os.path.dirname(_os.path.abspath(__file__)), _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))):
                 if _p not in _sys.path:
@@ -3734,26 +3810,19 @@ class handler(BaseHTTPRequestHandler):
             from desk import live as _live
             from desk.ingest import IngestError as _IngestError
             from desk.uw_screener import ScreenerClient as _ScreenerClient
-            _status = _live.check_password(self.headers.get("X-Desk-Password", ""))
             _code, _body = 200, None
-            if _status == "disabled":
-                _code, _body = 503, {"error": "The live desk is switched off: DESK_PASSWORD is not set on the server."}
-            elif _status == "denied":
-                _time.sleep(1.0)
-                _code, _body = 401, {"error": "Wrong password."}
-            else:
-                _factory = _uw_client_factory or _ScreenerClient
-                try:
-                    _probe = _factory()
-                    if not getattr(_probe, "enabled", True):
-                        _code, _body = 503, {"error": "UW_API_KEY is not set on the server."}
-                    else:
-                        _body, _cached = _live.snapshot_payload(lambda: _probe, force=bool(params.get("refresh")))
-                        _body = dict(_body, cached=_cached)
-                except _IngestError as e:
-                    _code, _body = 502, {"error": "Unusual Whales returned no data: %s" % e}
-                except Exception as e:
-                    _code, _body = 500, {"error": "Could not build the snapshot (%s)." % type(e).__name__}
+            _factory = _uw_client_factory or _ScreenerClient
+            try:
+                _probe = _factory()
+                if not getattr(_probe, "enabled", True):
+                    _code, _body = 503, {"error": "UW_API_KEY is not set on the server."}
+                else:
+                    _body, _cached = _live.snapshot_payload(lambda: _probe, force=bool(params.get("refresh")))
+                    _body = dict(_body, cached=_cached)
+            except _IngestError as e:
+                _code, _body = 502, {"error": "Unusual Whales returned no data: %s" % e}
+            except Exception as e:
+                _code, _body = 500, {"error": "Could not build the snapshot (%s)." % type(e).__name__}
             self.send_response(_code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -3762,7 +3831,7 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(_body).encode())
             return
 
-        # Put desk: the filter-screener page. Code only; it holds no market data (the user loads their own data.json in the browser).
+        # Put screener page. Code only; it holds no market data (the browser loads it from ?desk_data=1 after login).
         if params.get("desk"):
             for _p in (_os.path.dirname(_os.path.abspath(__file__)), _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))):
                 if _p not in _sys.path:

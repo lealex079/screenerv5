@@ -24,8 +24,7 @@ select[multiple]{width:100%;height:110px}
 </style></head><body>
 <div class="banner" id="banner">SAMPLE DATA: synthetic numbers for testing, not market data.</div>
 <header><h1>Screener v5</h1><div class="nav" id="nav"><a href="/">Ticker scan</a><a class="on" href="/?desk=1">Put screener</a></div><div class="sub" id="metaline">loading…</div>
-<div class="row" id="live" style="display:none;margin-top:8px"><input type="password" id="pw" placeholder="Password" autocomplete="current-password" style="width:170px">
-<button class="p" id="goLive">Load live UW data</button><button id="refresh" style="display:none">Refresh from UW</button><span class="mut" id="livemsg"></span></div></header>
+<div class="row" id="live" style="display:none;margin-top:8px"><button id="refresh" style="display:none">Refresh from UW</button><span class="mut" id="livemsg"></span></div></header>
 <div class="wrap">
  <div class="panel" id="side">
   <div class="row"><select id="preset"><option value="">Preset screens…</option></select><button id="reset">Clear</button></div>
@@ -132,22 +131,20 @@ function init(data){
 function load(){
   var inApp=/[?&]desk=/.test(location.search);
   if(inApp){$("nav").style.display="flex";$("live").style.display="flex";
-    var saved="";try{saved=sessionStorage.getItem("desk_pw")||""}catch(e){}
-    $("pw").value=saved;
-    $("metaline").textContent="Enter the password to pull a live Unusual Whales snapshot.";
+    $("metaline").textContent="Loading the Unusual Whales snapshot…";
     var busy=false;
     function live(refresh){
-      if(busy)return;busy=true;var t0=Date.now(),pw=$("pw").value;$("livemsg").textContent="Pulling from Unusual Whales (20-40 s)…";
+      if(busy)return;busy=true;var t0=Date.now();$("refresh").style.display="none";$("livemsg").textContent="Pulling from Unusual Whales (20-40 s)…";
       var tick=setInterval(function(){$("livemsg").textContent="Pulling from Unusual Whales… "+Math.round((Date.now()-t0)/1000)+" s"},1000);
-      fetch("/?desk_data=1"+(refresh?"&refresh=1":""),{headers:{"X-Desk-Password":pw},cache:"no-store"}).then(function(r){return r.json().then(function(j){return[r.status,j]})}).then(function(x){
+      fetch("/?desk_data=1"+(refresh?"&refresh=1":""),{cache:"no-store",credentials:"same-origin"}).then(function(r){return r.json().then(function(j){return[r.status,j]})}).then(function(x){
         clearInterval(tick);busy=false;
-        if(x[0]!==200){$("livemsg").textContent=(x[1]&&x[1].error)||("Error "+x[0]);return}
-        try{sessionStorage.setItem("desk_pw",pw)}catch(e){}
+        if(x[0]===401){location.reload();return}
+        if(x[0]!==200){$("livemsg").textContent=(x[1]&&x[1].error)||("Error "+x[0]);$("refresh").style.display="";return}
         var c=D?uiConds():null;init(x[1]);if(c){setUi(c);render()}
         $("refresh").style.display="";$("livemsg").textContent=(x[1].cached?"Cached snapshot (up to 20 min old). ":"Fresh from UW. ")+"Loaded in "+Math.round((Date.now()-t0)/1000)+" s."
-      }).catch(function(){clearInterval(tick);busy=false;$("livemsg").textContent="Could not reach the server (timeout or network). Try again."})}
-    $("goLive").onclick=function(){live(false)};$("refresh").onclick=function(){live(true)};
-    $("pw").onkeydown=function(e){if(e.key==="Enter")live(false)};
+      }).catch(function(){clearInterval(tick);busy=false;$("refresh").style.display="";$("livemsg").textContent="Could not reach the server (timeout or network). Try again."})}
+    $("refresh").onclick=function(){live(true)};
+    live(false);
     return}
   fetch("data.json").then(function(r){if(!r.ok)throw new Error(r.status);return r.json()}).then(init).catch(function(){
     $("metaline").textContent="Could not load data.json (not published yet)."})}

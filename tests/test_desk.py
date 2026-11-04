@@ -82,7 +82,7 @@ check("history first run", history.compare(["A"], [], "2026-11-03", "s")["first_
 
 # 9 digest + web export
 body, runs2, summ = digest.build(df, meta, [])
-check("digest sections", "SAMPLE DATA" in body and "Sean" in body and "30% gap" in body and "Research note" in body)
+check("digest sections", "SAMPLE DATA" in body and "Sean" in body and "Stress loss" in body and "Research note" in body)
 check("digest records picks", any(r["screen"] == "sean_rules" for r in runs2))
 try:
     digest.send(body, "x", env={}); check("send without env refuses", False)
@@ -123,6 +123,21 @@ check("index options (VIX, SPX) flagged and excluded", bool(_ad(pd.DataFrame([di
 
 _m = dict(meta, coverage={"marketcap_coverage": 0.5, "iv_rank_coverage": 1.0}, quote_calls_capped=3)
 check("digest warns on thin coverage and capped quotes", "Data warning" in digest.build(df, _m, [])[0] and "market cap is missing" in digest.build(df, _m, [])[0])
+
+# 12 fixes from the first real web run
+hv = pd.DataFrame([dict(ticker="HIV", option_symbol="HIV261218P00165000", type="put", strike=165.0, expiry=pd.Timestamp("2026-12-18"), stock_price=214.0, bid=6.85, ask=7.25, iv=0.92,
+                        delta=-.16, open_interest=900, volume=500, last=7.0, sector="Industrials", next_earnings_date=pd.NaT, issue_type="Common Stock")])
+lv = hv.assign(ticker="LOW", option_symbol="LOW261218P00165000", iv=0.25)
+a, b2 = _ad(hv, pd.Timestamp(TODAY)).iloc[0], _ad(lv, pd.Timestamp(TODAY)).iloc[0]
+check("stress drop scales with IV (90% IV name gets more than 30%)", a.stress_drop > 0.5 and abs(b2.stress_drop - 0.30) < 1e-9, str((a.stress_drop, b2.stress_drop)))
+check("high-IV name no longer looks safest", a.crash_loss_pct > 0.3 and b2.crash_loss_pct < a.crash_loss_pct, str((a.crash_loss_pct, b2.crash_loss_pct)))
+yd = pd.Timestamp(TODAY) - pd.Timedelta(days=1)
+post = _ad(hv.assign(next_earnings_date=yd, er_time="postmarket"), pd.Timestamp(TODAY)).iloc[0]
+pre = _ad(hv.assign(next_earnings_date=yd, er_time="premarket"), pd.Timestamp(TODAY)).iloc[0]
+old = _ad(hv.assign(next_earnings_date=pd.Timestamp(TODAY) - pd.Timedelta(days=3), er_time="postmarket"), pd.Timestamp(TODAY)).iloc[0]
+check("yesterday's after-close report still counts as pending", bool(post.earnings_in_life) and not bool(pre.earnings_in_life) and not bool(old.earnings_in_life))
+from desk.ingest import market_today
+check("market_today is a date within a day of UTC today", abs((market_today() - datetime.datetime.now(datetime.timezone.utc).date()).days) <= 1)
 
 # 10 generated page in sync with web/index.html
 _root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

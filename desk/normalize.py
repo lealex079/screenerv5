@@ -48,6 +48,7 @@ STOCK_TXT = {
     "industry": ("industry_type",),
     "next_earnings_stock": ("next_earnings_date", "next_earnings", "earnings_date"),
     "next_div_date": ("next_dividend_date",),
+    "er_time": ("er_time",),                     # premarket / postmarket / unknown
 }
 STOCK_COLS = list(STOCK_NUM) + list(STOCK_TXT)
 

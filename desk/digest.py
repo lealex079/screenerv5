@@ -30,7 +30,7 @@ def _row(p):
             f"<td>{_pct(p.crash_loss_pct, 0)}</td></tr>")
 
 
-TH = "<tr><th>Ticker</th><th>Sector</th><th>Expiry</th><th>DTE</th><th>Strike</th><th>Delta</th><th>Credit</th><th>Ann. yield</th><th>Cushion</th><th>Spread</th><th>30% gap loss</th></tr>"
+TH = "<tr><th>Ticker</th><th>Sector</th><th>Expiry</th><th>DTE</th><th>Strike</th><th>Delta</th><th>Credit</th><th>Ann. yield</th><th>Cushion</th><th>Spread</th><th>Stress loss</th></tr>"
 
 
 def build(df, meta, runs, n=8, max_per_sector=3, screens=None):
@@ -78,7 +78,7 @@ def build(df, meta, runs, n=8, max_per_sector=3, screens=None):
             parts.append(f"<p><b>New:</b> {', '.join(cmp_['new']) or 'none'} &middot; <b>Repeated:</b> {rep} &middot; <b>Dropped:</b> {', '.join(cmp_['dropped']) or 'none'}"
                          f" &middot; overlap with last run {_pct(cmp_['overlap_prev'], 0)}</p>")
         mix = ", ".join(f"{k} {v * 100:.0f}%" for k, v in sector_mix(book).items())
-        parts.append(f"<p><b>If equal cash in each put:</b> a simultaneous 30% gap loses {_pct(st['loss_pct'])} of the cash deployed "
+        parts.append(f"<p><b>If equal cash in each put:</b> a simultaneous stress drop (at least 30%, or two standard deviations of each stock's implied move) loses {_pct(st['loss_pct'])} of the cash deployed "
                      f"(worst {st['worst_ticker']} at {_pct(st['worst_loss_pct'])}). Under the 15% account-loss rule with a 1.25 margin, "
                      f"deploy at most {_pct(st['fraction'], 0)} of the account in this book. Sectors: {mix}.</p>")
     parts.append(f"<p style='color:#555;font-size:12px'>{CAVEAT}</p>")

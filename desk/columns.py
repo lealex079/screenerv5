@@ -8,6 +8,7 @@ from math import erf, log, sqrt
 import numpy as np
 import pandas as pd
 
+STRESS_SIGMAS, STRESS_CAP = 2.0, 0.90        # judgment calls, not validated
 RATE = 0.02                # same flat 2% as the research notebooks
 CRASH_DROP = 0.30          # stress scenario: the stock gaps down 30% and the put is assigned
 
@@ -55,8 +56,17 @@ def add_derived(df, snapshot_date, crash_drop=CRASH_DROP, credit_from="bid"):
                       for s, k, v, t in zip(d.stock_price, d.strike, d.iv, d.dte)]
     ne = pd.to_datetime(d.next_earnings_date, errors="coerce")
     d["days_to_earnings"] = (ne - snap).dt.days
-    d["earnings_in_life"] = ((ne >= snap) & (ne <= pd.to_datetime(d.expiry))).fillna(False)      # unknown date counts as no earnings (ETFs)
-    d["crash_loss_pct"] = (np.maximum(d.strike - d.stock_price * (1 - crash_drop), 0) - d.credit).clip(lower=0) / d.strike
+    # Earnings count as pending if dated today or later and before expiry, OR dated yesterday and not a premarket report: a snapshot taken
+    # overnight still has yesterday's close, so yesterday's after-close report has not been priced in yet. (Caught in the first real run:
+    # SMCI, AMD and SHOP showed days_to_earnings = -1 and passed the no-earnings filter.)
+    ert = d["er_time"] if "er_time" in d else pd.Series(index=d.index, dtype=object)
+    just_reported = (ne == snap - pd.Timedelta(days=1)) & (ert != "premarket")
+    d["earnings_in_life"] = (((ne >= snap) & (ne <= pd.to_datetime(d.expiry))) | just_reported).fillna(False)      # unknown date counts as no earnings (ETFs)
+    # Stress drop = the larger of the fixed gap (30%) and STRESS_SIGMAS standard deviations of the option's own implied move to expiry.
+    # A flat 30% is only about 1 sigma for a 90%-IV stock, so a flat gap made the highest-IV names look safest (first real run: BE, SMCI).
+    sig = d.iv * np.sqrt(d.dte.clip(lower=1) / 365)
+    d["stress_drop"] = np.where(sig.notna(), np.minimum(np.maximum(crash_drop, STRESS_SIGMAS * sig), STRESS_CAP), crash_drop)
+    d["crash_loss_pct"] = (np.maximum(d.strike - d.stock_price * (1 - d.stress_drop), 0) - d.credit).clip(lower=0) / d.strike
     d["yield_per_crash_loss"] = d.premium_yield / d.crash_loss_pct.clip(lower=0.05)               # floor keeps near-zero losses from exploding the ratio
     d["leveraged"] = d.ticker.isin(LEVERAGED | INDEX_PRODUCTS)
     # a common stock with no earnings date at all is a data gap, not a safe name: screens exclude it

@@ -68,7 +68,7 @@ def pick_book(ranked, n=8, per_ticker=1, max_per_sector=3, exclude=()):
 
 
 def book_stress(book):
-    """Equal capital in each cash-secured put. Scenario: every stock gaps down 30% together (the crash_loss_pct column).
+    """Equal capital in each cash-secured put. Scenario: every stock falls together by its stress_drop (at least 30%, or 2 sigma of its own implied move; the crash_loss_pct column).
     Returns the loss as a share of the capital deployed, the worst single name, and the account fraction that keeps the
     stressed loss, with the 1.25 margin, within 15% of the account (capped at 1)."""
     if book.empty:

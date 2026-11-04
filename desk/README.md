@@ -53,3 +53,9 @@ Dependencies: pandas, numpy, pyarrow (add pyarrow to requirements.txt if you wan
 - One snapshot is cached per server instance for 20 minutes; Refresh is throttled to once per 90 seconds.
 - Responses are `Cache-Control: no-store` and `X-Robots-Tag: noindex`. The desk page itself contains no market data.
 - The existing ticker-scan overlay already serves UW-derived fields to anyone with the app URL. Check your UW plan's redistribution terms for both, or put the whole app behind a login.
+
+## Changes after the first real web run (2026-11-04 CSV)
+- Snapshot date now uses New York time (a UTC server was a day ahead all evening).
+- Earnings dated yesterday and not premarket still count as pending (an overnight snapshot has yesterday's close). SMCI, AMD, SHOP had passed the no-earnings filter with days_to_earnings = -1.
+- Stress loss uses the larger of 30% and 2 standard deviations of the option's own implied move (STRESS_SIGMAS, STRESS_CAP in desk/columns.py; judgment calls, not validated). The flat 30% ranked 90%-IV names first.
+- UW's `beta` field looks unreliable (XOM -0.71, NFLX 0.19, SLV 2.08, INTC 3.38). It is shown but not used. Compute beta from prices if a beta filter is wanted.

@@ -114,7 +114,7 @@ function renderSaved(){var s=savedList(),h="";Object.keys(s).forEach(function(k)
 function init(data){
   D=data;N=D.n;screens=D.screens;var m=D.meta;
   $("banner").style.display=m.is_sample?"block":"none";
-  $("metaline").textContent="Snapshot "+m.snapshot_date+" · "+N.toLocaleString()+" quoted puts on "+m.tickers.toLocaleString()+" tickers"+(m.screener_complete===false?" · screener cut off by page cap":"")+" · delta from UW on "+(m.delta_from_uw||0).toLocaleString()+" rows, model on "+(m.delta_from_model||0).toLocaleString();
+  $("metaline").textContent="Snapshot "+m.snapshot_date+" · "+N.toLocaleString()+" quoted puts on "+m.tickers.toLocaleString()+" tickers"+(m.screener_complete===false?" · screener cut off by page cap":"");
   $("nums").innerHTML=NUM.filter(function(n){return D.data[n[0]]}).map(function(n){return "<div class='f'><label>"+n[1]+"</label><input type='number' step='any' id='min_"+n[0]+"' placeholder='min'><input type='number' step='any' id='max_"+n[0]+"' placeholder='max'></div>"}).join("");
   NUM=NUM.filter(function(n){return D.data[n[0]]});
   var secs={};(D.data.sector||[]).forEach(function(s){if(s)secs[s]=1});$("sectors").innerHTML=Object.keys(secs).sort().map(function(s){return "<option>"+s+"</option>"}).join("");
@@ -141,7 +141,8 @@ function load(){
         if(x[0]===401){location.reload();return}
         if(x[0]!==200){$("livemsg").textContent=(x[1]&&x[1].error)||("Error "+x[0]);$("refresh").style.display="";return}
         var c=D?uiConds():null;init(x[1]);if(c){setUi(c);render()}
-        $("refresh").style.display="";$("livemsg").textContent=(x[1].cached?"Cached snapshot (up to 20 min old). ":"Fresh from UW. ")+"Loaded in "+Math.round((Date.now()-t0)/1000)+" s."
+        $("refresh").style.display="";var g=x[1].meta&&x[1].meta.generated_at,ts=g?new Date(g).toLocaleString(undefined,{year:"numeric",month:"short",day:"numeric",hour:"numeric",minute:"2-digit",second:"2-digit",timeZoneName:"short"}):"";
+        $("livemsg").textContent=(x[1].cached?"Loaded from UW (cached)":"Loaded from UW in "+Math.round((Date.now()-t0)/1000)+" s")+(ts?" · "+ts:"")
       }).catch(function(){clearInterval(tick);busy=false;$("refresh").style.display="";$("livemsg").textContent="Could not reach the server (timeout or network). Try again."})}
     $("refresh").onclick=function(){live(true)};
     live(false);

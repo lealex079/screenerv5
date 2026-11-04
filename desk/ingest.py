@@ -22,6 +22,15 @@ from desk.columns import add_derived, add_score
 from desk.normalize import STOCK_COLS, apply_quotes, contracts_frame, stocks_frame
 
 
+def market_today():
+    """Today's date in New York. A server in UTC is already on tomorrow's date for the whole US evening (the first real web pull said DTE 44 on Nov 3)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo("America/New_York")).date()
+    except Exception:
+        return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)).date()
+
+
 class IngestError(RuntimeError):
     pass
 
@@ -49,7 +58,7 @@ def _pull_contracts(client, params, log):
 def ingest(client, snapshot_date=None, out_dir="out", min_dte=7, max_dte=60, delta=(-0.40, -0.05), min_oi=50, max_enrich=3000,
            workers=8, min_approx_yield=0.03, is_sample=False, log=print):
     t_start = time.time()
-    snap = pd.Timestamp(snapshot_date or datetime.date.today()).normalize()
+    snap = pd.Timestamp(snapshot_date or market_today()).normalize()
     params = {"type": "put", "min_dte": min_dte, "max_dte": max_dte, "min_delta": str(delta[0]), "max_delta": str(delta[1]), "min_open_interest": min_oi}
     if snapshot_date:
         params["date"] = snap.date().isoformat()

@@ -41,7 +41,7 @@ select[multiple]{width:100%;height:110px}
   <div class="row"><input id="sname" placeholder="name" style="flex:1"><button id="save">Save</button></div>
   <div class="row" id="saved"></div>
   <div class="row"><button id="csv" class="p">Download CSV</button></div>
-  <div class="mut" style="font-size:11px;margin-top:8px">Rank and filters are for triage. Our backtests found put-selling earns equity beta with no measured alpha; read the 30% gap loss column before anything else.</div>
+  <div class="mut" style="font-size:11px;margin-top:8px">Rank and filters are for triage. Our backtests found put-selling earns equity beta with no measured alpha; read the Stress loss column before anything else.</div>
  </div>
  <div>
   <div class="row"><b id="count"></b><span class="mut">sort: click a header</span><input type="file" id="file" accept=".json" style="display:none"></div>
@@ -53,12 +53,12 @@ select[multiple]{width:100%;height:110px}
 "use strict";
 var NUM=[["dte","DTE",0],["strike","Strike",2],["delta","Delta",2],["annualized_yield","Ann. yield",3],["premium_yield","Prem. yield",3],["credit","Credit",2],
  ["cushion","Cushion",3],["iv","IV",3],["iv_rank","IV rank",0],["pop_delta","POP (delta)",3],["spread_pct","Spread %",3],["open_interest","Open int.",0],["volume","Volume",0],
- ["marketcap","Mkt cap",0],["days_to_earnings","Days to earn.",0],["crash_loss_pct","30% gap loss",3],["yield_per_crash_loss","Yield / gap loss",3],["premium_chg_1d","Prem. chg 1D",3],
- ["rsi_14","RSI 14",0],["sma50_dist","vs 50d SMA",3],["sma200_dist","vs 200d SMA",3],["beta","Beta",2],["dividend_yield","Div yield",3],["days_to_ex_div","Days to ex-div",0],
+ ["marketcap","Mkt cap",0],["days_to_earnings","Days to earn.",0],["crash_loss_pct","Stress loss",3],["stress_drop","Stress drop",3],["yield_per_crash_loss","Yield / gap loss",3],["premium_chg_1d","Prem. chg 1D",3],
+ ["rsi_14","RSI 14",0],["sma50_dist","vs 50d SMA",3],["sma200_dist","vs 200d SMA",3],["beta","Beta (UW, unreliable)",2],["dividend_yield","Div yield",3],["days_to_ex_div","Days to ex-div",0],
  ["iv30d","IV 30d",3],["realized_vol","Realized vol",3],["vrp","Var. risk prem.",3],["put_call_ratio","Put/call",2],["theta","Theta",3],["vega","Vega",3]];
 var SHOW=[["ticker","Ticker",0],["sector","Sector",0],["expiry","Expiry",0],["dte","DTE",0],["strike","Strike",2],["delta","Delta",2],["credit","Credit",2],["annualized_yield","Ann. yield",1],
- ["cushion","Cushion",1],["iv","IV",1],["iv_rank","IVR",0],["spread_pct","Spread",1],["open_interest","OI",0],["crash_loss_pct","Gap loss",0],["yield_per_crash_loss","Yld/loss",2],["days_to_earnings","Earn d",0]];
-var PCT={sma50_dist:1,sma200_dist:1,dividend_yield:1,iv30d:1,realized_vol:1,vrp:1,annualized_yield:1,cushion:1,iv:1,spread_pct:1,crash_loss_pct:1,premium_yield:1,pop_delta:1,premium_chg_1d:1};
+ ["cushion","Cushion",1],["iv","IV",1],["iv_rank","IVR",0],["spread_pct","Spread",1],["open_interest","OI",0],["crash_loss_pct","Stress loss",0],["yield_per_crash_loss","Yld/loss",2],["days_to_earnings","Earn d",0]];
+var PCT={stress_drop:1,sma50_dist:1,sma200_dist:1,dividend_yield:1,iv30d:1,realized_vol:1,vrp:1,annualized_yield:1,cushion:1,iv:1,spread_pct:1,crash_loss_pct:1,premium_yield:1,pop_delta:1,premium_chg_1d:1};
 var D=null,N=0,screens=[],sortCol=null,sortDesc=true,limit=200,idx=[];
 var $=function(i){return document.getElementById(i)};
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}

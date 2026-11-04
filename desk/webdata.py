@@ -13,7 +13,7 @@ COLS = ["ticker", "sector", "option_symbol", "expiry", "dte", "strike", "stock_p
         "annualized_yield", "premium_yield", "otm_pct", "cushion", "breakeven", "pop_delta", "spread_pct", "open_interest", "volume",
         "marketcap", "days_to_earnings", "earnings_in_life", "crash_loss_pct", "yield_per_crash_loss", "premium_chg_1d", "triage_score",
         "leveraged", "delta_src", "earnings_unknown", "issue_type", "industry", "rsi_14", "sma50_dist", "sma200_dist", "beta", "dividend_yield",
-        "days_to_ex_div", "ex_div_in_life", "vrp", "put_call_ratio", "iv30d", "realized_vol", "theta", "vega", "gamma"]
+        "stress_drop", "er_time", "days_to_ex_div", "ex_div_in_life", "vrp", "put_call_ratio", "iv30d", "realized_vol", "theta", "vega", "gamma"]
 
 
 def payload(df, meta):

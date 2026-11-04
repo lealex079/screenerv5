@@ -82,7 +82,7 @@ check("history first run", history.compare(["A"], [], "2026-11-03", "s")["first_
 
 # 9 digest + web export
 body, runs2, summ = digest.build(df, meta, [])
-check("digest sections", "SAMPLE DATA" in body and "Sean" in body and "Stress loss" in body and "Research note" in body)
+check("digest sections", "SAMPLE DATA" in body and "Tom" in body and "Stress loss" in body and "Research note" in body)
 check("digest records picks", any(r["screen"] == "sean_rules" for r in runs2))
 try:
     digest.send(body, "x", env={}); check("send without env refuses", False)

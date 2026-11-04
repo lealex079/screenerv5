@@ -3,6 +3,13 @@
 Replaces the TrendScore/CrashScore + Finviz-top-250 screening path with one pipeline built on Unusual Whales (UW) option data.
 Nothing here has run against the real UW API yet. Every test used a synthetic mock (`desk/mock_uw.py`).
 
+## Verified against the real API (probe 2026-11-03)
+- Both screeners work on Alex's plan. Contract screener: 5 pages, 2,175 puts (7-45 DTE, delta -0.35..-0.05), about 498 tickers, ~730 rows with no sector (ETFs/indices). No rate-limit pressure.
+- Screener rows have delta/gamma/theta/vega, NOT bid/ask or IV. (The probe's "bid/ask: yes" was a false match on bid_side_volume.) So per-ticker quote calls are required.
+- Contracts under 200 volume today are not returned, so the universe is today's traded contracts only.
+- Per-ticker endpoint returned 50 rows by default; the code asks for 500 puts and warns when a response is exactly 50 or 500 rows.
+- `stock_price` is null on some rows: filled from the stock screener's close. `next_dividend_date` is sometimes in the past: treated as unknown.
+
 ## What it does
 - `python -m desk.cli ingest`  pulls puts (7-60 DTE, delta -0.40..-0.05, OI>=50) from the UW contract screener, joins IV rank / market cap from the stock screener, fills bid/ask/IV from per-ticker calls where the screener rows lack them, computes derived columns, saves `out/latest.parquet`.
 - `python -m desk.cli digest`  applies the screens in `desk/screens.json` flagged `digest:true`, picks one contract per ticker (max 3 per sector), compares to previous weeks (`desk_history.json`), writes `out/desk_digest.html`, emails only if `EMAIL_MODE=send`.

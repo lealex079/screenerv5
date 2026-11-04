@@ -62,10 +62,14 @@ def build_universe(seed=7, n=320, today=None):
         edays = int(rng.integers(3, 85))
         U.append(dict(ticker=t, sector=sec, price=float(np.round(np.exp(rng.normal(4.0, 0.9)), 2)), iv=vol, cap=float(np.exp(rng.normal(23.6, 1.4))),
                       earnings=(today + datetime.timedelta(days=edays)).isoformat(), iv_rank=float(np.clip(rng.normal(45, 25), 1, 99)),
-                      liquid=float(np.exp(rng.normal(6.0, 1.3))), issue="Common Stock"))
+                      liquid=float(np.exp(rng.normal(6.0, 1.3))), issue="Common Stock",
+                      rsi=float(np.clip(rng.normal(50, 14), 5, 95)), sma50=float(np.round(np.exp(rng.normal(4.0, 0.9)) , 2)), beta=float(rng.normal(1.1, 0.4)),
+                      divy=float(max(0, rng.normal(0.015, 0.015))), nextdiv=(today + datetime.timedelta(days=int(rng.integers(-60, 80)))).isoformat(),
+                      industry="Synthetic Industry", noprice=bool(rng.random() < 0.05)))
     for t, vol in LEV:
         U.append(dict(ticker=t, sector=None, price=float(np.round(np.exp(rng.normal(3.6, 0.5)), 2)), iv=vol, cap=2e9, earnings=None,
-                      iv_rank=float(rng.uniform(20, 80)), liquid=float(np.exp(rng.normal(8.0, 0.8))), issue="ETF"))
+                      iv_rank=float(rng.uniform(20, 80)), liquid=float(np.exp(rng.normal(8.0, 0.8))), issue="ETF",
+                      rsi=50.0, sma50=3.6, beta=1.0, divy=0.0, nextdiv=None, industry=None, noprice=False))
     return U
 
 
@@ -105,8 +109,11 @@ def occ(t, exp, K):
     return f"{t}{exp:%y%m%d}P{int(round(K * 1000)):08d}"
 
 
-def mock_opener(seed=7, today=None, screener_quotes=False, fail_screener=None, page_cap=None, count_calls=None):
-    """Returns an opener compatible with UWClient(opener=...). fail_screener: an HTTP status to return for the contract screener."""
+def mock_opener(seed=7, today=None, screener_quotes=False, fail_screener=None, page_cap=None, count_calls=None, strict_params=False, default_limit=50):
+    """Returns an opener compatible with UWClient(opener=...). fail_screener: an HTTP status to return for the contract screener.
+    Shapes follow the real responses seen in the 2026-11-03 probe: screener rows carry ticker_symbol, option_type, string numbers, delta and
+    greeks but NO bid/ask/iv, and stock_price is null on some tickers. strict_params=True answers 422 to limit/option_type on the per-ticker
+    endpoint (to test the fallback); the per-ticker default row limit is default_limit unless `limit` is sent."""
     import urllib.error
     today = today or datetime.date.today()
     U = build_universe(seed, today=today); C = build_contracts(U, today, seed); by_t = {}
@@ -134,27 +141,34 @@ def mock_opener(seed=7, today=None, screener_quotes=False, fail_screener=None, p
             sl = rows[page * lim:(page + 1) * lim]
             data = []
             for r in sl:
-                d = dict(option_symbol=occ(r["u"]["ticker"], r["exp"], r["K"]), strike=str(r["K"]), expiry=r["exp"].isoformat(), stock_price=str(r["u"]["price"]),
-                         volume=r["vol"], open_interest=r["oi"], sector=r["u"]["sector"], next_earnings_date=r["u"]["earnings"], option_type="put",
+                d = dict(option_symbol=occ(r["u"]["ticker"], r["exp"], r["K"]), ticker_symbol=r["u"]["ticker"], option_type="put", strike=str(r["K"]),
+                         expiry=r["exp"].isoformat(), stock_price=(None if r["u"]["noprice"] else str(r["u"]["price"])), volume=r["vol"], open_interest=r["oi"],
+                         sector=r["u"]["sector"], next_earnings_date=r["u"]["earnings"], issue_type=None, delta=str(r["delta"]),
+                         gamma="0.03", theta="-0.02", vega="0.05",
                          premium=str(round(r["vol"] * (r["bid"] + r["ask"]) * 50, 2)), close=str(round((r["bid"] + r["ask"]) / 2, 2)))
                 if screener_quotes:
-                    d.update(nbbo_bid=str(r["bid"]), nbbo_ask=str(r["ask"]), implied_volatility=str(r["iv"]), delta=str(r["delta"]))
+                    d.update(nbbo_bid=str(r["bid"]), nbbo_ask=str(r["ask"]), implied_volatility=str(r["iv"]))
                 data.append(d)
             return _Resp(json.dumps({"data": data}).encode())
         if path == "/api/screener/stocks":
             lim, page = int(q.get("limit", 50)), int(q.get("offset", 0))
             data = [dict(ticker=u["ticker"], sector=u["sector"], marketcap=str(u["cap"]), iv_rank=str(round(u["iv_rank"], 1)), issue_type=u["issue"],
-                         next_earnings_date=u["earnings"]) for u in U][page * lim:(page + 1) * lim]
+                         next_earnings_date=u["earnings"], close=str(u["price"]), rsi_14=u["rsi"], sma_50=u["sma50"], beta=str(round(u["beta"], 3)),
+                         dividend_yield=str(round(u["divy"], 4)), next_dividend_date=u["nextdiv"], industry_type=u["industry"], iv30d=str(u["iv"]))
+                    for u in U][page * lim:(page + 1) * lim]
             return _Resp(json.dumps({"data": data}).encode())
         if path.startswith("/api/stock/") and path.endswith("/option-contracts"):
             t = path.split("/")[3]
             rows = by_t.get(t)
             if rows is None:
                 raise urllib.error.HTTPError(url, 404, "nf", {}, io.BytesIO(b"{}"))
+            if strict_params and ("limit" in q or "option_type" in q):
+                raise urllib.error.HTTPError(url, 422, "unprocessable", {}, io.BytesIO(b"{}"))
             if "expiry" in q:
                 rows = [r for r in rows if r["exp"].isoformat() == q["expiry"]]
+            lim = int(q.get("limit", default_limit))
             data = [dict(option_symbol=occ(t, r["exp"], r["K"]), nbbo_bid=str(r["bid"]), nbbo_ask=str(r["ask"]), implied_volatility=str(r["iv"]),
-                         open_interest=r["oi"], volume=r["vol"]) for r in rows][:500]
+                         delta=r["delta"], open_interest=r["oi"], volume=r["vol"]) for r in rows][:lim]
             return _Resp(json.dumps({"data": data}).encode())
         raise urllib.error.HTTPError(url, 404, "nf", {}, io.BytesIO(b"{}"))
     op.universe = U

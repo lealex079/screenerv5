@@ -6,7 +6,8 @@ Endpoints, from UW's docs (https://api.unusualwhales.com/docs):
   GET /api/screener/option-contracts   "Hottest Chains": contract-level filters, 500 rows a page, page starts at 0,
                                        contracts under 200 volume are not returned.
   GET /api/screener/stocks             stock-level filters (IV rank, sector, market cap), 500 rows a page, `offset` is the page number.
-UNVERIFIED until tools/uw_probe.py has been run on a real key: which fields come back, how deep paging goes, rate limits, plan access.
+Verified by a real probe on 2026-11-03: both screeners work on this plan, contracts page 0..4 then an empty page (2,175 rows, ~498 tickers),
+no rate-limit pressure (1,000,000/min header, 0.08 s median latency). The per-ticker endpoint returned 50 rows by default.
 """
 import os
 import sys
@@ -42,3 +43,24 @@ class ScreenerClient(UWClient):
     def screener_stocks(self, params=None, max_pages=12):
         """Stock screener, paged by `offset` (a zero-based page number)."""
         return self._paged("/api/screener/stocks", params or {}, "offset", max_pages)
+
+    _extras_ok = True
+
+    def option_contracts_full(self, ticker, expiry):
+        """Per-ticker contracts for one expiry, asking for puts only and up to 500 rows (the endpoint's default looked like 50).
+        If that request fails but a bare one works, the extra params were the problem: remember and stop sending them.
+        Returns (rows or None, hit_cap) where hit_cap means the row count equals a known cap (50 or 500), so the chain may be cut off."""
+        base = {"expiry": expiry.isoformat() if expiry else None}
+        path = "/api/stock/%s/option-contracts" % ticker
+        if self._extras_ok:
+            j = self._get(path, dict(base, limit=500, option_type="put"))
+            if j is not None:
+                rows = self._rows(j)
+                return rows, len(rows) in (50, 500)
+        j = self._get(path, base)
+        if j is None:
+            return None, False
+        if self._extras_ok:
+            self._extras_ok = False
+        rows = self._rows(j)
+        return rows, len(rows) in (50, 500)

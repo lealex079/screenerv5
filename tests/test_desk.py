@@ -91,6 +91,39 @@ except RuntimeError:
 p = os.path.join(out, "web", "data.json"); size = webdata.export(df, meta, p); w = json.load(open(p))
 check("web export quoted only", w["n"] == meta["rows_quoted"] and len(w["data"]["ticker"]) == w["n"], str(size))
 
+
+# 11 real response shapes (from the 2026-11-03 probe): screener has delta + greeks but no bid/ask/iv; stock_price null on some tickers
+rows = [dict(option_symbol="ZZZ261218P00090000", ticker_symbol="ZZZ", option_type="put", strike="90", expiry="2026-12-18", stock_price=None, delta="-0.18",
+             theta="-0.02", vega="0.05", gamma="0.03", open_interest=500, volume=300, close="1.50", sector="Technology", next_earnings_date=None)]
+from desk.normalize import contracts_frame, stocks_frame, apply_quotes
+cf = contracts_frame(rows).iloc[0]
+check("ticker from ticker_symbol", cf.ticker == "ZZZ"); check("delta parsed from string", abs(cf.delta + 0.18) < 1e-12)
+check("screener row has no bid/ask/iv", np.isnan(cf.bid) and np.isnan(cf.ask) and np.isnan(cf.iv)); check("theta kept", abs(cf.theta + 0.02) < 1e-12)
+sf = stocks_frame([dict(ticker="ZZZ", close="101.5", iv_rank="55.5", marketcap="5e9", rsi_14=40.2, sma_50=100, next_dividend_date="2026-12-01", industry_type="X")]).loc["ZZZ"]
+check("stock close/rsi/industry parsed", abs(sf.stock_close - 101.5) < 1e-9 and sf.rsi_14 == 40.2 and sf.industry == "X")
+dfs, ms, _, _ = snap()
+check("stock_price filled from stock screener", ms["coverage"]["stock_price_filled"] > 0 and ms["coverage"]["stock_price_missing"] == 0, str(ms["coverage"]))
+check("delta comes from screener", ms["delta_from_uw"] > 0.9 * ms["rows"], str((ms["delta_from_uw"], ms["rows"])))
+check("coverage fields", ms["coverage"]["marketcap_coverage"] > 0.9 and ms["coverage"]["iv_rank_coverage"] > 0.9)
+# per-ticker params rejected -> fallback to the bare request, still gets quotes
+cs = ScreenerClient(key="x", opener=mock_opener(seed=7, today=TODAY, strict_params=True))
+dfx, mx = ingest(cs, out_dir=tempfile.mkdtemp(), is_sample=True, log=lambda *a: None)
+check("fallback when limit/option_type rejected", cs._extras_ok is False and mx["rows_quoted"] > 1000, str((cs._extras_ok, mx["rows_quoted"])))
+# cap detection: exactly 50 rows is flagged
+c50 = ScreenerClient(key="x"); c50._get = lambda path, params=None: {"data": [{"option_symbol": "A%d" % i} for i in range(50)]}
+check("50-row response flagged as possibly capped", c50.option_contracts_full("AAA", datetime.date(2026, 12, 18))[1] is True)
+# unknown earnings on a common stock is excluded from every screen, but ETFs are not
+t0 = df[(df.issue_type == "Common Stock")].head(1).copy(); t0["next_earnings_date"] = pd.NaT
+from desk.columns import add_derived as _ad
+chk = _ad(t0.drop(columns=["dte", "mid", "credit", "spread_pct"], errors="ignore"), pd.Timestamp(TODAY))
+check("common stock with no earnings date flagged unknown", bool(chk.earnings_unknown.iloc[0]))
+check("every screen requires earnings_unknown false", all(any(c["col"] == "earnings_unknown" for c in sc["conditions"]) for sc in load_screens()))
+
+check("index options (VIX, SPX) flagged and excluded", bool(_ad(pd.DataFrame([dict(ticker="VIX", option_symbol="VIX261118P00017000", type="put", strike=17.0, expiry=pd.Timestamp("2026-11-18"), stock_price=18.0, bid=.3, ask=.34, iv=.9, delta=-.13, open_interest=5, volume=5, last=.3, sector=None, next_earnings_date=pd.NaT)]), pd.Timestamp(TODAY)).leveraged.iloc[0]))
+
+_m = dict(meta, coverage={"marketcap_coverage": 0.5, "iv_rank_coverage": 1.0}, quote_calls_capped=3)
+check("digest warns on thin coverage and capped quotes", "Data warning" in digest.build(df, _m, [])[0] and "market cap is missing" in digest.build(df, _m, [])[0])
+
 # 10 generated page in sync with web/index.html
 _root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if os.path.exists(os.path.join(_root, "desk_page.py")):

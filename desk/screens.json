@@ -6,16 +6,49 @@
       "name": "Sean's rules (about 45 DTE, 16-22 delta)",
       "description": "The rules in Sean's email: roughly 45 days out, 16 to 22 delta, no earnings before expiry, liquid, no leveraged products.",
       "conditions": [
-        {"col": "dte", "min": 35, "max": 55},
-        {"col": "delta", "min": -0.22, "max": -0.16},
-        {"col": "earnings_in_life", "is": false},
-        {"col": "leveraged", "is": false},
-        {"col": "open_interest", "min": 200},
-        {"col": "spread_pct", "max": 0.10},
-        {"col": "marketcap", "min": 2000000000},
-        {"col": "annualized_yield", "min": 0.08}
+        {
+          "col": "dte",
+          "min": 35,
+          "max": 55
+        },
+        {
+          "col": "delta",
+          "min": -0.22,
+          "max": -0.16
+        },
+        {
+          "col": "earnings_in_life",
+          "is": false
+        },
+        {
+          "col": "earnings_unknown",
+          "is": false
+        },
+        {
+          "col": "leveraged",
+          "is": false
+        },
+        {
+          "col": "open_interest",
+          "min": 200
+        },
+        {
+          "col": "spread_pct",
+          "max": 0.1
+        },
+        {
+          "col": "marketcap",
+          "min": 2000000000
+        },
+        {
+          "col": "annualized_yield",
+          "min": 0.08
+        }
       ],
-      "rank": {"by": "yield_per_crash_loss", "desc": true},
+      "rank": {
+        "by": "yield_per_crash_loss",
+        "desc": true
+      },
       "digest": true
     },
     {
@@ -23,16 +56,49 @@
       "name": "Core wheel (wider delta and DTE)",
       "description": "10 to 30 delta, 14 to 45 days, no earnings, liquid. Wider than Sean's rules, so more names.",
       "conditions": [
-        {"col": "dte", "min": 14, "max": 45},
-        {"col": "delta", "min": -0.30, "max": -0.10},
-        {"col": "earnings_in_life", "is": false},
-        {"col": "leveraged", "is": false},
-        {"col": "open_interest", "min": 100},
-        {"col": "spread_pct", "max": 0.12},
-        {"col": "marketcap", "min": 2000000000},
-        {"col": "annualized_yield", "min": 0.10}
+        {
+          "col": "dte",
+          "min": 14,
+          "max": 45
+        },
+        {
+          "col": "delta",
+          "min": -0.3,
+          "max": -0.1
+        },
+        {
+          "col": "earnings_in_life",
+          "is": false
+        },
+        {
+          "col": "earnings_unknown",
+          "is": false
+        },
+        {
+          "col": "leveraged",
+          "is": false
+        },
+        {
+          "col": "open_interest",
+          "min": 100
+        },
+        {
+          "col": "spread_pct",
+          "max": 0.12
+        },
+        {
+          "col": "marketcap",
+          "min": 2000000000
+        },
+        {
+          "col": "annualized_yield",
+          "min": 0.1
+        }
       ],
-      "rank": {"by": "yield_per_crash_loss", "desc": true},
+      "rank": {
+        "by": "yield_per_crash_loss",
+        "desc": true
+      },
       "digest": false
     },
     {
@@ -40,17 +106,59 @@
       "name": "Defensive income",
       "description": "Utilities, consumer defensive and healthcare names with a bigger cushion. Lower yield, lower stress loss.",
       "conditions": [
-        {"col": "sector", "in": ["Utilities", "Consumer Defensive", "Healthcare", "Consumer Staples", "Health Care"]},
-        {"col": "dte", "min": 21, "max": 50},
-        {"col": "delta", "min": -0.25, "max": -0.08},
-        {"col": "earnings_in_life", "is": false},
-        {"col": "leveraged", "is": false},
-        {"col": "open_interest", "min": 100},
-        {"col": "spread_pct", "max": 0.12},
-        {"col": "marketcap", "min": 10000000000},
-        {"col": "annualized_yield", "min": 0.06}
+        {
+          "col": "sector",
+          "in": [
+            "Utilities",
+            "Consumer Defensive",
+            "Healthcare",
+            "Consumer Staples",
+            "Health Care"
+          ]
+        },
+        {
+          "col": "dte",
+          "min": 21,
+          "max": 50
+        },
+        {
+          "col": "delta",
+          "min": -0.25,
+          "max": -0.08
+        },
+        {
+          "col": "earnings_in_life",
+          "is": false
+        },
+        {
+          "col": "earnings_unknown",
+          "is": false
+        },
+        {
+          "col": "leveraged",
+          "is": false
+        },
+        {
+          "col": "open_interest",
+          "min": 100
+        },
+        {
+          "col": "spread_pct",
+          "max": 0.12
+        },
+        {
+          "col": "marketcap",
+          "min": 10000000000
+        },
+        {
+          "col": "annualized_yield",
+          "min": 0.06
+        }
       ],
-      "rank": {"by": "yield_per_crash_loss", "desc": true},
+      "rank": {
+        "by": "yield_per_crash_loss",
+        "desc": true
+      },
       "digest": false
     },
     {
@@ -58,17 +166,52 @@
       "name": "High IV, big cushion",
       "description": "IV rank 60 or more with at least 8% cushion to breakeven. Higher yield, higher risk: read the crash-loss column.",
       "conditions": [
-        {"col": "iv_rank", "min": 60},
-        {"col": "cushion", "min": 0.08},
-        {"col": "dte", "min": 14, "max": 45},
-        {"col": "earnings_in_life", "is": false},
-        {"col": "leveraged", "is": false},
-        {"col": "open_interest", "min": 100},
-        {"col": "spread_pct", "max": 0.15},
-        {"col": "marketcap", "min": 2000000000},
-        {"col": "annualized_yield", "min": 0.20}
+        {
+          "col": "iv_rank",
+          "min": 60
+        },
+        {
+          "col": "cushion",
+          "min": 0.08
+        },
+        {
+          "col": "dte",
+          "min": 14,
+          "max": 45
+        },
+        {
+          "col": "earnings_in_life",
+          "is": false
+        },
+        {
+          "col": "earnings_unknown",
+          "is": false
+        },
+        {
+          "col": "leveraged",
+          "is": false
+        },
+        {
+          "col": "open_interest",
+          "min": 100
+        },
+        {
+          "col": "spread_pct",
+          "max": 0.15
+        },
+        {
+          "col": "marketcap",
+          "min": 2000000000
+        },
+        {
+          "col": "annualized_yield",
+          "min": 0.2
+        }
       ],
-      "rank": {"by": "annualized_yield", "desc": true},
+      "rank": {
+        "by": "annualized_yield",
+        "desc": true
+      },
       "digest": false
     }
   ]

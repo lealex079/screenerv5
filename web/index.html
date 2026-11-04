@@ -24,7 +24,7 @@ select[multiple]{width:100%;height:110px}
 </style></head><body>
 <div class="banner" id="banner">SAMPLE DATA: synthetic numbers for testing, not market data.</div>
 <header><h1>Screener v5</h1><div class="nav" id="nav"><a href="/">Ticker scan</a><a class="on" href="/?desk=1">Put screener</a></div><div class="sub" id="metaline">loading…</div>
-<div class="row" id="live" style="display:none;margin-top:8px"><input type="password" id="pw" placeholder="Desk password" autocomplete="current-password" style="width:170px">
+<div class="row" id="live" style="display:none;margin-top:8px"><input type="password" id="pw" placeholder="Password" autocomplete="current-password" style="width:170px">
 <button class="p" id="goLive">Load live UW data</button><button id="refresh" style="display:none">Refresh from UW</button><span class="mut" id="livemsg"></span></div></header>
 <div class="wrap">
  <div class="panel" id="side">
@@ -41,10 +41,9 @@ select[multiple]{width:100%;height:110px}
   <div class="row"><input id="sname" placeholder="name" style="flex:1"><button id="save">Save</button></div>
   <div class="row" id="saved"></div>
   <div class="row"><button id="csv" class="p">Download CSV</button></div>
-  <div class="mut" style="font-size:11px;margin-top:8px">Rank and filters are for triage. Our backtests found put-selling earns equity beta with no measured alpha; read the Stress loss column before anything else.</div>
  </div>
  <div>
-  <div class="row"><b id="count"></b><span class="mut">sort: click a header</span><input type="file" id="file" accept=".json" style="display:none"></div>
+  <div class="row"><b id="count"></b><span class="mut">sort: click a header</span></div>
   <div class="tw"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
   <div class="row"><button id="more">Show more</button></div>
  </div>
@@ -130,16 +129,12 @@ function init(data){
   $("save").onclick=function(){var n=$("sname").value.trim();if(!n)return;var s=savedList();s[n]=uiConds();ls("saved_screens",JSON.stringify(s));renderSaved()};
   $("saved").onclick=function(e){var k=e.target.getAttribute("data-k");if(!k)return;var s=savedList()[k];if(s){setUi(s);limit=200;render()}};
   renderSaved();render();window.__ready=true;}
-function pickFile(msg){
-  $("metaline").textContent=msg+" ";var f=$("file");f.style.display="";f.onchange=function(){var r=new FileReader();
-  r.onload=function(){try{init(JSON.parse(r.result))}catch(e){$("metaline").textContent="That file is not a desk data.json ("+e.message+")"}};r.readAsText(f.files[0])};$("metaline").appendChild(f)}
 function load(){
   var inApp=/[?&]desk=/.test(location.search);
   if(inApp){$("nav").style.display="flex";$("live").style.display="flex";
     var saved="";try{saved=sessionStorage.getItem("desk_pw")||""}catch(e){}
     $("pw").value=saved;
-    $("metaline").textContent="Enter the desk password to pull a live Unusual Whales snapshot, or choose a data.json file: ";
-    var f=$("file");f.style.display="";f.onchange=function(){var r=new FileReader();r.onload=function(){try{init(JSON.parse(r.result))}catch(e){$("metaline").textContent="That file is not a desk data.json ("+e.message+")"}};r.readAsText(f.files[0])};$("metaline").appendChild(f);
+    $("metaline").textContent="Enter the password to pull a live Unusual Whales snapshot.";
     var busy=false;
     function live(refresh){
       if(busy)return;busy=true;var t0=Date.now(),pw=$("pw").value;$("livemsg").textContent="Pulling from Unusual Whales (20-40 s)…";
@@ -155,6 +150,6 @@ function load(){
     $("pw").onkeydown=function(e){if(e.key==="Enter")live(false)};
     return}
   fetch("data.json").then(function(r){if(!r.ok)throw new Error(r.status);return r.json()}).then(init).catch(function(){
-    pickFile("Could not load data.json (opened as a local file, or not published yet). Choose the file:")})}
+    $("metaline").textContent="Could not load data.json (not published yet)."})}
 load();
 </script></body></html>

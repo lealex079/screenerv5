@@ -1,5 +1,5 @@
 """
-desk/live.py - the live Unusual Whales snapshot behind the web app's Put desk tab.
+desk/live.py - the live Unusual Whales snapshot behind the web app's Put screener tab.
 
 Gate: the DESK_PASSWORD environment variable. If it is not set the endpoint is OFF (fail closed), so deploying this code never exposes data.
 Cache: one snapshot per server instance for 20 minutes; a manual refresh is allowed at most every 90 seconds. Nothing is written to disk.

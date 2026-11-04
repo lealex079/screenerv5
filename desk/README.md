@@ -1,4 +1,4 @@
-# Put desk: UW snapshot, automated screens, filter tool
+# Put screener: UW snapshot, automated screens, filter tool
 
 Replaces the TrendScore/CrashScore + Finviz-top-250 screening path with one pipeline built on Unusual Whales (UW) option data.
 Nothing here has run against the real UW API yet. Every test used a synthetic mock (`desk/mock_uw.py`).
@@ -46,8 +46,8 @@ Dependencies: pandas, numpy, pyarrow (add pyarrow to requirements.txt if you wan
 ## Tests
 `PYTHONPATH=. python tests/test_desk.py` and `PYTHONPATH=. python tests/test_web_equiv.py`
 
-## Live mode in the web app (Put desk tab)
-`/?desk_data=1` pulls a fresh UW snapshot on the server, in memory, and the Put desk tab loads it after a password.
+## Live mode in the web app (Put screener tab)
+`/?desk_data=1` pulls a fresh UW snapshot on the server, in memory, and the Put screener tab loads it after a password.
 - Vercel environment variables: `UW_API_KEY` (already set for the app) and `DESK_PASSWORD` (new; if unset the endpoint is OFF and returns 503).
 - `vercel.json` sets `maxDuration: 60` for api/scan.py. A pull makes roughly 900-1,000 UW requests; the snapshot meta records `elapsed_s`. If it ever exceeds the plan's function limit, move the pull to the scheduled workflow.
 - One snapshot is cached per server instance for 20 minutes; Refresh is throttled to once per 90 seconds.

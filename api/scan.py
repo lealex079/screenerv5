@@ -1827,7 +1827,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <div class="header">
     <h1><span class="dot"></span> Screener v5</h1>
     <p>Three-layer validated scanner: fundamentals, trend, crash risk</p>
-    <div style="display:flex;gap:14px;margin-top:6px;font-size:13px"><a href="/" style="color:#e5e7eb;text-decoration:none;border-bottom:2px solid #4ade80;padding-bottom:3px">Ticker scan</a><a href="/?desk=1" style="color:#8b98a5;text-decoration:none">Put desk</a></div>
+    <div style="display:flex;gap:14px;margin-top:6px;font-size:13px"><a href="/" style="color:#e5e7eb;text-decoration:none;border-bottom:2px solid #4ade80;padding-bottom:3px">Ticker scan</a><a href="/?desk=1" style="color:#8b98a5;text-decoration:none">Put screener</a></div>
   </div>
   <div class="input-row">
     <div class="input-wrap">

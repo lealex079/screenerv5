@@ -3,8 +3,8 @@
   "screens": [
     {
       "id": "sean_rules",
-      "name": "Sean's rules (about 45 DTE, 16-22 delta)",
-      "description": "The rules in Sean's email: roughly 45 days out, 16 to 22 delta, no earnings before expiry, liquid, no leveraged products.",
+      "name": "Tom's rules (about 45 DTE, 16-22 delta)",
+      "description": "Tom Sosnoff's tastylive style of selling puts: about 45 days out, a lower-delta strike (16 to 22 delta here), no earnings before expiry, liquid contracts, no leveraged products. His approach also takes profit near 50% of the credit and manages around 21 days left; this screen only covers the entry.",
       "conditions": [
         {
           "col": "dte",
@@ -54,7 +54,7 @@
     {
       "id": "core_wheel",
       "name": "Core wheel (wider delta and DTE)",
-      "description": "10 to 30 delta, 14 to 45 days, no earnings, liquid. Wider than Sean's rules, so more names.",
+      "description": "10 to 30 delta, 14 to 45 days, no earnings, liquid. Wider than Tom's rules, so more names.",
       "conditions": [
         {
           "col": "dte",

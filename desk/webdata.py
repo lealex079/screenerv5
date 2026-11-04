@@ -12,7 +12,8 @@ from desk.screens import load_screens
 COLS = ["ticker", "sector", "option_symbol", "expiry", "dte", "strike", "stock_price", "bid", "ask", "credit", "delta", "iv", "iv_rank",
         "annualized_yield", "premium_yield", "otm_pct", "cushion", "breakeven", "pop_delta", "spread_pct", "open_interest", "volume",
         "marketcap", "days_to_earnings", "earnings_in_life", "crash_loss_pct", "yield_per_crash_loss", "premium_chg_1d", "triage_score",
-        "leveraged", "delta_src"]
+        "leveraged", "delta_src", "earnings_unknown", "issue_type", "industry", "rsi_14", "sma50_dist", "sma200_dist", "beta", "dividend_yield",
+        "days_to_ex_div", "ex_div_in_life", "vrp", "put_call_ratio", "iv30d", "realized_vol", "theta", "vega", "gamma"]
 
 
 def export(df, meta, out_path):
@@ -22,7 +23,7 @@ def export(df, meta, out_path):
     data = {}
     for c in cols:
         s = d[c]
-        if s.dtype == bool or c in ("leveraged", "earnings_in_life"):
+        if s.dtype == bool or c in ("leveraged", "earnings_in_life", "earnings_unknown", "ex_div_in_life"):
             data[c] = [None if pd.isna(v) else bool(v) for v in s]
         elif pd.api.types.is_numeric_dtype(s):
             data[c] = [None if (v is None or (isinstance(v, float) and not np.isfinite(v))) else round(float(v), 4) for v in s]

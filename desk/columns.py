@@ -12,6 +12,7 @@ RATE = 0.02                # same flat 2% as the research notebooks
 CRASH_DROP = 0.30          # stress scenario: the stock gaps down 30% and the put is assigned
 
 # Leveraged and inverse products and volatility ETPs. A yield-ranked list pushes these to the top, so they are excluded from the screens.
+INDEX_PRODUCTS = frozenset({"VIX", "VIXW", "SPX", "SPXW", "NDX", "NDXP", "RUT", "RUTW", "XSP", "DJX", "OEX", "XEO", "MRUT", "SPXPM"})   # cash-settled index options; the real probe's top rows were VIX puts
 LEVERAGED = frozenset("""SOXL SOXS TQQQ SQQQ UPRO SPXU SPXL SPXS TNA TZA FAS FAZ LABU LABD TECL TECS UDOW SDOW URTY SRTY NUGT DUST JNUG JDST
 YINN YANG FNGU FNGD BULZ BERZ CURE DPST NAIL WEBL WEBS TSLL TSLQ NVDL NVDQ NVDU NVDD AAPU AAPD MSFU MSFD AMZU AMZD GGLL GGLS METU METD CONL
 UVXY SVXY VXX VIXY UVIX SVIX TVIX VIXM BOIL KOLD UCO SCO ERX ERY GUSH DRIP TMF TMV TYD TYO UBT UST AGQ ZSL BITX BITI MSTU MSTZ SMCL SMCX
@@ -57,7 +58,15 @@ def add_derived(df, snapshot_date, crash_drop=CRASH_DROP, credit_from="bid"):
     d["earnings_in_life"] = ((ne >= snap) & (ne <= pd.to_datetime(d.expiry))).fillna(False)      # unknown date counts as no earnings (ETFs)
     d["crash_loss_pct"] = (np.maximum(d.strike - d.stock_price * (1 - crash_drop), 0) - d.credit).clip(lower=0) / d.strike
     d["yield_per_crash_loss"] = d.premium_yield / d.crash_loss_pct.clip(lower=0.05)               # floor keeps near-zero losses from exploding the ratio
-    d["leveraged"] = d.ticker.isin(LEVERAGED)
+    d["leveraged"] = d.ticker.isin(LEVERAGED | INDEX_PRODUCTS)
+    # a common stock with no earnings date at all is a data gap, not a safe name: screens exclude it
+    d["earnings_unknown"] = ne.isna() & (d.get("issue_type", pd.Series(index=d.index, dtype=object)) == "Common Stock")
+    for col, out in (("sma_50", "sma50_dist"), ("sma_200", "sma200_dist")):
+        d[out] = (d.stock_price / d[col] - 1) if col in d else np.nan
+    nd = pd.to_datetime(d.next_div_date, errors="coerce") if "next_div_date" in d else pd.Series(pd.NaT, index=d.index)
+    nd = nd.where(nd >= snap)                                       # UW's next_dividend_date is sometimes already in the past: treat as unknown
+    d["days_to_ex_div"] = (nd - snap).dt.days
+    d["ex_div_in_life"] = ((nd >= snap) & (nd <= pd.to_datetime(d.expiry))).fillna(False)
     return d
 
 

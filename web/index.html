@@ -32,7 +32,8 @@ select[multiple]{width:100%;height:110px}
   <h3>Sector</h3><select id="sectors" multiple></select>
   <h3>Toggles</h3>
   <div class="row"><label><input type="checkbox" id="noearn"> No earnings before expiry</label></div>
-  <div class="row"><label><input type="checkbox" id="nolev"> Exclude leveraged / inverse / vol ETPs</label></div>
+  <div class="row"><label><input type="checkbox" id="nolev"> Exclude leveraged / inverse / vol ETPs and index options</label></div>
+  <div class="row"><label><input type="checkbox" id="noexdiv"> No ex-dividend date before expiry</label></div>
   <h3>Exclude symbols</h3><input id="excl" placeholder="AAPL, TSLA" style="width:100%">
   <h3>Saved screens</h3>
   <div class="row"><input id="sname" placeholder="name" style="flex:1"><button id="save">Save</button></div>
@@ -50,10 +51,12 @@ select[multiple]{width:100%;height:110px}
 "use strict";
 var NUM=[["dte","DTE",0],["strike","Strike",2],["delta","Delta",2],["annualized_yield","Ann. yield",3],["premium_yield","Prem. yield",3],["credit","Credit",2],
  ["cushion","Cushion",3],["iv","IV",3],["iv_rank","IV rank",0],["pop_delta","POP (delta)",3],["spread_pct","Spread %",3],["open_interest","Open int.",0],["volume","Volume",0],
- ["marketcap","Mkt cap",0],["days_to_earnings","Days to earn.",0],["crash_loss_pct","30% gap loss",3],["yield_per_crash_loss","Yield / gap loss",3],["premium_chg_1d","Prem. chg 1D",3]];
+ ["marketcap","Mkt cap",0],["days_to_earnings","Days to earn.",0],["crash_loss_pct","30% gap loss",3],["yield_per_crash_loss","Yield / gap loss",3],["premium_chg_1d","Prem. chg 1D",3],
+ ["rsi_14","RSI 14",0],["sma50_dist","vs 50d SMA",3],["sma200_dist","vs 200d SMA",3],["beta","Beta",2],["dividend_yield","Div yield",3],["days_to_ex_div","Days to ex-div",0],
+ ["iv30d","IV 30d",3],["realized_vol","Realized vol",3],["vrp","Var. risk prem.",3],["put_call_ratio","Put/call",2],["theta","Theta",3],["vega","Vega",3]];
 var SHOW=[["ticker","Ticker",0],["sector","Sector",0],["expiry","Expiry",0],["dte","DTE",0],["strike","Strike",2],["delta","Delta",2],["credit","Credit",2],["annualized_yield","Ann. yield",1],
  ["cushion","Cushion",1],["iv","IV",1],["iv_rank","IVR",0],["spread_pct","Spread",1],["open_interest","OI",0],["crash_loss_pct","Gap loss",0],["yield_per_crash_loss","Yld/loss",2],["days_to_earnings","Earn d",0]];
-var PCT={annualized_yield:1,cushion:1,iv:1,spread_pct:1,crash_loss_pct:1,premium_yield:1,pop_delta:1,premium_chg_1d:1};
+var PCT={sma50_dist:1,sma200_dist:1,dividend_yield:1,iv30d:1,realized_vol:1,vrp:1,annualized_yield:1,cushion:1,iv:1,spread_pct:1,crash_loss_pct:1,premium_yield:1,pop_delta:1,premium_chg_1d:1};
 var D=null,N=0,screens=[],sortCol=null,sortDesc=true,limit=200,idx=[];
 var $=function(i){return document.getElementById(i)};
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
@@ -78,16 +81,18 @@ function uiConds(){
   var c=[];NUM.forEach(function(n){var lo=$("min_"+n[0]).value,hi=$("max_"+n[0]).value;
     if(lo!==""||hi!==""){var q={col:n[0]};if(lo!=="")q.min=+lo;if(hi!=="")q.max=+hi;c.push(q)}});
   var sel=[].slice.call($("sectors").selectedOptions).map(function(o){return o.value});if(sel.length)c.push({col:"sector",in:sel});
-  if($("noearn").checked)c.push({col:"earnings_in_life",is:false});
+  if($("noearn").checked){c.push({col:"earnings_in_life",is:false});c.push({col:"earnings_unknown",is:false})}
   if($("nolev").checked)c.push({col:"leveraged",is:false});
+  if($("noexdiv").checked)c.push({col:"ex_div_in_life",is:false});
   var ex=$("excl").value.toUpperCase().split(/[\s,]+/).filter(Boolean);if(ex.length)c.push({col:"ticker",not_in:ex});
   return c;}
 function setUi(conds){
   NUM.forEach(function(n){$("min_"+n[0]).value="";$("max_"+n[0]).value=""});
-  [].forEach.call($("sectors").options,function(o){o.selected=false});$("noearn").checked=false;$("nolev").checked=false;$("excl").value="";
+  [].forEach.call($("sectors").options,function(o){o.selected=false});$("noearn").checked=false;$("nolev").checked=false;$("noexdiv").checked=false;$("excl").value="";
   (conds||[]).forEach(function(q){
     if(q.col==="earnings_in_life"&&q.is===false)$("noearn").checked=true;
     else if(q.col==="leveraged"&&q.is===false)$("nolev").checked=true;
+    else if(q.col==="ex_div_in_life"&&q.is===false)$("noexdiv").checked=true;
     else if(q.col==="sector"&&q.in){[].forEach.call($("sectors").options,function(o){if(q.in.indexOf(o.value)>=0)o.selected=true})}
     else if(q.col==="ticker"&&q.not_in)$("excl").value=q.not_in.join(", ");
     else if($("min_"+q.col)){if("min" in q)$("min_"+q.col).value=q.min;if("max" in q)$("max_"+q.col).value=q.max}});}

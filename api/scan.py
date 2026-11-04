@@ -1826,7 +1826,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div class="app">
   <div class="header">
     <h1><span class="dot"></span> Screener v5</h1>
-    <p>Three-layer validated scanner: fundamentals, trend, crash risk</p>
     <div style="display:flex;gap:14px;margin-top:6px;font-size:13px"><a href="/" style="color:#e5e7eb;text-decoration:none;border-bottom:2px solid #4ade80;padding-bottom:3px">Ticker scan</a><a href="/?desk=1" style="color:#8b98a5;text-decoration:none">Put screener</a></div>
   </div>
   <div class="input-row">
@@ -1842,9 +1841,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <p>Enter tickers above and hit Scan</p>
       <div class="hint-tickers">Try: AAPL, NVDA, CRDO, NEXA, CSTM</div>
     </div>
-  </div>
-  <div class="footer">
-    <span>TrendScore: OLS panel regression, Petersen (2009) &middot; CrashScore: logit, rally_5d z=2.84 &middot; Valuation reconciled vs Yahoo Finance &middot; Not financial advice</span>
   </div>
 </div>
 <script>
@@ -2146,7 +2142,6 @@ async function loadUW(ticker, price) {
     } else {
       j.lines.forEach(t => box.appendChild(uwEl('div', 'uw-sub', t)));
     }
-    box.appendChild(uwEl('div', 'uw-note', 'Recorded trades only. They do not say why a trade was made and do not change the scores above.'));
     el.appendChild(box);
   } catch (e) { /* leave the panel empty */ }
 }
@@ -2751,12 +2746,8 @@ function renderConfluences(d) {
 function renderOptionsSection(d) {
   const crash = d.crash_score;
   const tk = d.ticker;
-  if (crash >= 75) {
-    return '<div class="options-section"><div class="options-header"><div class="options-title">Options</div></div>' +
-      '<div class="options-warn">CrashScore ' + crash.toFixed(0) + ' — put selling not recommended. Wait for CrashScore &lt; 60.</div></div>';
-  }
   const warn = crash >= 60
-    ? '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore ' + crash.toFixed(0) + ' — puts caution (60-74). Call selling against existing positions acceptable.</div>'
+    ? '<div class="options-warn-amber" style="margin-bottom:8px">CrashScore ' + crash.toFixed(0) + ' — puts caution. Call selling against existing positions acceptable.</div>'
     : '';
   return '<div class="options-section">' +
     '<div class="options-header">' +
